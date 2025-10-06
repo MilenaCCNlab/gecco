@@ -1,5 +1,17 @@
-from gecco.utils.extraction import build_model_spec_from_llm_output
-from gecco.core.fitting import fit_model
+
+import os, sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
+from core.fitting import fit_model
+from utils.extraction import build_model_spec_from_llm_output
+from llm.model_loader import load_llm
+from llm.prompt_builder import build_prompt
+from llm.generator import generate_model_code
+from data.io import load_data
+from config.schema import load_config
+from data.data2text import get_data2text_function
+
 
 def run_fit(df, code_text):
     # Build runtime ModelSpec from generated code
