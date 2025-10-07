@@ -35,18 +35,21 @@ def main():
         df_prompt,
         id_col=data_cfg.id_column,
         template=data_cfg.narrative_template,
-        max_trials=getattr(data_cfg, "max_trials", None),
+        max_trials=getattr(data_cfg, "max_prompt_trials", None),
+        value_mappings=getattr(data_cfg, "value_mappings", None)  # 👈 add this
     )
 
     # --- Prepare prompt builder wrapper ---
     class PromptBuilderWrapper:
-        """Light adapter so the engine can reuse the build_prompt logic."""
+        """Light adapter so the engine can reuse build_prompt without re-passing data/template."""
+
         def __init__(self, cfg, data_text):
             self.cfg = cfg
-            self.data_text = data_text
+            self._data_text = data_text  # keep the prepared narrative
 
-        def build_input_prompt(self, task_text, data_text, template_text, feedback_text=""):
-            return build_prompt(self.cfg, data_text, feedback_text=feedback_text)
+        def build_input_prompt(self, feedback_text: str = ""):
+            # only pass the stored narrative; build_prompt reads template from cfg.llm.template_model
+            return build_prompt(self.cfg, self._data_text, feedback_text=feedback_text)
 
     prompt_builder = PromptBuilderWrapper(cfg, data_text)
 

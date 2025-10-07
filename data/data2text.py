@@ -44,10 +44,52 @@ def narrative(
     return "\n\n".join(text_blocks)
 
 
-def get_data2text_function(name: str):
-    """Return the data→text conversion function specified by name."""
-    mapping = {
-        "narrative": narrative,  # now points to the dynamic version
-    }
-    # Default to "narrative" if user passes something unknown
-    return mapping.get(name, narrative)
+def get_data2text_function(name):
+    if name == "narrative":
+        def data2text(df, id_col, template, max_trials=None, value_mappings=None):
+            """
+            Convert participant trial data into a narrative string.
+            Generic across tasks — assumes only participant ID and trial rows.
+
+            Args:
+                df: pandas.DataFrame (rows = trials)
+                id_col: column name identifying participants
+                template: str, user-specified text format with placeholders (e.g., {choice}, {reward})
+                max_trials: optional int, limit number of trials per participant
+                value_mappings: optional dict[col -> mapping_dict], applied only to existing cols
+            """
+            narratives = []
+
+            for pid in df[id_col].unique():
+                sub = df[df[id_col] == pid].head(max_trials or len(df))
+                trial_lines = []
+
+                for _, row in sub.iterrows():
+                    vals = dict(row)
+
+                    # Apply user-defined mappings if provided
+                    if value_mappings:
+                        # Convert from SimpleNamespace (if needed)
+                        if not isinstance(value_mappings, dict):
+                            value_mappings = vars(value_mappings)
+
+                        for col, mapping in value_mappings.items():
+                            if not isinstance(mapping, dict):
+                                mapping = vars(mapping)
+                            if col in vals:
+                                key = str(int(vals[col])) if isinstance(vals[col], (int, float)) else str(vals[col])
+                                vals[col] = mapping.get(key, vals[col])
+
+                    try:
+                        line = template.format(**vals)
+                        trial_lines.append(line)
+                    except KeyError as e:
+                        print(f"[⚠️ GeCCo] Missing column {e} in template for participant {pid}")
+                        continue
+
+                # Join participant's trials
+                participant_text = "\n".join(trial_lines)
+                narratives.append(f"Participant {pid}:\n{participant_text}\n")
+
+            return "\n".join(narratives)
+        return data2text

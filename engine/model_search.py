@@ -22,7 +22,7 @@ class GeCCoModelSearch:
         self.best_iter = -1
 
     def run(self):
-        for it in range(self.cfg.llm.max_iterations):
+        for it in range(self.cfg.loop.max_iterations):
             print(f"\n[GeCCo] --- Iteration {it} ---")
 
             feedback = ""
@@ -35,12 +35,7 @@ class GeCCoModelSearch:
                     "but explore alternative mechanisms.\n"
                 )
 
-            prompt = self.prompt_builder.build_input_prompt(
-                task_text=self.cfg.task.description,
-                data_text=None,              # wrapper ignores these; it uses cfg + prebuilt data_text
-                template_text=None,
-                feedback_text=feedback,
-            )
+            prompt = self.prompt_builder.build_input_prompt(feedback_text=feedback)
 
             code_text = generate(self.model, self.tokenizer, prompt, self.cfg)
 
@@ -50,7 +45,7 @@ class GeCCoModelSearch:
                 if not func_code:
                     continue
                 try:
-                    fit_res = run_fit(self.df, func_code)  # returns dict
+                    fit_res = run_fit(self.df, func_code, expected_func_name=f"cognitive_model{i}")  # returns dict
                     mean_bic = float(np.mean(fit_res["bics"]))
                     print(f"[GeCCo] {func_name}: mean BIC = {mean_bic:.2f}")
 

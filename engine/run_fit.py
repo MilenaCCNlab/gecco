@@ -3,12 +3,12 @@ from utils.extraction import build_model_spec_from_llm_output
 from core.fitting import fit_model
 import numpy as np
 
-def run_fit(df, code_text):
+def run_fit(df, code_text, expected_func_name="cognitive_model"):
     """
     Compile an LLM-generated cognitive model (single def ... block),
     adapt it to df, fit it, and return fit stats.
     """
-    spec = build_model_spec_from_llm_output(code_text, expected_func_name="cognitive_model")
+    spec = build_model_spec_from_llm_output(code_text, expected_func_name=expected_func_name)
 
     print(f"\n[GeCCo] Extracted model: {spec.name}")
     print(f"[GeCCo] Parameters: {spec.param_names}")
