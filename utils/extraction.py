@@ -84,42 +84,23 @@ def _find_first_function(ns: Dict[str, Any]) -> Optional[Any]:
 # Parameter & bounds extraction
 # ============================================================
 
-def extract_parameter_names_from_unpack(code: str) -> List[str]:
+def extract_parameter_names(text):
     """
-    Parse model parameter names from unpacking lines like:
-      (alpha, beta, epsilon) = model_parameters
+    Extract parameter names from a Python code snippet where model
+    parameters are unpacked in a single assignment statement.
+    Works with indentation and arbitrary variable names (e.g. params, parameters, model_ps, etc.).
     """
-    pattern = re.compile(
-        r"[(\[]([A-Za-z0-9_,\s]+)[)\]]\s*=\s*model_parameters"
-    )
-    m = pattern.search(code)
-    if not m:
-        return []
-    raw = m.group(1)
-    params = [p.strip() for p in raw.split(",") if p.strip()]
-    return params
-
-
-def _extract_parameters_from_text(code: str) -> List[str]:
-    """Fallback for extracting parameter names directly from code."""
-    params = extract_parameter_names_from_unpack(code)
-    if params:
-        return params
-
-    # fallback: parse AST (sometimes parameters appear as model_parameters[0], etc.)
-    names = []
-    try:
-        tree = ast.parse(code)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-                if node.value.id == "model_parameters":
-                    if isinstance(node.slice, ast.Constant):
-                        idx = node.slice.value
-                        if isinstance(idx, int):
-                            names.append(f"param_{idx}")
-    except Exception:
-        pass
-    return sorted(set(names))
+    for line in text.splitlines():
+        # Strip leading/trailing whitespace to be robust to indentation
+        stripped = line.strip()
+        # Match lines like: a, b, c = something
+        match = re.match(r'^([\w\s,]+?)\s*=\s*[A-Za-z_][A-Za-z0-9_]*$', stripped)
+        if match:
+            lhs = match.group(1)
+            params = [p.strip() for p in lhs.split(',') if p.strip()]
+            if len(params) > 1:
+                return params
+    return []
 
 
 def parse_bounds_from_docstring(doc: Optional[str]) -> Dict[str, List[float]]:
@@ -199,7 +180,7 @@ def build_model_spec_from_llm_output(
     name = getattr(func, "__name__", expected_func_name)
 
     # --- Parameter names ---
-    param_names = _extract_parameters_from_text(code)
+    param_names = extract_parameter_names(code)
 
     # --- Bounds from docstring ---
     doc = func.__doc__ or ""
@@ -219,9 +200,5 @@ def build_model_spec_from_llm_output(
             for p in param_names
         }
 
-    print(f"[DEBUG] defined callables: {list(ns.keys())}")
-    print(f"[GeCCo] Extracted model: {name}")
-    print(f"[GeCCo] Parameters: {param_names}")
-    print(f"[GeCCo] Bounds: {bounds}")
 
     return ModelSpec(name=name, func=func, param_names=param_names, bounds=bounds)

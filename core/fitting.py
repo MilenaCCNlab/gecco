@@ -63,7 +63,12 @@ def fit_model(
     mids = (bb.lows + bb.highs) / 2.0
     starts = [mids] + [_random_in_bounds(bb, rng) for _ in range(max(0, n_starts - 1))]
 
+
+
+
     for x0 in starts:
+
+
         res = minimize(
             obj,
             x0=x0,
