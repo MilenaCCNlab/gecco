@@ -1,68 +1,70 @@
+# examples/two_step_demo.py
 
-import os, sys
+import os, sys, numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-
-from core.fitting import fit_model
-from utils.extraction import build_model_spec_from_llm_output
+from config.schema import load_config
+from data.io import load_data, split_by_participant
+from data.data2text import get_data2text_function
 from llm.model_loader import load_llm
 from llm.prompt_builder import build_prompt
-from llm.generator import generate_model_code
-from data.io import load_data
-from config.schema import load_config
-from data.data2text import get_data2text_function
+from engine.model_search import GeCCoModelSearch
 
 
-def run_fit(df, code_text):
-    # Build runtime ModelSpec from generated code
-    spec = build_model_spec_from_llm_output(code_text, expected_func_name="cognitive_model")
-    print(f"\n[GeCCo] Extracted model: {spec.name}")
-    print(f"[GeCCo] Parameters: {spec.param_names}")
-    print(f"[GeCCo] Bounds: {spec.bounds}")
+# -------------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------------
+directory = "/Users/milena.rmus/Desktop/gecco/"
 
-    # n_trials: pick something meaningful for BIC (e.g., total rows per participant or total rows)
-    n_trials = len(df)
 
-    # Fit
-    fit_res = fit_model(
-        nll_func=spec.func,
-        param_order=spec.param_names,
-        bounds=spec.bounds,
-        data=df,            # the model is expected to consume df
-        n_trials=n_trials,
-        n_starts=8,
-        seed=42,
-        method="L-BFGS-B",
-    )
-
-    print("\n[GeCCo] Fit result:")
-    print("  success:", fit_res.success)
-    print("  nll:", fit_res.nll)
-    print("  aic:", fit_res.aic, "bic:", fit_res.bic)
-    print("  params:", fit_res.params)
-
+# -------------------------------------------------------------------------
+# Main entrypoint
+# -------------------------------------------------------------------------
 def main():
-    cfg = load_config("gecco/config/two_step.yaml")
-    df = load_data(cfg.data.path, cfg.data.input_columns)
-    data2text = get_data2text_function(cfg.data.data2text_function)
-    data_text = data2text(df, id_column=cfg.data.id_column, template=cfg.data.narrative_template)
+    # --- Load configuration & data ---
+    cfg = load_config(f"{directory}config/two_step.yaml")
+    data_cfg = cfg.data
 
-    prompt = build_prompt(cfg, data_text)
-    print("Prompt ready. Example snippet:\n", prompt[:600], "\n---")
+    df = load_data(data_cfg.path, data_cfg.input_columns)
+    splits = split_by_participant(df, data_cfg.id_column, data_cfg.splits)
+    df_prompt, df_eval = splits["prompt"], splits["eval"]
 
-    tokenizer, model = load_llm(cfg.llm.base_model)
-    code = generate_model_code(
-        tokenizer,
-        model,
-        prompt,
-        max_tokens=cfg.llm.max_tokens,
-        temperature=cfg.llm.temperature
+    # --- Convert data to narrative text for the LLM ---
+    data2text = get_data2text_function(data_cfg.data2text_function)
+    data_text = data2text(
+        df_prompt,
+        id_col=data_cfg.id_column,
+        template=data_cfg.narrative_template,
+        max_trials=getattr(data_cfg, "max_trials", None),
     )
 
-    print("\nGenerated model code (truncated):\n", code[:800], "\n---")
+    # --- Prepare prompt builder wrapper ---
+    class PromptBuilderWrapper:
+        """Light adapter so the engine can reuse the build_prompt logic."""
+        def __init__(self, cfg, data_text):
+            self.cfg = cfg
+            self.data_text = data_text
 
-    # Extract + fit
-    run_fit(df, code)
+        def build_input_prompt(self, task_text, data_text, template_text, feedback_text=""):
+            return build_prompt(self.cfg, data_text, feedback_text=feedback_text)
 
+    prompt_builder = PromptBuilderWrapper(cfg, data_text)
+
+    # --- Load LLM ---
+    model, tokenizer = load_llm(cfg.llm.provider, cfg.llm.base_model)
+
+    # --- Run GeCCo iterative model search ---
+    search = GeCCoModelSearch(model, tokenizer, cfg, df_eval, prompt_builder)
+    best_model, best_bic, best_params = search.run()
+
+    # --- Print final results ---
+    print("\n[🏁 GeCCo] Search complete.")
+    print(f"Best model parameters: {', '.join(best_params)}")
+    print(f"Best mean BIC: {best_bic:.2f}")
+
+
+# -------------------------------------------------------------------------
+# Entrypoint
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

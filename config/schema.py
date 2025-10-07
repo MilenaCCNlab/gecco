@@ -1,6 +1,9 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 import yaml
+import pandas as pd
+from data.data2text import narrative
+from types import SimpleNamespace
 
 class TaskConfig(BaseModel):
     name: str
@@ -33,7 +36,28 @@ class GeCCoConfig(BaseModel):
     llm: LLMConfig
     evaluation: EvaluationConfig
 
-def load_config(path: str) -> GeCCoConfig:
+
+def load_data_from_config(cfg):
+    data_cfg = cfg["data"]
+    df = pd.read_csv(data_cfg["path"])
+    text_output = narrative(
+        df,
+        template=data_cfg["narrative_template"],
+        id_col=data_cfg.get("id_column", "participant"),
+    )
+    return text_output
+
+def dict_to_namespace(d):
+    """Recursively convert nested dicts into SimpleNamespace objects."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    else:
+        return d
+
+def load_config(path: str):
+    """Load YAML config and allow dot notation access."""
     with open(path, "r") as f:
-        raw = yaml.safe_load(f)
-    return GeCCoConfig(**raw)
+        cfg_dict = yaml.safe_load(f)
+    return dict_to_namespace(cfg_dict)

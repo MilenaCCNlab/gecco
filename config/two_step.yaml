@@ -1,31 +1,93 @@
+loop:
+  max_iterations: 5
+
 task:
   name: "Two-step task"
   description: |
-    A sequential decision-making task where participants make two choices per trial.
-  goal: "Infer the cognitive model that best explains participant behavior."
-  instructions: "Participants choose between two spaceships and interact with aliens for rewards."
-  extra: "Task includes both model-based and model-free influences."
+    Participants play a two-step decision task to collect as many gold coins as possible.
+    On each trial, they choose between two spaceships (A or U),
+    each probabilistically traveling to one of two planets (X or Y).
+    Planet X has aliens W and S; Planet Y has aliens P and H.
+    Once on a planet, they ask one alien for gold; different aliens return coins with varying probabilities.
+
+  goal: |
+    Your task: Propose **{models_per_iteration} new cognitive models** as Python functions:
+    {model_names}
+
+#  instructions: "Participants choose between two spaceships and interact with aliens for rewards."
 
 data:
-  path: "data/two_step_participants.csv"
-  id_column: "participant_id"
-  input_columns: ["spaceship", "planet", "alien", "reward"]
+  path: "data/two_step_data.csv"
+  id_column: "participant"
+  input_columns: ["choice_1", "state", "choice_2", "reward"]
+  max_trials: 5
   data2text_function: "narrative"
   narrative_template: |
-    The participant chose spaceship {spaceship} and ended up on the {planet} Planet.
-    The participant asked the alien {alien} and received {reward} coins.
+    The participant chose spaceship {choice_1} and ended up on the {state} Planet.
+    The participant asked the alien {choice_2} and received {reward} coins.
+  splits:
+    prompt: "first3"
+    eval: "next10"
+    test: "remainder"
 
 llm:
-  base_model: "Meta-Llama-3.1-70B-Instruct"
+  provider: "openai"
+  base_model: "gpt-5"
   temperature: 0.7
   max_tokens: 2048
+  max_output_tokens: 2048
+  reasoning_effort: "medium"
+  text_verbosity: "low"       # 👈 new field
+  api_key: null
+  system_prompt: |
+    You are a renowned cognitive scientist and expert Python programmer.
+    You will be given participant data from a two-step decision-making task.
+    Your job is to propose cognitive models, expressed as Python functions,
+    that explain how participants make their decisions over time.
+
+  models_per_iteration: 3
+  include_feedback: true             # ⬅️ whether to include feedback in later iterations
   guardrails:
-    - "Define a function named cognitive_model"
-    - "Accept task data as input arguments"
-    - "Return the negative log-likelihood"
-    - "List parameters as a Python list"
+    - "Each model must be a standalone Python function."
+    - "Function names must be `cognitive_model1`, `cognitive_model2`, etc."
+    - "Take as input: `action_1, state, action_2, reward, model_parameters`."
+    - "Return the **negative log-likelihood** of observed choices."
+    - "Use all parameters meaningfully (no unused params)."
+    - "Include a clear docstring for the model and each parameter."
+    - "Parameter bounds: [0,1] for most; [0,10] for softmax `beta` (inverse temperature)."
+
+  template_model: |
+    def cognitive_model(action_1, state, action_2, reward, model_parameters):
+        """Example model illustrating format only (do not reuse logic)."""
+        import numpy as np
+        learning_rate, beta = model_parameters
+        n_trials = len(action_1)
+
+        transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+        p_choice_1 = np.zeros(n_trials)
+        p_choice_2 = np.zeros(n_trials)
+        q_stage1_mf = np.zeros(2)
+        q_stage2_mf = np.zeros((2, 2))
+
+        for trial in range(n_trials):
+            max_q_stage2 = np.max(q_stage2_mf, axis=1)
+            q_stage1_mb = transition_matrix @ max_q_stage2
+            exp_q1 = np.exp(beta * q_stage1_mb)
+            probs_1 = exp_q1 / np.sum(exp_q1)
+            p_choice_1[trial] = probs_1[action_1[trial]]
+            state_idx = state[trial]
+            exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[action_2[trial]]
+            delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+            q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+            q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        eps = 1e-10
+        log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+        return log_loss
 
 evaluation:
   metric: "BIC"
-  fitting_method: "scipy_minimize"
-  best_model_path: "models/generated/best_model.py"
+  optimizer: "L-BFGS-B"

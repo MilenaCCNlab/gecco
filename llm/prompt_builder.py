@@ -1,24 +1,50 @@
-def build_prompt(cfg, data_text: str) -> str:
-    """Construct the full LLM prompt from config and data text."""
-    return f"""
+def build_prompt(cfg, data_text, feedback_text=None):
+    """
+    Construct the structured LLM prompt for cognitive model generation.
+    Order:
+    1. Task description
+    2. Example participant data
+    3. Modeling goal and instructions
+    4. Guardrails
+    5. Template model
+    """
+    task, llm = cfg.task, cfg.llm
+    guardrails = getattr(llm, "guardrails", [])
+    include_feedback = getattr(llm, "include_feedback", False)
+
+    # Format goal section dynamically
+    names = [f"`cognitive_model{i+1}`" for i in range(llm.models_per_iteration)]
+    goal_text = task.goal.format(
+        models_per_iteration=llm.models_per_iteration,
+        model_names=", ".join(names),
+    )
+
+    feedback_section = (
+        f"\n\n### Feedback\n{feedback_text.strip()}"
+        if (feedback_text and include_feedback)
+        else ""
+    )
+
+    # --- prompt layout ---
+    prompt = f"""
 ### Task Description
-{cfg.task.description}
+{task.name}
+{task.description.strip()}
 
-### Goal of the Task
-{cfg.task.goal}
+### Example Participant Data
+Here is example data from several participants:
+{data_text.strip()}
 
-### Task Instructions
-{cfg.task.instructions}
+### Your Task
+{goal_text.strip()}
 
-### Additional Explanations
-{cfg.task.extra}
+### Guardrails
+{chr(10).join(guardrails)}
 
-### Data
-{data_text}
+### Template Model (for reference only — do not reuse its logic)
+{llm.template_model.strip()}
 
-### Model Requirements
-Input arguments: {', '.join(cfg.data.input_columns)}
-Output: Negative log-likelihood
-Guardrails:
-{chr(10).join(cfg.llm.guardrails)}
-"""
+{feedback_section}
+""".strip()
+
+    return prompt
