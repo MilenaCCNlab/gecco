@@ -24,7 +24,7 @@ from engine.model_search import GeCCoModelSearch
 def main():
     # --- Load configuration & data ---
     project_root = Path(__file__).resolve().parents[1]
-    cfg = load_config(project_root / "config" / "two_step.yaml")
+    cfg = load_config(project_root / "config" / "decision_making.yaml")
     data_cfg = cfg.data
 
     df = load_data(data_cfg.path, data_cfg.input_columns)
