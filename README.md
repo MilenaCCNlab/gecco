@@ -28,35 +28,42 @@ Given behavioral data (e.g., from decision-making tasks), GeCCo prompts an LLM t
 
 ```text
 
+## 📁 Repository Structure
 gecco/
 ├── config/
-│   ├── schema.py             # Config loader + validation
-│   └── two_step.yaml         # Example config for two-step task
+│   ├── schema.py              # Config loader + validation
+│   └── two_step.yaml          # Example config for two-step task
 │
 ├── core/
-│   ├── evaluation.py         # AIC/BIC and related metrics
-│   ├── data_structures.py    # FitResult and ModelSpec definitions
+│   ├── evaluation.py          # AIC/BIC and related metrics
+│   ├── data_structures.py     # FitResult and ModelSpec definitions
 │   └── __init__.py
 │
 ├── engine/
-│   ├── run_fit.py            # Fits an LLM-generated model to data
-│   ├── model_search.py       # Iterative search loop for generating and evaluating models
-│   └── feedback.py           # (Optional) custom feedback logic for LLM prompts
+│   ├── run_fit.py             # Fits an LLM-generated model to data
+│   └── model_search.py        # Iterative search loop for generating and evaluating models
+│
+├── feedback.py                # (Optional) custom feedback logic for LLM prompts
 │
 ├── llm/
-│   ├── generator.py          # Handles LLM prompting and text generation
-│   └── prompt_builder.py     # Builds task- and iteration-specific prompts
+│   ├── generator.py           # Handles LLM prompting and text generation
+│   ├── prompt_builder.py      # Builds task- and iteration-specific prompts
+│   └── backends/
+│       ├── gpt_backend.py     # Interface for GPT-based models
+│       ├── llama_backend.py   # Interface for LLaMA-based models
+│       ├── r1_backend.py      # Interface for R1-style models
+│       └── qwen_backend.py    # Interface for Qwen-based models
 │
 ├── utils/
-│   ├── extraction.py         # Extracts code blocks, parameter names, and bounds from LLM output
-│   └── misc.py               # Misc. utilities (safe exec, logging, etc.)
+│   ├── extraction.py          # Extracts code blocks, parameter names, and bounds from LLM output
+│   └── misc.py                # Misc. utilities (safe exec, logging, etc.)
 │
 ├── examples/
-│   └── two_step_demo.py      # Example script showing full GeCCo workflow
+│   └── two_step_demo.py       # Example script showing full GeCCo workflow
 │
 └── results/
-    ├── models/               # Saved model definitions per iteration
-    └── bics/                 # BIC results for each model
+    ├── models/                # Saved model definitions per iteration
+    └── bics/                  # BIC results for each model
 
 ```
 ## ⚙️ Configuration
