@@ -1,4 +1,4 @@
-# 🧠 GeCCo: Generative Cognitive Model Composer
+# 🧠 GeCCo: Guided Generation of Computational Cognitive Models
 
 **Author:** [Milena Rmus](https://github.com/MilenaCCNlab)  
 **Last updated:** October 2025
