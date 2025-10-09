@@ -1,338 +1,349 @@
 def cognitive_model1(action_1, state, action_2, reward, model_parameters):
-    """Hybrid MB/MF with learned transitions, entropy-driven exploration, and eligibility.
-    Returns the negative log-likelihood of the observed choices.
+    """Hybrid MB/MF with surprise-adaptive transition learning, uncertainty-directed exploration,
+    asymmetric Stage-2 learning, eligibility trace to Stage-1 MF, perseveration, decay, and lapses.
+    Returns the negative log-likelihood (NLL) of observed choices.
 
-    Cognitive assumptions:
-    - Stage-2 (alien) values are learned model-free from rewards.
-    - The agent learns the action→state transition matrix from experience.
-    - Stage-1 decisions blend model-based (planning via learned transitions) and model-free values.
-    - An eligibility trace propagates immediate reward vs. second-stage value to the stage-1 MF value.
-    - Directed exploration at stage 1: a bonus proportional to transition uncertainty (row entropy).
-    - Perseveration (stickiness) at both stages.
+    Parameters
+    ----------
+    action_1 : array-like of int (0 or 1)
+        First-stage choices: 0 = spaceship A, 1 = spaceship U.
+    state : array-like of int (0 or 1)
+        Second-stage state reached: 0 = planet X, 1 = planet Y.
+    action_2 : array-like of int (0 or 1)
+        Second-stage choices on the planet: 0 or 1 (e.g., alien indices).
+    reward : array-like of float
+        Obtained reward on each trial (e.g., 0/1 coins).
+    model_parameters : array-like
+        All parameters are used and bounded as:
+        - alpha2_pos in [0,1]: Stage-2 learning rate for positive prediction errors.
+        - alpha2_neg in [0,1]: Stage-2 learning rate for negative prediction errors.
+        - alpha1 in [0,1]: Stage-1 model-free learning rate via eligibility trace.
+        - lam in [0,1]: Eligibility trace strength from Stage-2 to Stage-1 MF.
+        - w_mb in [0,1]: Weight of model-based relative to model-free at Stage-1.
+        - beta1 in [0,10]: Softmax inverse temperature at Stage-1.
+        - beta2 in [0,10]: Softmax inverse temperature at Stage-2.
+        - kappa in [0,1]: Perseveration (choice kernel) weight applied at both stages.
+        - alpha_T_base in [0,1]: Base learning rate for transitions (Dirichlet count update via surprise).
+        - phi_dir in [0,1]: Directed exploration bonus scale from transition uncertainty (row entropy).
+        - lapse in [0,1]: Lapse rate mixing with uniform choice.
+        - decay in [0,1]: Forgetting toward 0.5 for Q-values (both stages).
 
-    Parameters (all in [0,1] except betas in [0,10]):
-    - alpha_q: [0,1] learning rate for Q-values at both stages.
-    - alpha_t: [0,1] learning rate for the transition matrix (exponential moving average).
-    - prior_t: [0,1] convex weight toward a uniform transition prior (0.5, 0.5) when planning.
-    - w_mb:    [0,1] weight for model-based value at stage 1 (1-w_mb is MF weight).
-    - lam:     [0,1] eligibility mixing of reward vs. second-stage value for stage-1 MF update.
-    - kappa_unc1: [0,1] weight of entropy-based directed exploration bonus at stage 1.
-    - beta1:   [0,10] inverse temperature for stage-1 softmax.
-    - beta2:   [0,10] inverse temperature for stage-2 softmax.
-    - stick1:  [0,1] perseveration strength at stage 1.
-    - stick2:  [0,1] perseveration strength at stage 2.
-
-    Inputs:
-    - action_1: array-like of length n_trials, 0/1 indicating spaceship A/U chosen.
-    - state:    array-like of length n_trials, 0/1 indicating planet X/Y reached.
-    - action_2: array-like of length n_trials, 0/1 indicating alien chosen on that planet.
-    - reward:   array-like of length n_trials, 0/1 coin outcome.
-    - model_parameters: iterable with parameters in the order above.
-
-    Notes:
-    - Transition uncertainty per action is quantified by normalized entropy: H(a) in [0,1].
+    Notes
+    -----
+    - Transitions are learned via Dirichlet counts (initialized to 1's). Surprise-adaptive update:
+      effective alpha_T = alpha_T_base + (1 - T[a1, s2]) * (1 - alpha_T_base).
+    - Directed exploration: add phi_dir * H(T[a]) to Stage-1 MB action values (H = entropy of transition row).
+    - Stage-2 learning is asymmetric for positive vs negative PEs.
+    - Stage-1 MF receives eligibility-trace update from Stage-2 chosen Q.
+    - Perseveration via decaying choice kernels at both stages.
+    - Lapse mixes softmax with uniform (0.5).
     """
-    alpha_q, alpha_t, prior_t, w_mb, lam, kappa_unc1, beta1, beta2, stick1, stick2 = model_parameters
+    (alpha2_pos, alpha2_neg, alpha1, lam, w_mb,
+     beta1, beta2, kappa, alpha_T_base, phi_dir, lapse, decay) = model_parameters
 
     n_trials = len(action_1)
     eps = 1e-12
 
-    # Initialize learned transition matrix (start at uniform)
-    T_learned = np.ones((2, 2)) * 0.5
+    # Dirichlet counts and implied transition estimates
+    dir_counts = np.ones((2, 2), dtype=float)  # prior counts
+    T = dir_counts / dir_counts.sum(axis=1, keepdims=True)
 
-    # Model-free values
-    Q1_mf = np.zeros(2)          # stage-1 MF values for A/U
-    Q2_mf = np.zeros((2, 2))     # stage-2 MF values for each planet's two aliens
+    # Q-values
+    Q1_mf = np.zeros(2) + 0.5
+    Q2 = np.zeros((2, 2)) + 0.5
 
-    # Stickiness memory
-    prev_a1 = None
-    prev_a2_by_state = [None, None]
+    # Choice kernels (perseveration)
+    K1 = np.zeros(2)
+    K2 = np.zeros((2, 2))
+    kernel_decay = 0.8  # structural decay factor (kappa scales its impact on preference)
 
-    loglik = 0.0
+    p1 = np.zeros(n_trials)
+    p2 = np.zeros(n_trials)
 
     for t in range(n_trials):
-        a1 = int(action_1[t])
-        s = int(state[t])
-        a2 = int(action_2[t])
-        r = float(reward[t])
+        s2 = state[t]
 
-        # Planning with a shrinkage prior toward uniform transitions
-        T_plan = (1.0 - prior_t) * T_learned + prior_t * 0.5
+        # Model-based values via learned transitions
+        max_Q2 = np.max(Q2, axis=1)  # shape (2,)
+        Q1_mb = T @ max_Q2  # shape (2,)
 
-        # Entropy-based directed exploration bonus for each stage-1 action
-        # Normalize entropy by log(2) to map to [0,1]
-        H_rows = np.zeros(2)
-        for a in range(2):
-            row = T_plan[a]
-            row = np.clip(row, eps, 1.0)
-            H = -np.sum(row * np.log(row))
-            H_rows[a] = H / np.log(2.0)
+        # Transition uncertainty bonus: row entropy for each action
+        row_ent = -np.sum(T * (np.log(T + eps)), axis=1)  # entropy in nats
+        # Normalize entropy to [0,1] for two outcomes: max entropy = ln 2
+        row_ent_norm = row_ent / np.log(2.0)
 
-        # Model-based value via planning: expected max Q2 under T_plan
-        max_Q2 = np.max(Q2_mf, axis=1)          # shape (2,)
-        Q1_mb = T_plan @ max_Q2                 # shape (2,)
+        # Stage 1 preference
+        pref1 = w_mb * Q1_mb + (1.0 - w_mb) * Q1_mf + phi_dir * row_ent_norm + kappa * K1
+        exp1 = np.exp(beta1 * (pref1 - np.max(pref1)))
+        probs1 = exp1 / (np.sum(exp1) + eps)
+        probs1 = (1.0 - lapse) * probs1 + lapse * 0.5
 
-        # Combine MB and MF at stage 1, add uncertainty bonus
-        Q1_comb = w_mb * Q1_mb + (1.0 - w_mb) * Q1_mf + kappa_unc1 * H_rows
+        a1 = action_1[t]
+        p1[t] = probs1[a1]
 
-        # Stage-1 choice with perseveration
-        bias1 = np.zeros(2)
-        if prev_a1 is not None:
-            bias1[prev_a1] += stick1
+        # Stage 2 preference
+        pref2 = Q2[s2] + kappa * K2[s2]
+        exp2 = np.exp(beta2 * (pref2 - np.max(pref2)))
+        probs2 = exp2 / (np.sum(exp2) + eps)
+        probs2 = (1.0 - lapse) * probs2 + lapse * 0.5
 
-        logits1 = beta1 * Q1_comb + bias1
-        logits1 -= np.max(logits1)
-        p1 = np.exp(logits1)
-        p1 /= np.sum(p1)
-        loglik += np.log(p1[a1] + eps)
+        a2 = action_2[t]
+        p2[t] = probs2[a2]
 
-        # Stage-2 choice with perseveration within reached state
-        bias2 = np.zeros(2)
-        if prev_a2_by_state[s] is not None:
-            bias2[prev_a2_by_state[s]] += stick2
+        r = reward[t]
 
-        logits2 = beta2 * Q2_mf[s] + bias2
-        logits2 -= np.max(logits2)
-        p2 = np.exp(logits2)
-        p2 /= np.sum(p2)
-        loglik += np.log(p2[a2] + eps)
+        # Stage-2 update (asymmetric)
+        pe2 = r - Q2[s2, a2]
+        alpha2 = alpha2_pos if pe2 >= 0.0 else alpha2_neg
+        Q2[s2, a2] += alpha2 * pe2
 
-        # Update stage-2 MF values
-        delta2 = r - Q2_mf[s, a2]
-        Q2_mf[s, a2] += alpha_q * delta2
+        # Stage-1 MF via eligibility trace (bootstrap on immediate Stage-2 chosen value)
+        target1 = Q2[s2, a2]
+        pe1 = target1 - Q1_mf[a1]
+        Q1_mf[a1] += alpha1 * lam * pe1
 
-        # Eligibility-based update to stage-1 MF values
-        target_s1 = (1.0 - lam) * Q2_mf[s, a2] + lam * r
-        delta1 = target_s1 - Q1_mf[a1]
-        Q1_mf[a1] += alpha_q * delta1
+        # Surprise-adaptive transition learning (Dirichlet)
+        surprise = 1.0 - T[a1, s2]
+        eff_alpha_T = alpha_T_base + surprise * (1.0 - alpha_T_base)
+        # Implement via interpolation between prior counts and increment-by-one
+        # Equivalent to adding eff_alpha_T "pseudo-counts" to the observed outcome
+        dir_counts[a1, s2] = (1.0 - eff_alpha_T) * dir_counts[a1, s2] + (eff_alpha_T) * (dir_counts[a1, s2] + 1.0)
+        # Light decay for the unobserved outcome in that row to maintain normalization behavior
+        other = 1 - s2
+        dir_counts[a1, other] = (1.0 - eff_alpha_T) * dir_counts[a1, other] + (eff_alpha_T) * (dir_counts[a1, other] + 0.0)
+        # Recompute T
+        T = dir_counts / (dir_counts.sum(axis=1, keepdims=True) + eps)
 
-        # Update learned transitions via exponential moving average and renormalize
-        T_learned[a1, :] *= (1.0 - alpha_t)
-        T_learned[a1, s] += alpha_t
-        T_learned[a1, :] /= np.sum(T_learned[a1, :])
+        # Decay of Q-values toward neutral 0.5 (chosen and unchosen)
+        Q2 = (1.0 - decay) * Q2 + decay * 0.5
+        Q1_mf = (1.0 - decay) * Q1_mf + decay * 0.5
 
-        # Update stickiness memory
-        prev_a1 = a1
-        prev_a2_by_state[s] = a2
+        # Update perseveration kernels
+        K1 = kernel_decay * K1
+        K1[a1] += 1.0
 
-    return -loglik
+        K2[s2] = kernel_decay * K2[s2]
+        K2[s2, a2] += 1.0
+
+    nll = -(np.sum(np.log(p1 + eps)) + np.sum(np.log(p2 + eps)))
+    return nll
 
 
 def cognitive_model2(action_1, state, action_2, reward, model_parameters):
-    """Successor-Representation (SR) + Model-Free hybrid with asymmetric learning and lapses.
-    Returns the negative log-likelihood of the observed choices.
+    """MB/MF hybrid with miscrediting at Stage-1 (confusion), planet-specific perseveration,
+    fixed transitions, and lapses. Returns negative log-likelihood (NLL).
 
-    Cognitive assumptions:
-    - Stage-2 (alien) values are learned model-free with asymmetric learning rates for wins/losses.
-    - The agent learns a successor representation M over states for each stage-1 action.
-      Here, M[a, s] approximates the discounted expected occupancy of planet s after choosing action a.
-    - Stage-1 values are a weighted combination of SR-derived values (planning-free) and MF stage-1 values.
-    - Eligibility trace mixes immediate reward and second-stage value in the MF stage-1 update.
-    - Lapse (stimulus-independent) choice noise at both stages plus a static bias toward spaceship A.
+    Parameters
+    ----------
+    action_1 : array-like of int (0 or 1)
+        First-stage choices: 0 = spaceship A, 1 = spaceship U.
+    state : array-like of int (0 or 1)
+        Second-stage state reached: 0 = planet X, 1 = planet Y.
+    action_2 : array-like of int (0 or 1)
+        Second-stage choices on the planet: 0 or 1 (e.g., alien indices).
+    reward : array-like of float
+        Obtained reward on each trial (e.g., 0/1 coins).
+    model_parameters : array-like
+        All parameters are used and bounded as:
+        - alpha2 in [0,1]: Stage-2 learning rate for Q-values.
+        - alpha1_mf in [0,1]: Stage-1 model-free learning rate (from Stage-2 target).
+        - xi_conf in [0,1]: Miscrediting strength to the unchosen Stage-1 action.
+        - w_mb in [0,1]: Weight of model-based relative to model-free at Stage-1.
+        - beta1 in [0,10]: Softmax inverse temperature at Stage-1.
+        - beta2 in [0,10]: Softmax inverse temperature at Stage-2.
+        - kappa1 in [0,1]: Perseveration weight at Stage-1 (choice kernel).
+        - kappa2 in [0,1]: Perseveration weight at Stage-2 (planet-specific kernels).
+        - bias_first in [0,1]: Constant bias toward spaceship A (adds to its preference).
+        - lapse in [0,1]: Lapse rate mixing with uniform choice.
 
-    Parameters (all in [0,1] except betas in [0,10]):
-    - alpha_pos: [0,1] learning rate when reward=1 updates Q2 and MF Q1.
-    - alpha_neg: [0,1] learning rate when reward=0 updates Q2 and MF Q1.
-    - gamma_sr:  [0,1] discount factor for SR (controls spread beyond immediate state).
-    - lam_sr:    [0,1] eligibility mixing of reward vs. second-stage value for MF stage-1 update.
-    - w_sr:      [0,1] weight of SR value at stage 1 (1-w_sr is MF stage-1 weight).
-    - beta1:     [0,10] inverse temperature for stage-1 softmax.
-    - beta2:     [0,10] inverse temperature for stage-2 softmax.
-    - eps1:      [0,1] lapse rate at stage 1 (probability of random choice).
-    - eps2:      [0,1] lapse rate at stage 2 (probability of random choice).
-    - bias_side: [0,1] static bias toward spaceship A (action 0); applied as +/- bias in logits.
-
-    Inputs:
-    - action_1: array-like of length n_trials, 0/1 indicating spaceship A/U chosen.
-    - state:    array-like of length n_trials, 0/1 indicating planet X/Y reached.
-    - action_2: array-like of length n_trials, 0/1 indicating alien chosen on that planet.
-    - reward:   array-like of length n_trials, 0/1 coin outcome.
-    - model_parameters: iterable with parameters in the order above.
-
-    Notes:
-    - SR update uses TD(0) toward the one-step successor e_s plus discounted continuation (here terminal).
-      M[a, :] <- M[a, :] + alpha_sr * (e_s + gamma_sr*0 - M[a, :]),
-      where alpha_sr is set to the mean of alpha_pos and alpha_neg to keep parameter parsimony.
-    - Lapse implements p = (1-eps)*softmax + eps*uniform.
+    Notes
+    -----
+    - Fixed transition structure is used for planning: T = [[0.7, 0.3], [0.3, 0.7]].
+    - Miscrediting (confusion): after observing outcome, a fraction (xi_conf) of credit is
+      also applied to the unchosen Stage-1 action, modeling imperfect attribution of outcome to spaceship.
+    - Perseveration at Stage-2 is planet-specific; at Stage-1 it is global across spaceships.
     """
-    alpha_pos, alpha_neg, gamma_sr, lam_sr, w_sr, beta1, beta2, eps1, eps2, bias_side = model_parameters
+    (alpha2, alpha1_mf, xi_conf, w_mb, beta1, beta2,
+     kappa1, kappa2, bias_first, lapse) = model_parameters
 
     n_trials = len(action_1)
     eps = 1e-12
 
-    # Learning rates
-    alpha_sr = 0.5 * (alpha_pos + alpha_neg)
+    # Fixed transition matrix for MB component
+    T = np.array([[0.7, 0.3],
+                  [0.3, 0.7]], dtype=float)
 
-    # Successor representation over planets for each stage-1 action
-    M = np.zeros((2, 2))  # M[a1, s]
+    # Q-values
+    Q2 = np.zeros((2, 2)) + 0.5
+    Q1_mf = np.zeros(2) + 0.5
 
-    # Model-free values
-    Q1_mf = np.zeros(2)
-    Q2_mf = np.zeros((2, 2))
+    # Choice kernels
+    K1 = np.zeros(2)
+    K2 = np.zeros((2, 2))
+    kernel_decay = 0.8
 
-    loglik = 0.0
+    p1 = np.zeros(n_trials)
+    p2 = np.zeros(n_trials)
 
     for t in range(n_trials):
-        a1 = int(action_1[t])
-        s = int(state[t])
-        a2 = int(action_2[t])
-        r = float(reward[t])
+        s2 = state[t]
 
-        # SR-derived value: expected max second-stage value under M
-        max_Q2 = np.max(Q2_mf, axis=1)      # shape (2,)
-        Q1_sr = M @ max_Q2                  # shape (2,)
+        # Model-based values
+        max_Q2 = np.max(Q2, axis=1)
+        Q1_mb = T @ max_Q2
 
-        # Combine SR and MF for stage 1, add static side bias toward action 0
-        bias_vec = np.array([bias_side, -bias_side])
-        Q1_comb = w_sr * Q1_sr + (1.0 - w_sr) * Q1_mf
+        # Stage 1 preference with bias toward A (action 0)
+        bias_vec = np.array([bias_first, 0.0])
+        pref1 = w_mb * Q1_mb + (1.0 - w_mb) * Q1_mf + kappa1 * K1 + bias_vec
+        exp1 = np.exp(beta1 * (pref1 - np.max(pref1)))
+        probs1 = exp1 / (np.sum(exp1) + eps)
+        probs1 = (1.0 - lapse) * probs1 + lapse * 0.5
 
-        # Stage-1 choice with lapse
-        logits1 = beta1 * Q1_comb + bias_vec
-        logits1 -= np.max(logits1)
-        p1 = np.exp(logits1)
-        p1 /= np.sum(p1)
-        p1 = (1.0 - eps1) * p1 + eps1 * 0.5
-        loglik += np.log(p1[a1] + eps)
+        a1 = action_1[t]
+        p1[t] = probs1[a1]
 
-        # Stage-2 choice with lapse
-        logits2 = beta2 * Q2_mf[s]
-        logits2 -= np.max(logits2)
-        p2 = np.exp(logits2)
-        p2 /= np.sum(p2)
-        p2 = (1.0 - eps2) * p2 + eps2 * 0.5
-        loglik += np.log(p2[a2] + eps)
+        # Stage 2 preference (planet-specific perseveration)
+        pref2 = Q2[s2] + kappa2 * K2[s2]
+        exp2 = np.exp(beta2 * (pref2 - np.max(pref2)))
+        probs2 = exp2 / (np.sum(exp2) + eps)
+        probs2 = (1.0 - lapse) * probs2 + lapse * 0.5
 
-        # Asymmetric learning rate for stage-2 MF update
-        alpha_q = alpha_pos if r > 0.5 else alpha_neg
-        delta2 = r - Q2_mf[s, a2]
-        Q2_mf[s, a2] += alpha_q * delta2
+        a2 = action_2[t]
+        p2[t] = probs2[a2]
 
-        # Eligibility-based update to stage-1 MF values with asymmetry
-        target_s1 = (1.0 - lam_sr) * Q2_mf[s, a2] + lam_sr * r
-        delta1 = target_s1 - Q1_mf[a1]
-        Q1_mf[a1] += alpha_q * delta1
+        r = reward[t]
 
-        # SR TD(0) update toward one-step successor of the observed state
-        e_s = np.zeros(2)
-        e_s[s] = 1.0
-        # No continuation after reaching planet (terminal), but allow small gamma_sr to regularize
-        target_sr = e_s + gamma_sr * 0.0
-        M[a1, :] += alpha_sr * (target_sr - M[a1, :])
+        # Stage 2 Q update
+        pe2 = r - Q2[s2, a2]
+        Q2[s2, a2] += alpha2 * pe2
 
-    return -loglik
+        # Stage 1 MF update using Stage-2 chosen value as target
+        target1 = Q2[s2, a2]
+        pe1 = target1 - Q1_mf[a1]
+        Q1_mf[a1] += alpha1_mf * pe1
+
+        # Miscrediting to unchosen Stage-1 action
+        a1_alt = 1 - a1
+        pe1_alt = target1 - Q1_mf[a1_alt]
+        Q1_mf[a1_alt] += alpha1_mf * xi_conf * pe1_alt
+
+        # Update perseveration kernels
+        K1 = kernel_decay * K1
+        K1[a1] += 1.0
+
+        K2[s2] = kernel_decay * K2[s2]
+        K2[s2, a2] += 1.0
+
+    nll = -(np.sum(np.log(p1 + eps)) + np.sum(np.log(p2 + eps)))
+    return nll
 
 
 def cognitive_model3(action_1, state, action_2, reward, model_parameters):
-    """Kalman-filtered reward beliefs with fixed transition belief, directed exploration, and decaying stickiness.
-    Returns the negative log-likelihood of the observed choices.
+    """Two-step policy-gradient (REINFORCE) with dynamic inverse temperature, entropy-controlled
+    exploration, baseline for variance reduction, and lapses. Returns negative log-likelihood (NLL).
 
-    Cognitive assumptions:
-    - Reward contingencies for each alien drift over time; the agent tracks them with a (scalar) Kalman filter.
-      This yields both a mean value and an uncertainty for each alien.
-    - Stage-2 choices use softmax over mean values plus an uncertainty bonus (directed exploration).
-    - Stage-1 planning uses a fixed subjective common-transition parameter c_comm to compute MB values,
-      and also propagates an uncertainty bonus from second-stage beliefs.
-    - Perseveration kernels at both stages decay over trials (leaky stickiness).
+    Parameters
+    ----------
+    action_1 : array-like of int (0 or 1)
+        First-stage choices: 0 = spaceship A, 1 = spaceship U.
+    state : array-like of int (0 or 1)
+        Second-stage state reached: 0 = planet X, 1 = planet Y.
+    action_2 : array-like of int (0 or 1)
+        Second-stage choices on the planet: 0 or 1 (e.g., alien indices).
+    reward : array-like of float
+        Obtained reward on each trial (e.g., 0/1 coins).
+    model_parameters : array-like
+        All parameters are used and bounded as:
+        - eta1 in [0,1]: Learning rate for Stage-1 policy weights.
+        - eta2 in [0,1]: Learning rate for Stage-2 policy weights.
+        - beta0 in [0,10]: Base inverse temperature for softmax.
+        - beta_gain in [0,10]: Gain scaling of inverse temperature based on running reward rate.
+        - entropy in [0,1]: Exploration control that downscales effective inverse temperature.
+        - baseline_lr in [0,1]: Learning rate for scalar reward baseline (variance reduction).
+        - lam_pg in [0,1]: Eligibility factor scaling Stage-1 update relative to Stage-2 advantage.
+        - lapse in [0,1]: Lapse rate mixing with uniform choice at each stage.
+        - bias_first in [0,1]: Constant bias added to Stage-1 logit for spaceship A.
+        - alpha_rw in [0,1]: Learning rate for running reward average (drives beta dynamics).
 
-    Parameters (all in [0,1] except betas in [0,10]):
-    - q_vol:   [0,1] process (diffusion) variance controlling volatility of rewards.
-    - r_obs:   [0,1] observation noise variance used by the Kalman filter.
-    - c_comm:  [0,1] subjective probability of common transition (A->X, U->Y).
-    - beta1:   [0,10] inverse temperature for stage-1 softmax.
-    - beta2:   [0,10] inverse temperature for stage-2 softmax.
-    - eta1:    [0,1] weight of uncertainty bonus at stage 1 (propagated from stage 2).
-    - eta2:    [0,1] weight of uncertainty bonus at stage 2 (for chosen state's aliens).
-    - stick1:  [0,1] strength scaling the stage-1 perseveration kernel.
-    - stick2:  [0,1] strength scaling the stage-2 perseveration kernel.
-    - decay_k: [0,1] per-trial decay of the perseveration kernels (higher = faster decay).
-
-    Inputs:
-    - action_1: array-like of length n_trials, 0/1 indicating spaceship A/U chosen.
-    - state:    array-like of length n_trials, 0/1 indicating planet X/Y reached.
-    - action_2: array-like of length n_trials, 0/1 indicating alien chosen on that planet.
-    - reward:   array-like of length n_trials, 0/1 coin outcome.
-    - model_parameters: iterable with parameters in the order above.
-
-    Notes:
-    - Kalman filter (scalar per option):
-        Prior:  mu <- mu,    P <- P + q_vol
-        Gain:   K = P / (P + r_obs + eps)
-        Update: mu <- mu + K*(r - mu),   P <- (1 - K)*P
-    - Stage-1 transition belief (fixed):
-        T = [[c_comm, 1-c_comm], [1-c_comm, c_comm]] for actions A and U respectively.
-    - Uncertainty bonuses:
-        Stage 2: add eta2 * sqrt(P[s, :]) to the logits.
-        Stage 1: add eta1 * E_T[max_a (mu + eta2*sqrt(P))] under T.
-    - Perseveration kernels:
-        K1 (size 2) and K2 (size 2x2) decay each trial by (1 - decay_k), then increment at chosen entries by 1.
+    Notes
+    -----
+    - Policies are parameterized by weights (theta) per action; probabilities via softmax of scaled logits.
+    - Dynamic inverse temperature: beta_t = min(beta0 + beta_gain * running_reward, 10), then
+      beta_eff = beta_t * (1 - entropy).
+    - REINFORCE updates with advantage = r - baseline. Stage-1 update scaled by lam_pg.
+    - Lapse mixes model probabilities with uniform (0.5).
     """
-    q_vol, r_obs, c_comm, beta1, beta2, eta1, eta2, stick1, stick2, decay_k = model_parameters
+    (eta1, eta2, beta0, beta_gain, entropy,
+     baseline_lr, lam_pg, lapse, bias_first, alpha_rw) = model_parameters
 
     n_trials = len(action_1)
     eps = 1e-12
 
-    # Transition belief
-    T = np.array([[c_comm, 1.0 - c_comm],
-                  [1.0 - c_comm, c_comm]], dtype=float)
+    # Policy weights
+    theta1 = np.zeros(2)  # stage-1
+    theta2 = np.zeros((2, 2))  # stage-2 per planet
 
-    # Kalman filter states for each planet's two aliens
-    mu = np.zeros((2, 2))     # mean reward belief
-    P = np.ones((2, 2)) * 0.25  # initial uncertainty (moderate)
+    # Running averages
+    baseline = 0.0
+    run_rew = 0.0
 
-    # Perseveration kernels
-    K1 = np.zeros(2)
-    K2 = np.zeros((2, 2))
-
-    loglik = 0.0
+    p1 = np.zeros(n_trials)
+    p2 = np.zeros(n_trials)
 
     for t in range(n_trials):
-        a1 = int(action_1[t])
-        s = int(state[t])
-        a2 = int(action_2[t])
-        r = float(reward[t])
+        s2 = state[t]
 
-        # Prior diffusion for all aliens
-        P = P + q_vol
+        # Dynamic inverse temperature
+        beta_t = beta0 + beta_gain * run_rew
+        beta_t = min(max(beta_t, 0.0), 10.0)  # clamp to [0,10]
+        beta_eff = beta_t * (1.0 - entropy)
 
-        # Stage-2 values with uncertainty bonus
-        bonus2 = eta2 * np.sqrt(np.maximum(P, 0.0))
-        V2 = mu + bonus2
-
-        # Stage-1 MB value: expected max over second-stage options under T
-        max_V2 = np.max(V2, axis=1)  # shape (2,)
-        Q1_mb = T @ max_V2
-
-        # Add stage-1 uncertainty bonus propagated from stage 2:
-        # Use the expected max uncertainty term under T as additional directed exploration
-        max_bonus2 = np.max(bonus2, axis=1)
-        Q1_bonus = T @ max_bonus2
-        Q1 = Q1_mb + eta1 * Q1_bonus
-
-        # Stage-1 softmax with decaying perseveration kernel
-        K1 *= (1.0 - decay_k)
-        logits1 = beta1 * Q1 + stick1 * K1
+        # Stage 1 probabilities (include fixed bias toward action 0)
+        logits1 = beta_eff * (theta1 + np.array([bias_first, 0.0]))
         logits1 -= np.max(logits1)
-        p1 = np.exp(logits1)
-        p1 /= np.sum(p1)
-        loglik += np.log(p1[a1] + eps)
+        exp1 = np.exp(logits1)
+        probs1 = exp1 / (np.sum(exp1) + eps)
+        probs1 = (1.0 - lapse) * probs1 + lapse * 0.5
 
-        # Stage-2 softmax with decaying perseveration kernel
-        K2 *= (1.0 - decay_k)
-        logits2 = beta2 * V2[s] + stick2 * K2[s]
+        a1 = action_1[t]
+        p1[t] = probs1[a1]
+
+        # Stage 2 probabilities
+        logits2 = beta_eff * theta2[s2]
         logits2 -= np.max(logits2)
-        p2 = np.exp(logits2)
-        p2 /= np.sum(p2)
-        loglik += np.log(p2[a2] + eps)
+        exp2 = np.exp(logits2)
+        probs2 = exp2 / (np.sum(exp2) + eps)
+        probs2 = (1.0 - lapse) * probs2 + lapse * 0.5
 
-        # Update perseveration kernels with the chosen actions
-        K1[a1] += 1.0
-        K2[s, a2] += 1.0
+        a2 = action_2[t]
+        p2[t] = probs2[a2]
 
-        # Kalman filter update for the observed alien only
-        # Observation variance
-        S = P[s, a2] + r_obs + eps
-        K_gain = P[s, a2] / S
-        mu[s, a2] = mu[s, a2] + K_gain * (r - mu[s, a2])
-        P[s, a2] = (1.0 - K_gain) * P[s, a2]
+        r = reward[t]
 
-    return -loglik
+        # Advantage (variance-reduced REINFORCE)
+        adv = r - baseline
+
+        # Policy gradient updates (using pre-lapse model probs for gradient; lapse only affects likelihood)
+        # Recompute non-lapse probabilities for gradient calculation
+        base_probs1 = exp1 / (np.sum(exp1) + eps)
+        base_probs2 = exp2 / (np.sum(exp2) + eps)
+
+        # Gradients of log-softmax: onehot - probs
+        g1 = np.array([0.0, 0.0])
+        g1[a1] = 1.0
+        g1 -= base_probs1
+
+        g2 = np.array([0.0, 0.0])
+        g2[a2] = 1.0
+        g2 -= base_probs2
+
+        # Updates scaled by effective temperature (absorbed in logits already) and learning rates
+        theta1 += eta1 * lam_pg * adv * g1
+        theta2[s2] += eta2 * adv * g2
+
+        # Update baseline and running reward average
+        baseline += baseline_lr * (r - baseline)
+        run_rew += alpha_rw * (r - run_rew)
+
+    nll = -(np.sum(np.log(p1 + eps)) + np.sum(np.log(p2 + eps)))
+    return nll

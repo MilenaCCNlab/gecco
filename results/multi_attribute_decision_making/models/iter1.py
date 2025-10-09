@@ -1,234 +1,243 @@
 def cognitive_model1(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Attentive blend of compensatory and max-heuristic with validity interpolation and lapse.
+    """Lexicographic-stopping mixture: random single-cue vs. compensatory integration.
 
-    Core idea:
-    - Each cue contributes a signed signal (+1 if B=1 & A=0; -1 if A=1 & B=0; 0 otherwise).
-    - A per-cue attention parameter scales whether that cue is effectively used.
-    - Cue weights interpolate between equal-weight and stated validities via validity_weight.
-    - The final evidence blends a compensatory sum and a noncompensatory max rule via alpha.
-    - Evidence is mapped to P(choose B) through a logistic with inverse temperature, with lapse.
+    Rationale:
+    - On each trial, with probability stop_prob the decision-maker inspects only a single cue
+      (sampled from an attention distribution over cue ranks) and decides based on that cue.
+    - Otherwise, they integrate all cues compensatorily with attention-modulated, validity-scaled weights.
+    - A trust parameter compresses/expands the given validities (0.9, 0.8, 0.7, 0.6).
+    - A response bias toward B shifts the decision in logit space.
+    - Choices are passed through a logistic with inverse temperature, and a lapse rate mixes in random choice.
 
-    Parameters (bounds):
-    - attn1 in [0,1]: Attention probability/strength for cue 1 (validity 0.9).
-    - attn2 in [0,1]: Attention probability/strength for cue 2 (validity 0.8).
-    - attn3 in [0,1]: Attention probability/strength for cue 3 (validity 0.7).
-    - attn4 in [0,1]: Attention probability/strength for cue 4 (validity 0.6).
-    - validity_weight in [0,1]: Interpolates between equal cue weights (0) and stated validities (1).
-    - alpha in [0,1]: Blend between compensatory sum (0) and max-heuristic (1).
-    - temperature in [0,10]: Inverse temperature for the logistic choice rule.
-    - lapse in [0,1]: Lapse (random choice) probability mixed with the model’s prediction.
+    Parameters (all used):
+    - att1: [0,1] attention propensity for cue 1 (most valid; influences both single-cue and compensatory weights)
+    - att2: [0,1] attention propensity for cue 2
+    - att3: [0,1] attention propensity for cue 3
+    - att4: [0,1] attention propensity for cue 4 (least valid)
+    - trust: [0,1] compress/expand validities; effective v' = 0.5 + (v - 0.5)^(trust + 1e-6)
+             (smaller -> more extreme weighting of validities; larger -> more linear)
+    - stop_prob: [0,1] probability of using a single, attended cue instead of full integration
+    - biasB: [0,1] response bias toward choosing B (0.5 = unbiased; >0.5 favors B)
+    - temperature: [0,10] inverse softmax temperature; higher -> more deterministic mapping from evidence to choice
+    - lapse: [0,1] probability of random (uniform) lapse on each trial
+
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
+    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
+    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
 
     Returns:
-    - Negative log-likelihood of the observed choices (decisions: 1 = choose B, 0 = choose A).
+    - negative log-likelihood of the observed decisions under the model
     """
-    attn1, attn2, attn3, attn4, validity_weight, alpha, temperature, lapse = parameters
-
-    # Inputs to arrays
-    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
-    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(int)
+    att1, att2, att3, att4, trust, stop_prob, biasB, temperature, lapse = parameters
 
     validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    # Trust-modulated validities: power around 0.5
+    eps = 1e-8
+    v_eff = 0.5 + np.power(validities - 0.5, trust + eps)
 
-    # Interpolate between equal weights (1.0) and stated validities
-    v_eff = (1.0 - validity_weight) * 1.0 + validity_weight * validities
+    # Attention propensities to probabilities
+    att = np.array([att1, att2, att3, att4], dtype=float) + eps
+    att = att / np.sum(att)
 
-    # Attention-scaled effective weights
-    attn = np.array([attn1, attn2, attn3, attn4], dtype=float)
-    w = attn * v_eff  # per-cue weight
+    # Trial-wise differences per cue (positive favors B)
+    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
+    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
+    D = B - A  # shape (n_trials, 4); entries in {-1,0,1}
 
-    # Signed discrimination per trial and cue: +1 if B>A, -1 if A>B, 0 otherwise
-    disc = (B > A).astype(float) - (A > B).astype(float)  # shape (n_trials, 4)
+    # Single-cue route: expected evidence is the attention-weighted signed difference times validity
+    # Only discriminating cues contribute (nonzero D)
+    single_cue_evidence = np.sum(att[None, :] * v_eff[None, :] * D, axis=1)
 
-    # Compensatory sum component
-    sum_component = np.dot(disc, w)  # shape (n_trials,)
+    # Compensatory route: attention-weighted, trust-modulated validity weights
+    w_comp = att * v_eff
+    w_comp = w_comp / (np.sum(w_comp) + eps)
+    compensatory_evidence = np.dot(D, w_comp)
 
-    # Max-heuristic component (take the strongest single-cue push)
-    # Note: max over signed weighted discriminations across cues
-    weighted_disc = disc * w[None, :]
-    max_component = np.max(weighted_disc, axis=1)
+    # Mixture of routes
+    delta = stop_prob * single_cue_evidence + (1.0 - stop_prob) * compensatory_evidence
 
-    # Blend
-    evidence = (1.0 - alpha) * sum_component + alpha * max_component
+    # Add bias in logit space
+    bias_shift = (biasB - 0.5) * 2.0  # in [-1,1]
 
-    # Choice rule with lapse
-    dv = np.clip(temperature, 0.0, 10.0) * evidence
-    pB = 1.0 / (1.0 + np.exp(-np.clip(dv, -700, 700)))
-    pB = lapse * 0.5 + (1.0 - lapse) * pB
+    logits = temperature * delta + bias_shift
+    pB = 1.0 / (1.0 + np.exp(-logits))
+
+    # Lapse
+    pB = (1.0 - lapse) * pB + lapse * 0.5
 
     # Negative log-likelihood
-    eps = 1e-12
-    pB = np.clip(pB, eps, 1.0 - eps)
-    ll = decisions * np.log(pB) + (1 - decisions) * np.log(1 - pB)
-    return -np.sum(ll)
+    decisions = np.asarray(decisions).astype(float)
+    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
+    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
+    return nll
 
 
 def cognitive_model2(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Bayesian evidence accumulation with prior, consistency gain, redundancy suppression, and lapse.
+    """Asymmetric gain–loss integration with attentional gradient and zero-penalty reference.
 
-    Core idea:
-    - Each cue produces a log-likelihood ratio (LLR) favoring B versus A based on cue validity.
-    - Validities are softened toward 0.5 using validity_scale to capture imperfect trust.
-    - Cues are processed from highest to lowest validity; their LLR contributions are attenuated by:
-        • noise (reduces all cue impact),
-        • redundancy_suppression (downweights later discriminating cues),
-        • consistency_gain (amplifies cues consistent with current cumulative belief, attenuates inconsistent).
-    - A prior bias contributes an initial log-odds favoring either A or B.
-    - The final cumulative LLR is mapped to choice with a logistic temperature and lapse.
+    Rationale:
+    - Each cue comparison is treated as a gain (+) for B if B=1 and A=0, or a loss (-) if B=0 and A=1.
+    - Losses are over-weighted by a loss-aversion parameter.
+    - Cue weights combine stated validities transformed by a nonlinearity and an attentional gradient
+      across ranks (emphasize earlier or later cues).
+    - A "reference sensitivity" penalizes options with more zeros (interpreting 0 as a shortfall).
+    - Response bias, logistic temperature, and lapse complete the choice rule.
 
-    Parameters (bounds):
-    - prior_strength in [0,1]: Prior bias toward B (>0.5) or A (<0.5); mapped to prior log-odds with data-scaled magnitude.
-    - noise in [0,1]: Global attenuation of cue information (1 = no information, 0 = full information).
-    - consistency_gain in [0,1]: Degree to boost cues that agree with current cumulated sign (and damp disagreeing cues).
-    - redundancy_suppression in [0,1]: Geometric down-weighting for later discriminating cues.
-    - validity_scale in [0,1]: Interpolates cue reliability between 0.5 (uninformative) and stated validity.
-    - temperature in [0,10]: Inverse temperature for the logistic choice rule.
-    - lapse in [0,1]: Lapse (random choice) probability.
+    Parameters (all used):
+    - alpha: [0,1] nonlinearity on validity; eff v_k = 0.5 + (v_k - 0.5)^(alpha + 1e-6)
+              (smaller alpha -> stronger separation of high vs. low validities)
+    - grad: [0,1] attentional gradient; ratio r = 0.5 + grad in [0.5, 1.5]; weight multiplier r^(rank-1)
+            (grad < 0.5 emphasizes earlier cues; >0.5 emphasizes later cues)
+    - loss_aversion: [0,1] transforms to lambda = 1 + loss_aversion in [1,2] (extra weight on losses)
+    - ref_sensitivity: [0,1] penalty strength for zeros in B relative to A (reference-based shortfall)
+    - biasB: [0,1] response bias toward B (0.5 = none; >0.5 favors B)
+    - temperature: [0,10] inverse softmax temperature; higher -> more deterministic
+    - lapse: [0,1] probability of random (uniform) lapse
+
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
+    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
+    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
 
     Returns:
-    - Negative log-likelihood of the observed choices (decisions: 1 = choose B, 0 = choose A).
+    - negative log-likelihood of the observed decisions under the model
     """
-    prior_strength, noise, consistency_gain, redundancy_suppression, validity_scale, temperature, lapse = parameters
+    alpha, grad, loss_aversion, ref_sensitivity, biasB, temperature, lapse = parameters
 
-    # Prepare arrays
+    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    eps = 1e-8
+
+    # Validity nonlinearity
+    v_eff = 0.5 + np.power(validities - 0.5, alpha + eps)
+
+    # Attentional gradient across ranks (rank order: 1..4 = most to least valid)
+    r = 0.5 + grad  # in [0.5, 1.5]
+    ranks = np.array([0, 1, 2, 3], dtype=float)
+    g = np.power(r, ranks)
+
+    # Combine into normalized weights
+    w = v_eff * g
+    w = w / (np.sum(w) + eps)
+
+    # Trial arrays
     A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
     B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(int)
 
-    # Fixed cue validities (descending)
-    base_v = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
-    # Soften toward 0.5
-    v_eff = (1.0 - validity_scale) * 0.5 + validity_scale * base_v
-    # Convert to LLR magnitude per cue
-    # Avoid division by zero by clipping away from 0 and 1.
-    v_eff = np.clip(v_eff, 1e-6, 1 - 1e-6)
-    lambda_i = np.log(v_eff / (1.0 - v_eff))  # shape (4,)
+    # Gain-loss coding per cue for B relative to A
+    # gain_k = 1 if (B=1, A=0), loss_k = 1 if (B=0, A=1)
+    gain = np.clip(B - A, 0.0, 1.0)  # 1 where B=1 & A=0
+    loss = np.clip(A - B, 0.0, 1.0)  # 1 where B=0 & A=1
 
-    n_trials = A.shape[0]
-    evidence = np.zeros(n_trials, dtype=float)
+    lam = 1.0 + loss_aversion  # in [1,2]
+    cue_contrib = np.dot(gain - lam * loss, w)  # positive favors B
 
-    # Discriminations per trial and cue: +1 (B>A), -1 (A>B), 0 (tie)
-    disc = (B > A).astype(float) - (A > B).astype(float)  # (n_trials, 4)
+    # Reference (zero) penalty: penalize B for having more zeros than A
+    zeros_A = np.sum(1.0 - A, axis=1)
+    zeros_B = np.sum(1.0 - B, axis=1)
+    ref_term = ref_sensitivity * (zeros_A - zeros_B)  # positive favors B if A has more zeros
 
-    # Process cues in fixed validity order: indices [0,1,2,3]
-    order = np.array([0, 1, 2, 3], dtype=int)
+    delta = cue_contrib + ref_term
 
-    # Prior log-odds: scale by potential signal magnitude of the trial to keep comparable units.
-    # Trial-specific scale C = sum |lambda_i| over all cues (constant across trials here).
-    C = np.sum(np.abs(lambda_i))
-    prior_logodds = (prior_strength - 0.5) * C  # positive favors B, negative favors A
+    # Bias and logistic mapping
+    bias_shift = (biasB - 0.5) * 2.0
+    logits = temperature * delta + bias_shift
+    pB = 1.0 / (1.0 + np.exp(-logits))
 
-    for t in range(n_trials):
-        cum = prior_logodds
-        seen_disc = 0  # number of discriminating cues encountered so far
-        for idx in order:
-            d = disc[t, idx]
-            if d == 0.0:
-                # No information from a tie on this cue
-                continue
-            # Base weight reduced by noise and redundancy (for later discriminating cues)
-            w = (1.0 - noise) * ((1.0 - redundancy_suppression) ** seen_disc)
+    # Lapse
+    pB = (1.0 - lapse) * pB + lapse * 0.5
 
-            # Consistency modulation relative to current cumulative evidence
-            if cum == 0:
-                mod = 1.0
-            else:
-                sign_cum = 1.0 if cum > 0 else -1.0
-                if np.sign(d) == sign_cum:
-                    mod = 1.0 + consistency_gain
-                else:
-                    mod = 1.0 - consistency_gain
-
-            cum += d * lambda_i[idx] * w * mod
-            seen_disc += 1
-
-        evidence[t] = cum
-
-    # Choice rule with lapse
-    dv = np.clip(temperature, 0.0, 10.0) * evidence
-    pB = 1.0 / (1.0 + np.exp(-np.clip(dv, -700, 700)))
-    pB = lapse * 0.5 + (1.0 - lapse) * pB
-
-    eps = 1e-12
-    pB = np.clip(pB, eps, 1.0 - eps)
-    ll = decisions * np.log(pB) + (1 - decisions) * np.log(1 - pB)
-    return -np.sum(ll)
+    decisions = np.asarray(decisions).astype(float)
+    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
+    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
+    return nll
 
 
 def cognitive_model3(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Context-dependent attention with inhibition, nonlinear sensitivity, and side bias.
+    """Random-attention single-cue choice with calibrated cue reliability.
 
-    Core idea:
-    - Two weight pools: high-validity cues (1–2) share weight high_w; low-validity cues (3–4) share weight low_w.
-    - Trial-wise attention gain depends on sparsity of discriminating cues (fewer discriminations → stronger gain).
-    - Cross-cue inhibition reduces effective signal as more cues discriminate (divisive normalization).
-    - A nonlinear power transform captures diminishing sensitivity to aggregated evidence.
-    - A side_bias tilts decisions toward B (>0.5) or A (<0.5), independent of evidence strength.
-    - Logistic choice with inverse temperature, plus lapse.
+    Rationale:
+    - On each trial, the decision-maker attends a single cue drawn from an attention distribution
+      over the four ranks and decides based on that cue alone.
+    - The discriminability contributed by the attended cue depends on a calibration of its stated validity.
+    - If the attended cue does not discriminate (A_k == B_k), the decision reduces to the bias/noise rule.
+    - A response bias toward B shifts the logit; temperature controls determinism; lapse mixes in random choice.
 
-    Parameters (bounds):
-    - high_w in [0,1]: Base weight for cues 1–2 (higher validity).
-    - low_w in [0,1]: Base weight for cues 3–4 (lower validity).
-    - inhibition in [0,1]: Divisive normalization factor based on number of discriminating cues.
-    - sparsity_gain in [0,1]: Strength of attention amplification when few cues discriminate.
-    - power in [0,1]: Nonlinear sensitivity exponent applied to aggregated evidence magnitude.
-    - side_bias in [0,1]: Bias toward B (>0.5) or A (<0.5), added as signed shift in evidence.
-    - temperature in [0,10]: Inverse temperature for the logistic choice rule.
-    - lapse in [0,1]: Lapse (random choice) probability.
+    Parameters (all used):
+    - q1: [0,1] attention propensity for cue 1 (most valid)
+    - q2: [0,1] attention propensity for cue 2
+    - q3: [0,1] attention propensity for cue 3
+    - q4: [0,1] attention propensity for cue 4 (least valid)
+    - calib: [0,1] validity calibration; strength s_k = ((v_k - 0.5) / 0.5)^(calib + 1e-6)
+             (smaller -> more extreme reliance on higher validities)
+    - biasB: [0,1] response bias toward B (0.5 = none; >0.5 favors B)
+    - temperature: [0,10] inverse softmax temperature for the single-cue logistic choice
+    - lapse: [0,1] probability of random (uniform) lapse
+
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
+    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
+    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
 
     Returns:
-    - Negative log-likelihood of the observed choices (decisions: 1 = choose B, 0 = choose A).
+    - negative log-likelihood of the observed decisions under the model
     """
-    high_w, low_w, inhibition, sparsity_gain, power, side_bias, temperature, lapse = parameters
+    q1, q2, q3, q4, calib, biasB, temperature, lapse = parameters
 
-    # Prepare arrays
+    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    eps = 1e-8
+
+    # Attention distribution over cues
+    q = np.array([q1, q2, q3, q4], dtype=float) + eps
+    att = q / np.sum(q)
+
+    # Calibrated discriminability per cue (scaled around 0)
+    # base strength in (0,1]: (v-0.5)/0.5 in (0,1); raise to calib -> in (0,1]
+    base = (validities - 0.5) / 0.5
+    strength = np.power(base, calib + eps)  # higher for more valid cues; in (0,1]
+
+    # Data arrays
     A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
     B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(int)
+    D = B - A  # in {-1,0,1}
 
-    # Signed discrimination and discriminating-cue indicator
-    disc = (B > A).astype(float) - (A > B).astype(float)  # +1, -1, or 0
-    discrim = (B != A).astype(float)  # 1 if discriminating, else 0
+    # For each trial, compute the attention-weighted probability of choosing B
+    # given potentially non-discriminating attended cues.
+    bias_shift = (biasB - 0.5) * 2.0  # in [-1,1]
 
-    # Base weights per cue (two pools)
-    w = np.array([high_w, high_w, low_w, low_w], dtype=float)
+    # Precompute per-cue logits for d in {-1,0,1}
+    # If non-discriminating (d=0), only bias applies.
+    # If discriminating, contribution is +/- strength_k depending on sign.
+    logits_pos = temperature * (strength + 0.0) + bias_shift        # when D=+1
+    logits_neg = temperature * (-strength + 0.0) + bias_shift       # when D=-1
+    logits_zero = np.full(4, bias_shift, dtype=float)               # when D=0
 
-    # Trial-level computations
-    n_trials = A.shape[0]
-    evidence = np.zeros(n_trials, dtype=float)
+    pB_pos = 1.0 / (1.0 + np.exp(-logits_pos))
+    pB_neg = 1.0 / (1.0 + np.exp(-logits_neg))
+    pB_zero = 1.0 / (1.0 + np.exp(-logits_zero))
 
-    # Bias term scaled by overall weight scale (keeps bias comparable across settings)
-    weight_scale = np.sum(w)
-    bias_term = (side_bias - 0.5) * max(weight_scale, 1e-6)
+    # Map each trial's D to per-cue pB and average under attention
+    # Build masks
+    D_pos = (D > 0).astype(float)
+    D_neg = (D < 0).astype(float)
+    D_zero = (D == 0).astype(float)
 
-    for t in range(n_trials):
-        d = disc[t, :]
-        r = discrim[t, :]
-        # Sparsity: fraction of discriminating cues
-        sparsity = 1.0 - (np.sum(r) / 4.0)  # 1 when no cues discriminate; 0 when all do
-        # Attention amplification with sparsity
-        attn_factor = (1.0 - sparsity_gain) + sparsity_gain * (1.0 * sparsity)
-        # Aggregate raw signal
-        raw_sum = np.sum((w * attn_factor) * d)
-        # Divisive normalization by number of discriminating cues
-        denom = 1.0 + inhibition * np.sum(r)
-        adj = raw_sum / denom
-        # Nonlinear sensitivity (power on magnitude)
-        pe = max(power, 1e-6)
-        nonlin = np.sign(adj) * (np.abs(adj) ** pe)
-        # Add side bias
-        evidence[t] = nonlin + bias_term
+    # Attention-weighted mixture per trial
+    # pB_trial = sum_k att_k * pB_k(D_k)
+    pB = (
+        np.dot(D_pos, att * pB_pos) +
+        np.dot(D_neg, att * pB_neg) +
+        np.dot(D_zero, att * pB_zero)
+    )
 
-    # Choice rule with lapse
-    dv = np.clip(temperature, 0.0, 10.0) * evidence
-    pB = 1.0 / (1.0 + np.exp(-np.clip(dv, -700, 700)))
-    pB = lapse * 0.5 + (1.0 - lapse) * pB
+    # Lapse
+    pB = (1.0 - lapse) * pB + lapse * 0.5
 
     # Negative log-likelihood
-    eps = 1e-12
-    pB = np.clip(pB, eps, 1.0 - eps)
-    ll = decisions * np.log(pB) + (1 - decisions) * np.log(1 - pB)
-    return -np.sum(ll)
+    decisions = np.asarray(decisions).astype(float)
+    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
+    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
+    return nll

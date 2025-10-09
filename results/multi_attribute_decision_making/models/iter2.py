@@ -1,220 +1,284 @@
 def cognitive_model1(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Probabilistic serial/lexicographic integration with geometric decay, gating, and bias.
-
-    Core idea:
-    - Cues are prioritized by a preference for stated validities vs. equal weighting (focus).
-    - Earlier (higher-priority) cues get geometrically larger influence (serial_decay).
-    - Per-cue discriminability is “compressed” toward chance by cue_confidence (mistrust of cue validities).
-    - Evidence blends a noncompensatory max component and a compensatory sum (gate).
-    - A baseline side bias toward B is included (bias_B).
-    - Evidence is mapped to choice via a logistic with inverse temperature and lapse.
-
-    Parameters (bounds):
-    - serial_decay in [0,1]: Geometric decay per rank position (0 = only top cue matters; 1 = no decay).
-    - focus in [0,1]: Interpolation between equal cue priority (0) and stated validities (1) for ranking/priority.
-    - cue_confidence in [0,1]: Shrinks cue validities toward 0.5; 0 = ignore validity (treat as 0.5), 1 = trust stated validities.
-    - gate in [0,1]: Blend between compensatory sum (0) and relying on the single most weighted cue (1).
-    - bias_B in [0,1]: Baseline bias toward choosing B (0.5 = no bias); mapped to [-1,1] in evidence space.
-    - temperature in [0,10]: Inverse temperature for the logistic choice rule.
-    - lapse in [0,1]: Lapse (random choice) probability mixed with the model’s prediction.
-
+    """Stochastic take-the-best with noisy cue inspection, probabilistic stopping, response inertia, and lapses.
+    
+    Mechanism:
+    - On each trial, the model inspects cues one-by-one until a discriminating cue is found.
+    - The next cue to inspect is chosen stochastically with a bias toward higher-validity cues.
+    - When a discriminating cue is found, the model stops with probability theta; otherwise it continues to search.
+    - Cue observations are noisy: with probability eta, a cue's comparative sign is flipped.
+    - The signed advantage from the last discriminating cue drives choice via a logistic with inverse temperature.
+    - A response-inertia term pulls choice probability toward the previous observed decision.
+    - A lapse rate mixes the model probability with uniform random choice.
+    
+    Parameters (all used):
+    - p_high: [0,1] probability of choosing the highest-validity remaining cue on each inspection (vs uniform among remaining)
+    - theta:  [0,1] stopping probability upon encountering a discriminating cue (theta=1 -> pure take-the-best)
+    - eta:    [0,1] perceptual noise; probability that the sign of a discriminating cue is flipped
+    - inertia:[0,1] response inertia; weight placed on repeating the previous choice (0 = none, 1 = full stickiness)
+    - epsilon:[0,1] lapse probability; mixes with random choice
+    - temperature: [0,10] inverse temperature; scales the impact of the final discriminating cue on choice
+    
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
+    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
+    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
+    
     Returns:
-    - Negative log-likelihood of observed choices (decisions: 1 = choose B, 0 = choose A).
+    - negative log-likelihood of the observed decisions under the model
     """
-    serial_decay, focus, cue_confidence, gate, bias_B, temperature, lapse = parameters
-
-    # Assemble matrices
-    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
-    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(int)
-
-    n_trials = A.shape[0]
+    p_high, theta, eta, inertia, epsilon, temperature = parameters
     validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
 
-    # Priority scores interpolate between equal (1.0) and actual validities
-    priority_scores = (1.0 - focus) * 1.0 + focus * validities
+    # Precompute arrays
+    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
+    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
+    # Signed comparative evidence per cue: +1 favors B, -1 favors A, 0 tie
+    sign = np.sign(B - A)
 
-    # Create rank positions (higher priority gets lower rank index)
-    # Ties cannot occur given monotonic validities; still handle generally
-    rank_order = np.argsort(-priority_scores)  # indices sorted by descending priority
-    ranks = np.empty_like(rank_order)
-    ranks[rank_order] = np.arange(len(validities))  # 0,1,2,3 according to priority
+    n_trials = len(decisions)
+    decisions = np.asarray(decisions).astype(float)
+    prev_choice = 0.5  # neutral for the very first trial
 
-    # Geometric serial discount by rank: weight per cue position
-    serial_weights = (serial_decay ** ranks).astype(float)
+    nll = 0.0
+    for t in range(n_trials):
+        s = sign[t].copy()
+        # If all cues tie, fallback to 0 net evidence
+        if np.all(s == 0):
+            final_ev = 0.0
+        else:
+            # Maintain a mask of remaining cues to inspect
+            remaining = np.ones(4, dtype=bool)
+            final_ev = 0.0  # signed evidence from last discriminating cue found
+            # We compute the expected signed evidence under the stochastic inspection policy.
+            # To avoid stochastic simulation, we analytically compute the expected contribution
+            # of the first discriminating cue encountered under the policy and stopping rule.
+            # We approximate by iterating up to 4 inspections and aggregating probabilities.
+            # At each step: choose a cue index according to p_high policy among remaining cues.
+            # If discriminating, with prob theta we stop and take its (noisy) sign; otherwise continue.
+            rem_valid = validities.copy()
+            rem_s = s.copy()
 
-    # Perceived cue validity (compress toward 0.5 by cue_confidence)
-    perceived_validity = 0.5 + cue_confidence * (validities - 0.5)
+            # Keep track of probability mass that we reach each step
+            mass_continue = 1.0
+            expected_ev = 0.0
 
-    # Signed cue signal (+1 if B> A, -1 if A>B, 0 otherwise)
-    disc = (B > A).astype(float) - (A > B).astype(float)  # shape (n_trials,4)
+            # Work on copies for index selection each step
+            rem_idx = np.arange(4)
 
-    # Per-cue weights combine serial priority and perceived validity
-    w = serial_weights * (2.0 * perceived_validity - 1.0)  # map validity in [0.5,1] to [0,1]
+            for step in range(4):
+                # If no remaining cues, break
+                if not np.any(remaining):
+                    break
 
-    # Compensatory sum component
-    sum_component = np.dot(disc, w)
+                # Get current remaining indices
+                idxs = rem_idx[remaining[rem_idx]]
+                vals = rem_valid[idxs]
+                signs = rem_s[idxs]
 
-    # Noncompensatory max component (most weighted discriminating cue)
-    weighted_disc = disc * w[None, :]
-    # If all zeros on a trial, max is 0; that’s fine
-    max_component = np.max(np.abs(weighted_disc), axis=1) * np.sign(
-        np.sum(weighted_disc * (np.abs(weighted_disc) == np.max(np.abs(weighted_disc), axis=1, keepdims=True)), axis=1)
-    )
-    # The above sign selection: if multiple ties, sums identical-signed maxima; if mixed, sign may cancel; acceptable heuristic.
+                # Build selection probabilities: with prob p_high pick highest-validity cue,
+                # with prob (1-p_high) pick uniformly among remaining
+                if len(idxs) == 1:
+                    sel_probs = np.array([1.0], dtype=float)
+                else:
+                    # Candidate highest-validity set (handle ties by spreading mass equally among maxima)
+                    max_val = np.max(vals)
+                    is_max = (vals == max_val).astype(float)
+                    if np.sum(is_max) > 0:
+                        high_probs = is_max / np.sum(is_max)
+                    else:
+                        high_probs = np.ones_like(vals) / len(vals)
+                    uni_probs = np.ones_like(vals) / len(vals)
+                    sel_probs = p_high * high_probs + (1.0 - p_high) * uni_probs
 
-    # Blend components
-    evidence = (1.0 - gate) * sum_component + gate * max_component
+                # For each candidate, if discriminating (sign != 0),
+                # its contribution if we stop is noisy_sign = sign*(1-2*eta)
+                # Probability to stop upon discriminating is theta; else we continue without committing.
+                # Aggregate expected contribution at this step:
+                # expected increment = sum_over_cues sel_probs * I(sign!=0) * theta * noisy_sign
+                if np.any(signs != 0):
+                    noisy_factor = (1.0 - 2.0 * eta)
+                    step_ev = np.sum(sel_probs * (signs != 0).astype(float) * theta * signs * noisy_factor)
+                else:
+                    step_ev = 0.0
 
-    # Add baseline side bias toward B mapped to [-1,1]
-    evidence += (bias_B - 0.5) * 2.0
+                expected_ev += mass_continue * step_ev
 
-    # Map to probability with temperature and lapse
-    dv = np.clip(temperature, 0.0, 10.0) * evidence
-    pB = 1.0 / (1.0 + np.exp(-np.clip(dv, -700, 700)))
-    pB = lapse * 0.5 + (1.0 - lapse) * pB
+                # Update continuation mass:
+                # We continue if either we selected a tie cue (sign==0), or we selected a discriminating cue and decided not to stop (1-theta).
+                # The probability of continuing from this step is:
+                cont_prob = 0.0
+                if len(idxs) > 0:
+                    cont_prob = np.sum(sel_probs * (((signs == 0).astype(float)) + ((signs != 0).astype(float) * (1.0 - theta))))
+                mass_continue *= cont_prob
 
-    # Negative log-likelihood
-    eps = 1e-12
-    pB = np.clip(pB, eps, 1.0 - eps)
-    ll = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
-    return -np.sum(ll)
+                # Remove one cue from remaining in expectation by updating remaining deterministically is tricky.
+                # To maintain tractability without simulation, we approximate by removing the most likely selected cue.
+                # This keeps the process finite and captures the bias toward high-validity inspection.
+                sel_idx_local = int(np.argmax(sel_probs))  # index within idxs
+                chosen_global = idxs[sel_idx_local]
+                remaining[chosen_global] = False
+
+            final_ev = expected_ev  # expected signed evidence from the first effective discriminating cue
+
+        # Convert evidence to choice probability toward B
+        logits = temperature * final_ev
+
+        # Add inertia toward previous observed decision in probability space
+        pB = 1.0 / (1.0 + np.exp(-logits))
+        pB = (1.0 - inertia) * pB + inertia * prev_choice
+
+        # Lapse
+        pB = (1.0 - epsilon) * pB + 0.5 * epsilon
+
+        # Likelihood update
+        p_obs = decisions[t] * pB + (1.0 - decisions[t]) * (1.0 - pB)
+        p_obs = np.clip(p_obs, 1e-12, 1.0)
+        nll += -np.log(p_obs)
+
+        # Update inertia baseline with actual observed decision
+        prev_choice = decisions[t]
+
+    return nll
 
 
 def cognitive_model2(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Bayesian cue integration with miscalibrated reliabilities and asymmetric utility.
-
-    Core idea:
-    - Treat each cue as a noisy expert providing evidence about whether B > A.
-    - Convert cues to log-likelihood ratios (LLRs) from perceived reliabilities (calibration).
-    - Combine with a prior bias toward B (prior_mean) with adjustable prior strength.
-    - Allow asymmetric utility scaling of favoring B vs A (utility_asymmetry).
-    - Map posterior evidence to choice with temperature and lapse.
-
-    Parameters (bounds):
-    - prior_mean in [0,1]: Prior preference toward B (0.5 = neutral), mapped to prior log-odds.
-    - prior_strength in [0,1]: Weight of prior relative to cumulative cue evidence (0 = ignore prior; 1 = full prior).
-    - calibration in [0,1]: Compresses/expands stated validities toward 0.5 (0 -> 0.5; 1 -> stated validity).
-    - likelihood_sensitivity in [0,1]: Scales all cue LLRs (0 = ignore cues, 1 = full strength).
-    - utility_asymmetry in [0,1]: Multiplicative scaling of evidence in favor of B; mapped to [0.5, 1.5].
-    - temperature in [0,10]: Inverse temperature for logistic choice.
-    - lapse in [0,1]: Lapse (random choice) probability mixed with model prediction.
-
+    """Nonlinear configural integration with asymmetry, context normalization, prior preference, and lapses.
+    
+    Mechanism:
+    - Each cue contributes signed evidence proportional to its (possibly compressed) validity and whether it favors A or B.
+    - Positive (favoring B) and negative (favoring A) evidence are scaled differently (asymmetric sensitivity).
+    - Evidence is divisively normalized by the amount of cue conflict present on the trial.
+    - A prior preference toward B shifts the decision variable in logit space.
+    - The inverse temperature scales the normalized decision variable, and lapses mix in random choice.
+    
+    Parameters (all used):
+    - gamma:     [0,1] validity compression exponent; effective validity = validity^gamma (gamma<1 expands differences, >1 compresses; here 0..1 gives expansion)
+    - lambda_p:  [0,1] gain applied to cues favoring B (positives)
+    - lambda_m:  [0,1] gain applied to cues favoring A (negatives)
+    - norm:      [0,1] context normalization strength; divides by (1 + norm * total_conflict)
+    - priorB:    [0,1] prior preference toward B; 0.5 is neutral; implemented as a logit shift
+    - temperature: [0,10] inverse temperature; higher -> more deterministic choices
+    - epsilon:   [0,1] lapse probability; mixes with uniform choice
+    
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
+    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
+    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
+    
     Returns:
-    - Negative log-likelihood of observed choices (decisions: 1 = choose B, 0 = choose A).
+    - negative log-likelihood of the observed decisions under the model
     """
-    prior_mean, prior_strength, calibration, likelihood_sensitivity, utility_asymmetry, temperature, lapse = parameters
+    gamma, lambda_p, lambda_m, norm, priorB, temperature, epsilon = parameters
+
+    base_valid = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    # Validity compression/expansion
+    eff_valid = np.power(base_valid, np.clip(gamma, 0.0, 1.0))
 
     A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
     B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(int)
 
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    # Signed cue signals: +1 favors B, -1 favors A, 0 tie
+    sgn = np.sign(B - A)
 
-    # Perceived reliabilities compressed toward 0.5 by calibration
-    r = 0.5 + calibration * (validities - 0.5)  # in [0.5,1]
-    # Log-likelihood ratio per cue if it favors B vs A
-    # LLR = ln(r/(1-r)) for supportive cue; negative for opposing
-    # Avoid log(0) via clipping
-    r = np.clip(r, 1e-6, 1.0 - 1e-6)
-    llr_per_cue = np.log(r / (1.0 - r))  # shape (4,)
+    # Gains for positive vs negative
+    gain = np.where(sgn > 0, lambda_p, np.where(sgn < 0, lambda_m, 0.0))
+    # Effective signed evidences
+    cue_ev = sgn * eff_valid * gain
 
-    # Trial-wise signed evidence from cues
-    disc = (B > A).astype(float) - (A > B).astype(float)  # -1,0,1
-    cue_evidence = np.dot(disc, llr_per_cue)  # sum of LLRs
+    # Sum and normalize by conflict magnitude
+    total_conflict = np.sum(np.abs(sgn), axis=1).astype(float)  # number of discriminating cues (0..4)
+    raw_delta = np.sum(cue_ev, axis=1)
+    denom = 1.0 + norm * total_conflict
+    delta = raw_delta / denom
 
-    # Apply global sensitivity to cue evidence
-    cue_evidence *= likelihood_sensitivity
+    # Prior shift in logit space from priorB in [0,1]
+    prior_shift = (np.clip(priorB, 0.0, 1.0) - 0.5) * 2.0  # in [-1,1]
 
-    # Prior log-odds for B vs A from prior_mean
-    prior_mean = np.clip(prior_mean, 0.0, 1.0)
-    prior_log_odds = np.log(np.clip(prior_mean, 1e-6, 1.0 - 1e-6) / np.clip(1.0 - prior_mean, 1e-6, 1.0))
-    # Mix prior strength
-    combined_evidence = (1.0 - prior_strength) * cue_evidence + prior_strength * prior_log_odds
+    logits = temperature * delta + prior_shift
+    pB = 1.0 / (1.0 + np.exp(-logits))
 
-    # Asymmetric utility scaling favoring B (utility_asymmetry in [0.5,1.5])
-    u = 0.5 + utility_asymmetry  # in [0.5, 1.5]
-    combined_evidence *= u
+    # Lapse
+    pB = (1.0 - epsilon) * pB + 0.5 * epsilon
 
-    # Map to choice probability with temperature and lapse
-    dv = np.clip(temperature, 0.0, 10.0) * combined_evidence
-    pB = 1.0 / (1.0 + np.exp(-np.clip(dv, -700, 700)))
-    pB = lapse * 0.5 + (1.0 - lapse) * pB
-
-    eps = 1e-12
-    pB = np.clip(pB, eps, 1.0 - eps)
-    ll = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
-    return -np.sum(ll)
+    decisions = np.asarray(decisions).astype(float)
+    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
+    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
+    return nll
 
 
 def cognitive_model3(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Contextual contrast model with polarity bias, crowding penalty, and validity shift.
-
-    Core idea:
-    - Start with a weighted sum of cue directions using validities shifted toward equal weighting.
-    - Apply polarity bias so cues supporting B and cues supporting A get different gains.
-    - Apply a contrast nonlinearity to amplify strong consensus and compress weak evidence.
-    - Penalize crowded evidence when many cues are discriminating (crowding).
-    - Include an overall side bias toward B.
-    - Map to choice via a logistic with temperature and lapse.
-
-    Parameters (bounds):
-    - weight_shift in [0,1]: Interpolates cue weights between stated validities (0) and equal weights (1).
-    - contrast in [0,1]: Exponent controlling nonlinearity on evidence magnitude (1 + contrast as the power).
-    - polarity in [0,1]: Bias multiplier for cues favoring B vs A; higher = more gain for B-supporting cues.
-    - crowding in [0,1]: Strength of divisive normalization by the number of discriminating cues.
-    - side_bias in [0,1]: Baseline bias toward B (0.5 = none), mapped to [-1,1] evidence.
-    - temperature in [0,10]: Inverse temperature for logistic choice.
-    - lapse in [0,1]: Lapse (random choice) probability mixed with model prediction.
-
+    """Attentional sampling accumulator with validity-biased selection, leak, perceptual noise, start bias, and lapses.
+    
+    Mechanism:
+    - On each trial, the decision maker samples cues K times.
+    - Each sample selects a cue with probability proportional to validity^alpha (alpha controls attentional selectivity).
+    - The sampled cue contributes +1 if it favors B, -1 if it favors A, 0 if tied. With probability noise, the sign is flipped.
+    - Evidence is leaky: later samples are down-weighted by (1 - leak)^(t-1). We use the closed-form expected effective number of samples.
+    - The expected accumulated evidence equals E = K_eff * sum_i w_i * sign_i * (1 - 2*noise), where w_i are normalized attention weights.
+    - A starting bias toward B shifts the decision variable.
+    - A logistic with inverse temperature maps evidence to choice probability; a lapse rate mixes with random choice.
+    
+    Parameters (all used):
+    - att:   [0,1] attentional selectivity; alpha = 5*att controls how strongly selection favors high-validity cues
+    - samp:  [0,1] sampling extent; maps to integer K = 1 + round(49*samp) samples per trial
+    - noise: [0,1] perceptual noise; probability that a sampled cue's sign is flipped
+    - leak:  [0,1] evidence leak per step; higher leak -> stronger down-weighting of later samples
+    - startB:[0,1] starting point bias toward B; 0.5 neutral; implemented as an additive shift in logit space
+    - temperature: [0,10] inverse temperature; scales the accumulated evidence
+    - epsilon:[0,1] lapse probability; mixes with random choice
+    
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
+    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
+    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
+    
     Returns:
-    - Negative log-likelihood of observed choices (decisions: 1 = choose B, 0 = choose A).
+    - negative log-likelihood of the observed decisions under the model
     """
-    weight_shift, contrast, polarity, crowding, side_bias, temperature, lapse = parameters
+    att, samp, noise, leak, startB, temperature, epsilon = parameters
+
+    # Validities and attention weights
+    base_valid = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    alpha = 5.0 * np.clip(att, 0.0, 1.0)
+    att_weights_raw = np.power(base_valid, alpha)
+    att_weights = att_weights_raw / (np.sum(att_weights_raw) + 1e-12)
+
+    # Number of samples and effective sample mass under leak
+    K = int(np.round(49.0 * np.clip(samp, 0.0, 1.0))) + 1  # 1..50
+    # Effective cumulative weight under geometric leak: sum_{t=0}^{K-1} (1 - leak)^t
+    decay = 1.0 - np.clip(leak, 0.0, 1.0)
+    if abs(decay - 1.0) < 1e-12:
+        K_eff = float(K)
+    else:
+        K_eff = (1.0 - decay**K) / (1.0 - decay)
 
     A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
     B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(int)
 
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    # Signed cue signals: +1 favors B, -1 favors A, 0 tie
+    sgn = np.sign(B - A)
 
-    # Interpolate weights between validities and equal weighting
-    w = (1.0 - weight_shift) * validities + weight_shift * 1.0
+    # Expected per-sample signed increment
+    # For ties, contribution is 0 regardless of noise; for discriminating cues, expected sign is sign*(1-2*noise)
+    noisy_factor = (1.0 - 2.0 * np.clip(noise, 0.0, 1.0))
+    per_sample_ev = np.dot(sgn, att_weights) * noisy_factor  # shape (n_trials,)
 
-    disc = (B > A).astype(float) - (A > B).astype(float)  # -1,0,1
+    # Expected accumulated evidence with leak
+    delta = K_eff * per_sample_ev
 
-    # Polarity gains: g_pos for B-supporting cues, g_neg for A-supporting cues (balanced around 1)
-    g_pos = 0.5 + polarity         # [0.5, 1.5]
-    g_neg = 1.5 - g_pos            # [1.0, 0.0] mirrored so total potential gain is balanced
+    # Start bias as logit shift from startB in [0,1]
+    start_shift = (np.clip(startB, 0.0, 1.0) - 0.5) * 2.0  # [-1,1]
 
-    gains = (disc > 0).astype(float) * g_pos + (disc < 0).astype(float) * g_neg
+    logits = temperature * delta + start_shift
+    pB = 1.0 / (1.0 + np.exp(-logits))
 
-    # Base evidence
-    weighted_disc = disc * w[None, :] * gains
-    base = np.sum(weighted_disc, axis=1)
+    # Lapse
+    pB = (1.0 - epsilon) * pB + 0.5 * epsilon
 
-    # Contrast nonlinearity on magnitude
-    mag = np.abs(base)
-    sgn = np.sign(base)
-    amplified = sgn * (mag ** (1.0 + contrast))
-
-    # Crowding penalty based on number of discriminating cues
-    n_nonzero = np.sum(disc != 0.0, axis=1).astype(float)
-    denom = 1.0 + crowding * n_nonzero
-    evidence = amplified / denom
-
-    # Add side bias mapped to [-1,1]
-    evidence += (side_bias - 0.5) * 2.0
-
-    # Logistic choice with temperature and lapse
-    dv = np.clip(temperature, 0.0, 10.0) * evidence
-    pB = 1.0 / (1.0 + np.exp(-np.clip(dv, -700, 700)))
-    pB = lapse * 0.5 + (1.0 - lapse) * pB
-
-    eps = 1e-12
-    pB = np.clip(pB, eps, 1.0 - eps)
-    ll = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
-    return -np.sum(ll)
+    decisions = np.asarray(decisions).astype(float)
+    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
+    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
+    return nll
