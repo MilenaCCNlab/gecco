@@ -18,13 +18,13 @@ class FeedbackGenerator:
             "results": results,
         })
 
-    def get_feedback(self, best_iter, tried_param_sets):
+    def get_feedback(self, best_model, tried_param_sets):
         """
         Construct feedback string for the next prompt.
         Default: discourage reuse of past parameter combinations.
         """
         feedback = (
-            f"The best model so far (iteration {best_iter}).\n\n"
+            f"Your best model so far:\n {best_model}).\n\n"
             "These are parameter combinations tried so far:\n"
         )
 
@@ -49,12 +49,13 @@ class LLMFeedbackGenerator(FeedbackGenerator):
         self.llm = llm
         self.tokenizer = tokenizer
 
-    def get_feedback(self, best_iter, tried_param_sets):
+    def get_feedback(self, best_model, tried_param_sets):
         # Summarize all tried parameter sets
         summary = "\n".join([", ".join(s) for s in tried_param_sets])
 
         prompt = (
-            f"In a model search loop, the best model so far was found at iteration {best_iter}.\n"
+            f"The best model so far was:\n "
+            f" {best_model}.\n"
             f"The following parameter combinations have already been explored:\n{summary}\n\n"
             "Please suggest high-level guidance for generating new model variants "
             "that differ conceptually but might still perform well."

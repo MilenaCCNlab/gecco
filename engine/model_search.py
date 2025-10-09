@@ -8,6 +8,7 @@ from llm.generator import generate
 from engine.run_fit import run_fit
 from utils.extraction import extract_full_function
 from engine.feedback import FeedbackGenerator  # <— new import
+from pathlib import Path
 
 
 class GeCCoModelSearch:
@@ -26,10 +27,13 @@ class GeCCoModelSearch:
             from engine.feedback import FeedbackGenerator
             self.feedback = FeedbackGenerator(cfg)
 
-        # --- Results setup ---
-        self.results_dir = "results"
-        os.makedirs(f"{self.results_dir}/models", exist_ok=True)
-        os.makedirs(f"{self.results_dir}/bics", exist_ok=True)
+        # --- Set project root ---
+        self.project_root = Path(__file__).resolve().parents[1]
+
+        # --- Results directory (absolute path) ---
+        self.results_dir = self.project_root / "results" / self.cfg.task.name
+        (self.results_dir / "models").mkdir(parents=True, exist_ok=True)
+        (self.results_dir / "bics").mkdir(parents=True, exist_ok=True)
 
         # --- Tracking ---
         self.best_model = None
@@ -46,14 +50,14 @@ class GeCCoModelSearch:
             feedback = ""
             if self.best_model is not None:
                 feedback = self.feedback.get_feedback(
-                    best_iter=self.best_iter,
-                    tried_param_sets=self.tried_param_sets,
+                    self.best_model,
+                    self.tried_param_sets,
                 )
 
             prompt = self.prompt_builder.build_input_prompt(feedback_text=feedback)
             code_text = generate(self.model, self.tokenizer, prompt, self.cfg)
 
-            model_file = f"{self.results_dir}/models/iter{it}.py"
+            model_file = self.results_dir / "models" / f"iter{it}.py"
             with open(model_file, "w") as f:
                 f.write(code_text)
 
@@ -66,7 +70,8 @@ class GeCCoModelSearch:
                     continue
 
                 try:
-                    fit_res = run_fit(self.df, func_code, expected_func_name=func_name)
+                    fit_res = run_fit(self.df, func_code, cfg=self.cfg, expected_func_name=func_name)
+
                     mean_metric = float(fit_res["metric_value"])
                     metric_name = fit_res["metric_name"]
                     params = fit_res["param_names"]
@@ -79,7 +84,7 @@ class GeCCoModelSearch:
                         "metric_name": metric_name,
                         "metric_value": mean_metric,
                         "param_names": params,
-                        "code_file": model_file,
+                        "code_file": str(model_file),  # ✅ convert Path -> str
                     })
 
                     if mean_metric < self.best_metric:
@@ -89,14 +94,16 @@ class GeCCoModelSearch:
                         self.best_params = params
                         print(f"[⭐ GeCCo] New best model: {func_name} ({metric_name}={mean_metric:.2f})")
 
-                        with open(f"{self.results_dir}/models/best_model.py", "w") as f:
+                        best_model_file = self.results_dir / "models" / "best_model.py"
+                        with open(best_model_file, "w") as f:
                             f.write(func_code)
 
                 except Exception as e:
                     print(f"[⚠️ GeCCo] Error fitting {func_name}: {e}")
 
             # Save iteration results
-            with open(f"{self.results_dir}/bics/iter{it}.json", "w") as f:
+            bic_file = self.results_dir / "bics" / f"iter{it}.json"
+            with open(bic_file, "w") as f:
                 json.dump(iteration_results, f, indent=2)
 
             self.feedback.record_iteration(it, iteration_results)

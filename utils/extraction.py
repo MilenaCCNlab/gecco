@@ -105,37 +105,56 @@ def extract_parameter_names(text):
 
 def parse_bounds_from_docstring(doc: Optional[str]) -> Dict[str, List[float]]:
     """
-    Extract parameter bounds from docstring patterns like:
-      - alpha : learning rate [0,1]
-      - beta  : temperature [0,10]
-    Also supports global rules like:
-      'Parameters (all in [0,1], except betas in [0,10])'
+    Extract parameter bounds from docstrings.
+    Supports patterns like:
+      - alpha : [0,1]
+      - alpha in [0,1]: learning rate
+      - alpha (0,1)
+      - alpha = [0, 1]
+      - Parameters (all in [0,1], except betas in [0,10])
+      - alpha range 0–1
     """
+
     if not doc:
         return {}
 
     bounds: Dict[str, List[float]] = {}
 
-    # Case 1: explicit per-parameter bounds
+    # --- Case 1: explicit per-parameter bounds ---
     explicit_pattern = re.compile(
-        r"-\s*([A-Za-z0-9_]+)\s*:.*?\[([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\]",
-        flags=re.I,
+        r"""
+        -\s*([A-Za-z0-9_]+)       # parameter name
+        [^()\[\]\d\-]*?           # any filler before bounds (e.g. "in", ":", "=")
+        [\(\[\{]?                 # optional opening bracket/paren/brace
+        \s*([\-+]?\d*\.?\d+(?:e[-+]?\d+)?)   # lower bound
+        \s*[,–\-to]+\s*           # comma, dash, or 'to' as separator
+        ([\-+]?\d*\.?\d+(?:e[-+]?\d+)?)      # upper bound
+        [\)\]\}]?                 # optional closing bracket/paren/brace
+        """,
+        flags=re.I | re.X,
     )
+
     for name, lo, hi in explicit_pattern.findall(doc):
         try:
             bounds[name] = [float(lo), float(hi)]
-        except Exception:
+        except ValueError:
             continue
 
     if bounds:
         return bounds
 
-    # Case 2: global rule with optional exceptions
+    # --- Case 2: global rules with exceptions ---
     global_pattern = re.compile(
-        r"all\s+in\s*\[\s*([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\s*\]"
-        r"(?:[^[]*?except\s+([A-Za-z0-9_ ,/]+?)\s+in\s*\[\s*([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\s*\])?",
-        flags=re.I | re.S,
+        r"""
+        all\s+in\s*[\(\[\{]?\s*([\-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*[,–\-to]+\s*
+        ([\-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*[\)\]\}]?
+        (?:[^[]*?except\s+([A-Za-z0-9_ ,/]+?)\s+
+        in\s*[\(\[\{]?\s*([\-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*[,–\-to]+\s*
+        ([\-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*[\)\]\}]?)?
+        """,
+        flags=re.I | re.S | re.X,
     )
+
     m = global_pattern.search(doc)
     if not m:
         return {}
@@ -143,6 +162,7 @@ def parse_bounds_from_docstring(doc: Optional[str]) -> Dict[str, List[float]]:
     lo, hi = float(m.group(1)), float(m.group(2))
     bounds = {"__default__": [lo, hi]}
 
+    # handle "except ..." clause
     if m.group(3):
         phrase = m.group(3).lower()
         exc_lo, exc_hi = float(m.group(4)), float(m.group(5))
@@ -155,8 +175,6 @@ def parse_bounds_from_docstring(doc: Optional[str]) -> Dict[str, List[float]]:
             bounds[tok] = [exc_lo, exc_hi]
 
     return bounds
-
-
 # ============================================================
 # High-level builder
 # ============================================================
