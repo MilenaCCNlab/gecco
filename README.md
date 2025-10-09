@@ -26,6 +26,8 @@ Given behavioral data (e.g., from decision-making tasks), GeCCo prompts an LLM t
 
 ## 📂 Repository Structure
 
+```text
+
 gecco/
 ├── config/
 │   ├── schema.py             # Config loader + validation
@@ -56,7 +58,7 @@ gecco/
     ├── models/               # Saved model definitions per iteration
     └── bics/                 # BIC results for each model
 
-
+```
 ## ⚙️ Configuration
 
 All experiment and data parameters are specified in a YAML file (e.g., `config/two_step.yaml`):
