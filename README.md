@@ -1,7 +1,6 @@
 # 🧠 GeCCo: Guided Generation of Computational Cognitive Models
 
-**Author:** [Milena Rmus](https://github.com/MilenaCCNlab)  
-**Last updated:** October 2025
+**Author:** [Milena Rmus](https://github.com/MilenaCCNlab) and [Akshay K. Jagadish](https://akjagadish.github.io/)  
 
 ---
 
