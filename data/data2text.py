@@ -5,11 +5,11 @@ import string
 
 
 def narrative(
-        df: pd.DataFrame,
-        template: str,
-        id_col: str = "participant",
-        trial_col: str = "trial",
-        max_trials: int | None = None,
+    df: pd.DataFrame,
+    template: str,
+    id_col: str = "participant",
+    trial_col: str = "trial",
+    max_trials: Optional[int] = None,
 ):
     """
     Generate narrative text from behavioral data using a configurable template.
