@@ -1,6 +1,7 @@
 import pandas as pd
 from typing import List
 import os
+import numpy as np
 
 def load_data(path, input_columns=None):
     # If path is relative, make it relative to project root
@@ -12,9 +13,9 @@ def load_data(path, input_columns=None):
 
     # Optional: keep only specified columns
     if input_columns is not None:
-        df = df[input_columns + ["participant", "trial"]] \
+        df = df[input_columns] \
             if "participant" in df.columns and "trial" in df.columns \
-            else df[input_columns]
+            else df[input_columns + ["participant", "trial"]]
     return df
 
 
@@ -27,8 +28,7 @@ def split_by_participant(df, id_col, splits_cfg):
     # 👇 handle both dicts and namespaces
     if not isinstance(splits_cfg, dict):
         splits_cfg = vars(splits_cfg)  # convert SimpleNamespace to dict
-
-    unique_ids = sorted(df[id_col].unique())
+    unique_ids = sorted(np.unique(df[id_col].values).tolist())
     n = len(unique_ids)
 
     def parse_split(value):
