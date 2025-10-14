@@ -13,9 +13,9 @@ def load_data(path, input_columns=None):
 
     # Optional: keep only specified columns
     if input_columns is not None:
-        df = df[input_columns] \
+        df =  df[input_columns + ["participant", "trial"]] \
             if "participant" in df.columns and "trial" in df.columns \
-            else df[input_columns + ["participant", "trial"]]
+            else df[input_columns]
     return df
 
 
