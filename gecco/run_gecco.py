@@ -7,7 +7,6 @@ import numpy as np
 from gecco.offline_evaluation.fit_generated_models import run_fit
 from gecco.utils import extract_full_function
 from gecco.construct_feedback.feedback import FeedbackGenerator, LLMFeedbackGenerator
-from gecco.load_llms.model_loader import load_llm
 from pathlib import Path
 
 
