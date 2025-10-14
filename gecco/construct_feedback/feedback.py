@@ -1,7 +1,3 @@
-# engine/feedback.py
-# llm/generator.py
-import torch
-
 class FeedbackGenerator:
     """
     Base feedback handler for guiding the LLM between iterations.
@@ -46,9 +42,9 @@ class LLMFeedbackGenerator(FeedbackGenerator):
     Optional subclass: let an LLM summarize model search performance and propose directions.
     """
 
-    def __init__(self, cfg, llm, tokenizer):
+    def __init__(self, cfg, model, tokenizer):
         super().__init__(cfg)
-        self.llm = llm
+        self.model = model
         self.tokenizer = tokenizer
 
     def get_feedback(self, best_model, tried_param_sets):
@@ -64,59 +60,65 @@ class LLMFeedbackGenerator(FeedbackGenerator):
         )
 
         # from llm.generator import generate
-        feedback_text = generate(self.llm, self.tokenizer, prompt, self.cfg)
+        feedback_text = self.generate(prompt)
         return feedback_text.strip()
 
-def generate(model, tokenizer=None, prompt=None, cfg=None):
-    """
-    Unified text generation function for any supported backend.
-    Handles both OpenAI GPT and Hugging Face-style models cleanly.
-    """
-    if model is None:
-        raise ValueError("Model not initialized correctly.")
-    provider = cfg.llm.provider.lower()
+    def generate(self, prompt):
+        """
+        Unified text generation function for any supported backend.
+        """
+        if self.model is None:
+            raise ValueError("Model not initialized correctly.")
+        provider = self.cfg.llm.provider.lower()
 
-    # -----------------------------
-    # OpenAI / GPT-style generation
-    # -----------------------------
-    if "openai" in provider or "gpt" in provider:
-        max_out = cfg.llm.max_output_tokens
-        reasoning_effort = getattr(cfg.llm, "reasoning_effort", "medium")
-        text_verbosity = getattr(cfg.llm, "text_verbosity", "low")
+        # -----------------------------
+        # OpenAI / GPT-style generation
+        # -----------------------------
+        if "openai" in provider or "gpt" in provider:
+            max_out = self.cfg.llm.max_output_tokens
+            reasoning_effort = getattr(self.cfg.llm, "reasoning_effort", "medium")
+            text_verbosity = getattr(self.cfg.llm, "text_verbosity", "low")
 
-        print(
-            f"[GeCCo] Using GPT model '{cfg.llm.base_model}' "
-            f"(reasoning={reasoning_effort}, verbosity={text_verbosity}, max_output_tokens={max_out})"
-        )
+            print(
+                f"[GeCCo] Using GPT model '{self.cfg.llm.base_model}' "
+                f"(reasoning={reasoning_effort}, verbosity={text_verbosity}, max_output_tokens={max_out})"
+            )
 
-        resp = model.responses.create(
-            model=cfg.llm.base_model,
-            reasoning={"effort": "low"},
-            input=[
-                {"role": "developer", "content": cfg.llm.system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        decoded = resp.output_text.strip()
+            resp = self.model.responses.create(
+                model=self.cfg.llm.base_model,
+                reasoning={"effort": "low"},
+                input=[
+                    {"role": "developer", "content": self.cfg.llm.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            decoded = resp.output_text.strip()
 
-        return decoded
+            return decoded
+        # -----------------------------
+        # Hugging Face-style generation
+        # -----------------------------
+        else:
+            max_new = getattr(self.cfg.llm, "max_output_tokens", getattr(self.cfg.llm, "max_tokens", 2048))
 
-    # -----------------------------
-    # Hugging Face-style generation
-    # -----------------------------
-    else:
-        max_new = getattr(cfg.llm, "max_output_tokens", getattr(cfg.llm, "max_tokens", 2048))
+            print(
+                f"[GeCCo] Using HF model '{self.cfg.llm.base_model}' "
+                f"(max_new_tokens={max_new}, temperature={self.cfg.llm.temperature})"
+            )
 
-        print(
-            f"[GeCCo] Using HF model '{cfg.llm.base_model}' "
-            f"(max_new_tokens={max_new}, temperature={cfg.llm.temperature})"
-        )
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            output = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new,
+                temperature=self.cfg.llm.temperature,
+                do_sample=True,
+            )
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        output = model.generate(
-            **inputs,
-            max_new_tokens=max_new,
-            temperature=cfg.llm.temperature,
-            do_sample=True,
-        )
-        return tokenizer.decode(output[0], skip_special_tokens=True)
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            output = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new,
+                temperature=self.cfg.llm.temperature,
+                do_sample=True,
+            )
+            return self.tokenizer.decode(output[0], skip_special_tokens=True)
