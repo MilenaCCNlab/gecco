@@ -28,45 +28,45 @@ def build_prompt(cfg, data_text, feedback_text=None):
     if cfg.llm.provider in ["openai", "claude", "gemini"]:
         # --- prompt layout for closed models ---
         prompt = f"""
-                ### Task Description
-                {task.name}
-                {task.description.strip()}
+### Task Description
+{task.name}
+{task.description.strip()}
 
-                ### Example Participant Data
-                Here is example data from several participants:
-                {data_text.strip()}
+### Example Participant Data
+Here is example data from several participants:
+{data_text.strip()}
 
-                ### Your Task
-                {goal_text.strip()}
+### Your Task
+{goal_text.strip()}
 
-                ### Guardrails
-                {chr(10).join(guardrails)}
+### Guardrails
+{chr(10).join(guardrails)}
 
-                ### Template Model (for reference only — do not reuse its logic)
-                {llm.template_model.strip()}
+### Template Model (for reference only — do not reuse its logic)
+{llm.template_model.strip()}
 
-                {feedback_section}
-                """.strip()
+{feedback_section}
+""".strip()
     else:
         # --- prompt layout for open models ---
         prompt = f"""
-                {task.description.strip()}
+{task.description.strip()}
 
-                Here's data from several participants:
-                {data_text.strip()}
+Here's data from several participants:
+{data_text.strip()}
 
-                {goal_text.strip()}
+{goal_text.strip()}
 
-                ### Implementation Guidelines
-                {chr(10).join(guardrails)}
+### Implementation Guidelines
+{chr(10).join(guardrails)}
 
-                ### Initial Model Suggestion
-                Consider the following code as a function template:
-                {llm.template_model.strip()}
+### Initial Model Suggestion
+Consider the following code as a function template:
+{llm.template_model.strip()}
 
-                Your function:
+Your function:
 
-                {feedback_section}
-                """.strip()
+{feedback_section}
+        """.strip()
 
     return prompt
