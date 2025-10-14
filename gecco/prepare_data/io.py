@@ -6,7 +6,8 @@ import numpy as np
 def load_data(path, input_columns=None):
     # If path is relative, make it relative to project root
     if not os.path.isabs(path):
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        # Go up two levels: gecco/prepare_data/__file__ -> gecco/ -> project_root/
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         path = os.path.join(project_root, path)
 
     df = pd.read_csv(path)

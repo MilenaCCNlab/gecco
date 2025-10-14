@@ -5,11 +5,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from pathlib import Path
 
 from config.schema import load_config
-from data.io import load_data, split_by_participant
-from data.data2text import get_data2text_function
-from llm.model_loader import load_llm
-from llm.prompt_builder import build_prompt
-from engine.model_search import GeCCoModelSearch
+from gecco.prepare_data.io import load_data, split_by_participant
+from gecco.prepare_data.data2text import get_data2text_function
+from gecco.load_llms.model_loader import load_llm
+from gecco.run_gecco import GeCCoModelSearch
 
 
 # -------------------------------------------------------------------------
@@ -50,8 +49,9 @@ def main():
             self._data_text = data_text  # keep the prepared narrative
 
         def build_input_prompt(self, feedback_text: str = ""):
-            # only pass the stored narrative; build_prompt reads template from cfg.llm.template_model
-            return build_prompt(self.cfg, self._data_text, feedback_text=feedback_text)
+            # This method returns the prepared data text for prompt building
+            # The actual prompt building happens in GeCCoModelSearch.build_prompt
+            return self._data_text
 
     prompt_builder = PromptBuilderWrapper(cfg, data_text)
 

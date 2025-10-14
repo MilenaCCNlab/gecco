@@ -1,8 +1,8 @@
 # llm/model_loader.py
-from llm.backends.llama_backend import load_llama
-from llm.backends.qwen_backend import load_qwen
-from llm.backends.r1_backend import load_r1
-from llm.backends.gpt_backend import load_gpt
+from gecco.load_llms.llama_backend import load_llama
+from gecco.load_llms.qwen_backend import load_qwen
+from gecco.load_llms.r1_backend import load_r1
+from gecco.load_llms.gpt_backend import load_gpt
 
 def load_llm(provider: str, model_name: str, **kwargs):
     """Return (model, tokenizer) tuple for any provider."""

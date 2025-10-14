@@ -5,11 +5,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from pathlib import Path
 
 from config.schema import load_config
-from data.io import load_data, split_by_participant
-from data.data2text import get_data2text_function
-from llm.model_loader import load_llm
-from llm.prompt_builder import build_prompt
-from engine.model_search import GeCCoModelSearch
+from gecco.prepare_data.io import load_data, split_by_participant
+from gecco.prepare_data.data2text import get_data2text_function
+from gecco.load_llms.model_loader import load_llm
+from gecco.run_gecco import GeCCoModelSearch
+from gecco.prompt_builder.prompt import build_prompt
+
 
 
 # -------------------------------------------------------------------------

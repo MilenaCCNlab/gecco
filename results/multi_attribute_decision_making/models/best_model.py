@@ -1,129 +1,65 @@
-def cognitive_model1(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
+def cognitive_model2(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Stochastic take-the-best with noisy cue inspection, probabilistic stopping, response inertia, and lapses.
-    
-    Mechanism:
-    - On each trial, the model inspects cues one-by-one until a discriminating cue is found.
-    - The next cue to inspect is chosen stochastically with a bias toward higher-validity cues.
-    - When a discriminating cue is found, the model stops with probability theta; otherwise it continues to search.
-    - Cue observations are noisy: with probability eta, a cue's comparative sign is flipped.
-    - The signed advantage from the last discriminating cue drives choice via a logistic with inverse temperature.
-    - A response-inertia term pulls choice probability toward the previous observed decision.
-    - A lapse rate mixes the model probability with uniform random choice.
-    
-    Parameters (all used):
-    - p_high: [0,1] probability of choosing the highest-validity remaining cue on each inspection (vs uniform among remaining)
-    - theta:  [0,1] stopping probability upon encountering a discriminating cue (theta=1 -> pure take-the-best)
-    - eta:    [0,1] perceptual noise; probability that the sign of a discriminating cue is flipped
-    - inertia:[0,1] response inertia; weight placed on repeating the previous choice (0 = none, 1 = full stickiness)
-    - epsilon:[0,1] lapse probability; mixes with random choice
-    - temperature: [0,10] inverse temperature; scales the impact of the final discriminating cue on choice
-    
-    Inputs:
-    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
-    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
-    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
-    
+    """Probabilistic take-the-best with personalized cue salience, noisy ordering, and lapses.
+    The model approximates lexicographic decision making: it searches cues in order of a
+    personalized 'effective validity' and stops at the first discriminating cue. The indicated
+    option is chosen via a logistic choice rule. If no cue discriminates, it falls back to a
+    simple additive rule. Lapses mix in random responding.
+
+    Parameters (all in [0,1] except temperature in [0,10]):
+    - sal1, sal2, sal3, sal4: [0,1] Participant-specific salience for each cue, blending with
+                              true validities to form effective ordering.
+    - blend: [0,1] Blending between true validities and salience: eff = blend*validity + (1-blend)*salience.
+    - fallback: [0,1] Weight of fallback additive rule when no discriminating cue is found; also
+                        softly included even when a discriminating cue exists.
+    - lapse: [0,1] Lapse probability mixing with random choice (0.5).
+    - temperature: [0,10] Inverse temperature scaling the (signed) discriminating evidence.
+
     Returns:
-    - negative log-likelihood of the observed decisions under the model
+    - Negative log-likelihood of observed choices (0 = A, 1 = B).
     """
-    p_high, theta, eta, inertia, epsilon, temperature = parameters
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    sal1, sal2, sal3, sal4, blend, fallback, lapse, temperature = parameters
+    base_validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    sal = np.array([sal1, sal2, sal3, sal4], dtype=float)
 
-    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
-    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
+    eff_strength = blend * base_validities + (1.0 - blend) * sal
 
-    sign = np.sign(B - A)
+    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(int)
+    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(int)
 
-    n_trials = len(decisions)
-    decisions = np.asarray(decisions).astype(float)
-    prev_choice = 0.5  # neutral for the very first trial
+    nT = len(decisions)
 
-    nll = 0.0
-    for t in range(n_trials):
-        s = sign[t].copy()
+    add_w = np.ones(4, dtype=float) / 4.0
+    vA_add = A.dot(add_w)
+    vB_add = B.dot(add_w)
+    dv_add = vB_add - vA_add  # in [-1,1]
 
-        if np.all(s == 0):
-            final_ev = 0.0
-        else:
+    order = np.argsort(-eff_strength)  # descending
 
-            remaining = np.ones(4, dtype=bool)
-            final_ev = 0.0  # signed evidence from last discriminating cue found
+    signed_evidence = np.zeros(nT, dtype=float)
+    has_disc = np.zeros(nT, dtype=bool)
 
+    for idx in order:
+        disc = A[:, idx] != B[:, idx]
 
+        need = ~has_disc & disc
+        if np.any(need):
 
-
-
-
-            rem_valid = validities.copy()
-            rem_s = s.copy()
-
-            mass_continue = 1.0
-            expected_ev = 0.0
-
-            rem_idx = np.arange(4)
-
-            for step in range(4):
-
-                if not np.any(remaining):
-                    break
-
-                idxs = rem_idx[remaining[rem_idx]]
-                vals = rem_valid[idxs]
-                signs = rem_s[idxs]
-
-
-                if len(idxs) == 1:
-                    sel_probs = np.array([1.0], dtype=float)
-                else:
-
-                    max_val = np.max(vals)
-                    is_max = (vals == max_val).astype(float)
-                    if np.sum(is_max) > 0:
-                        high_probs = is_max / np.sum(is_max)
-                    else:
-                        high_probs = np.ones_like(vals) / len(vals)
-                    uni_probs = np.ones_like(vals) / len(vals)
-                    sel_probs = p_high * high_probs + (1.0 - p_high) * uni_probs
+            sign = (B[need, idx] - A[need, idx]).astype(float)  # +1 or -1
+            signed_evidence[need] = sign * eff_strength[idx]
+            has_disc[need] = True
 
 
 
+    lex_dv = signed_evidence  # positive favors B
 
+    dv = np.where(has_disc, (1.0 - fallback) * lex_dv + fallback * dv_add,
+                  dv_add)
 
-                if np.any(signs != 0):
-                    noisy_factor = (1.0 - 2.0 * eta)
-                    step_ev = np.sum(sel_probs * (signs != 0).astype(float) * theta * signs * noisy_factor)
-                else:
-                    step_ev = 0.0
+    pB_core = 1.0 / (1.0 + np.exp(-temperature * dv))
+    pB = (1.0 - lapse) * pB_core + 0.5 * lapse
+    pB = np.clip(pB, 1e-12, 1.0 - 1e-12)
 
-                expected_ev += mass_continue * step_ev
-
-
-
-                cont_prob = 0.0
-                if len(idxs) > 0:
-                    cont_prob = np.sum(sel_probs * (((signs == 0).astype(float)) + ((signs != 0).astype(float) * (1.0 - theta))))
-                mass_continue *= cont_prob
-
-
-
-                sel_idx_local = int(np.argmax(sel_probs))  # index within idxs
-                chosen_global = idxs[sel_idx_local]
-                remaining[chosen_global] = False
-
-            final_ev = expected_ev  # expected signed evidence from the first effective discriminating cue
-
-        logits = temperature * final_ev
-
-        pB = 1.0 / (1.0 + np.exp(-logits))
-        pB = (1.0 - inertia) * pB + inertia * prev_choice
-
-        pB = (1.0 - epsilon) * pB + 0.5 * epsilon
-
-        p_obs = decisions[t] * pB + (1.0 - decisions[t]) * (1.0 - pB)
-        p_obs = np.clip(p_obs, 1e-12, 1.0)
-        nll += -np.log(p_obs)
-
-        prev_choice = decisions[t]
-
-    return nll
+    decisions = np.asarray(decisions).astype(int)
+    loglik = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
+    return -np.sum(loglik)

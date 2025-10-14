@@ -1,218 +1,195 @@
 def cognitive_model1(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Validity-weighted additive integration with subjective cue weights, response bias, and lapse.
-    
-    Choice rule:
-    - Compute a weighted value difference between options using expert validities (0.9,0.8,0.7,0.6)
-      modulated by subjective cue weights.
-    - Convert the difference to a choice probability via a logistic with inverse temperature.
-    - Add a response bias toward B in logit space (simple shift).
-    - Apply a lapse rate that mixes the model probability with random choice.
-    
-    Parameters (all used):
-    - w1: [0,1] subjective weight for cue 1 (most valid; 0.9)
-    - w2: [0,1] subjective weight for cue 2 (0.8)
-    - w3: [0,1] subjective weight for cue 3 (0.7)
-    - w4: [0,1] subjective weight for cue 4 (least valid; 0.6)
-    - bias: [0,1] response bias toward choosing option B (0.5 = no bias; >0.5 favors B)
-    - temperature: [0,10] inverse softmax temperature; higher -> more deterministic
-    - lapse: [0,1] probability of a random (uniform) lapse on each trial
-    
-    Inputs:
-    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
-    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
-    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
-    
-    Returns:
-    - negative log-likelihood of the observed decisions under the model
-    """
-    w1, w2, w3, w4, bias, temperature, lapse = parameters
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
-    # Subjective cue weights interact with objective validity; normalize to avoid arbitrary scale
-    subj = np.array([w1, w2, w3, w4], dtype=float)
-    eff_w = validities * (1e-6 + subj)
-    eff_w = eff_w / (np.sum(eff_w) + 1e-12)
+    """Validity-weighted additive integration with asymmetry, trust blending, and lapses.
+    The model computes option values as a weighted sum of expert ratings, where weights are a
+    participant-specific blend between true expert validities and uniform weights. Negative
+    ratings (0) are down/up-weighted via an asymmetry parameter. Choices are generated via
+    a logistic choice rule with inverse temperature and a lapse rate.
 
-    # Prepare arrays
+    Parameters (all in [0,1] except temperature in [0,10]):
+    - reliance: [0,1] Degree of reliance on true expert validities vs uniform weights.
+                0 => uniform weights; 1 => true validities.
+    - asymmetry: [0,1] Penalty magnitude for negative ratings (0). Feature coding is:
+                  +1 for positive (1) and -asymmetry for negative (0). Higher => stronger
+                  aversion to negatives.
+    - trust_shift: [0,1] Smoothly pushes the effective weights toward equality:
+                   w_eff <- (1 - trust_shift) * w_eff + trust_shift * mean(w_eff).
+                   0 => no shift; 1 => fully equalized.
+    - lapse: [0,1] Lapse probability mixing decisions with random choice (0.5).
+    - temperature: [0,10] Inverse temperature scaling the value difference in the logistic.
+
+    Returns:
+    - Negative log-likelihood of observed choices (0 = chose A, 1 = chose B).
+    """
+    reliance, asymmetry, trust_shift, lapse, temperature = parameters
+    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+
+    # Blend validities with uniform weights according to reliance
+    uniform = np.ones_like(validities) / len(validities)
+    weights = reliance * validities + (1.0 - reliance) * uniform
+
+    # Optional trust equalization toward mean (uses trust_shift)
+    weights = (1.0 - trust_shift) * weights + trust_shift * np.mean(weights)
+
+    # Normalize weights to sum to 1 for identifiability
+    weights = weights / np.sum(weights)
+
+    # Prepare features per trial
     A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
     B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    d = (B - A)  # positive values favor B
 
-    # Deterministic value difference
-    delta = np.dot(d, eff_w)
+    # Asymmetric feature coding: 1 -> +1, 0 -> -asymmetry
+    def recode(X):
+        return X * 1.0 + (1.0 - X) * (-asymmetry)
 
-    # Add bias in logit space as a shift in evidence
-    bias_shift = (bias - 0.5) * 2.0  # in [-1,1]
-    logits = temperature * delta + bias_shift
+    A_coded = recode(A)
+    B_coded = recode(B)
 
-    # Logistic choice probability for choosing B
-    pB = 1.0 / (1.0 + np.exp(-logits))
+    # Compute values
+    vA = A_coded.dot(weights)
+    vB = B_coded.dot(weights)
 
-    # Lapse mixture
-    pB = (1.0 - lapse) * pB + lapse * 0.5
+    # Choice probability for choosing B
+    dv = vB - vA
+    pB_core = 1.0 / (1.0 + np.exp(-temperature * dv))
+    pB = (1.0 - lapse) * pB_core + 0.5 * lapse
+    pB = np.clip(pB, 1e-12, 1.0 - 1e-12)
 
-    # Likelihood
-    decisions = np.asarray(decisions).astype(float)
-    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
-    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
-    return nll
+    decisions = np.asarray(decisions).astype(int)
+    loglik = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
+    return -np.sum(loglik)
 
 
 def cognitive_model2(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Probabilistic Take-The-Best (TTB) with learned search priorities, stopping sharpness, bias, temperature, and lapse.
-    
-    Process:
-    - Assign a priority to each cue via a softmax over attention parameters (modulated by validity).
-    - On each trial, identify discriminating cues (where A != B).
-    - The probability that a cue is the first inspected discriminating cue is proportional to its
-      priority raised to a sharpness exponent (controls stopping/priority steepness).
-    - The chosen option is determined by the direction of the first discriminating cue, passed
-      through a logistic with temperature and bias. If no cue discriminates, choice is driven by bias.
-    - Apply a lapse rate to mix with random choice.
-    
-    Parameters (all used):
-    - a1: [0,1] attention strength for cue 1
-    - a2: [0,1] attention strength for cue 2
-    - a3: [0,1] attention strength for cue 3
-    - a4: [0,1] attention strength for cue 4
-    - phi: [0,1] stopping/priority sharpness; 0 ~ flat priorities, 1 ~ very steep to top cue
-            (implemented as exponent s = 1 + 9*phi on priorities)
-    - bias: [0,1] baseline bias toward choosing B (0.5 = neutral)
-    - temperature: [0,10] inverse temperature in the logistic at the discriminating cue
-    - lapse: [0,1] lapse probability mixing with random choice
-    
-    Inputs:
-    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
-    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
-    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
-    
+    """Probabilistic take-the-best with personalized cue salience, noisy ordering, and lapses.
+    The model approximates lexicographic decision making: it searches cues in order of a
+    personalized 'effective validity' and stops at the first discriminating cue. The indicated
+    option is chosen via a logistic choice rule. If no cue discriminates, it falls back to a
+    simple additive rule. Lapses mix in random responding.
+
+    Parameters (all in [0,1] except temperature in [0,10]):
+    - sal1, sal2, sal3, sal4: [0,1] Participant-specific salience for each cue, blending with
+                              true validities to form effective ordering.
+    - blend: [0,1] Blending between true validities and salience: eff = blend*validity + (1-blend)*salience.
+    - fallback: [0,1] Weight of fallback additive rule when no discriminating cue is found; also
+                        softly included even when a discriminating cue exists.
+    - lapse: [0,1] Lapse probability mixing with random choice (0.5).
+    - temperature: [0,10] Inverse temperature scaling the (signed) discriminating evidence.
+
     Returns:
-    - negative log-likelihood of the observed decisions under the model
+    - Negative log-likelihood of observed choices (0 = A, 1 = B).
     """
-    a1, a2, a3, a4, phi, bias, temperature, lapse = parameters
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    sal1, sal2, sal3, sal4, blend, fallback, lapse, temperature = parameters
+    base_validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    sal = np.array([sal1, sal2, sal3, sal4], dtype=float)
 
-    # Priority via softmax over attention * validity (more valid cues generally higher priority)
-    att = np.array([a1, a2, a3, a4], dtype=float)
-    base_pri = att * validities
-    # Softmax
-    x = base_pri - np.max(base_pri)
-    pri = np.exp(x)
-    pri = pri / (np.sum(pri) + 1e-12)
+    # Effective cue strengths used to define search order
+    eff_strength = blend * base_validities + (1.0 - blend) * sal
 
-    # Sharpness exponent for prioritizing the first discriminating cue
-    s_exp = 1.0 + 9.0 * phi
+    # Prepare features
+    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(int)
+    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(int)
 
-    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
-    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    decisions = np.asarray(decisions).astype(float)
+    nT = len(decisions)
+    # Precompute additive fallback scores (uniform weights for simplicity)
+    add_w = np.ones(4, dtype=float) / 4.0
+    vA_add = A.dot(add_w)
+    vB_add = B.dot(add_w)
+    dv_add = vB_add - vA_add  # in [-1,1]
 
-    bias_shift = (bias - 0.5) * 2.0  # additive logit shift
-    n_trials = len(decisions)
-    pB_all = np.zeros(n_trials, dtype=float)
+    # For lexicographic component: find first discriminating cue in eff_strength order
+    order = np.argsort(-eff_strength)  # descending
+    # Compute signed evidence from first discriminating cue per trial
+    signed_evidence = np.zeros(nT, dtype=float)
+    has_disc = np.zeros(nT, dtype=bool)
 
-    for t in range(n_trials):
-        a = A[t]
-        b = B[t]
-        discrim = (a != b)
-        if not np.any(discrim):
-            # No discriminating cues: rely on bias only
-            pB = 1.0 / (1.0 + np.exp(-(bias_shift)))
-        else:
-            # Probabilities over which discriminating cue is encountered first
-            pri_disc = pri[discrim]
-            # Apply sharpness
-            pri_disc_sharp = np.power(pri_disc + 1e-12, s_exp)
-            pri_disc_sharp = pri_disc_sharp / (np.sum(pri_disc_sharp) + 1e-12)
+    for idx in order:
+        disc = A[:, idx] != B[:, idx]
+        # For trials not yet discriminated, set evidence from this cue
+        need = ~has_disc & disc
+        if np.any(need):
+            # If B has 1 and A has 0 => evidence +eff_strength[idx]; else negative
+            sign = (B[need, idx] - A[need, idx]).astype(float)  # +1 or -1
+            signed_evidence[need] = sign * eff_strength[idx]
+            has_disc[need] = True
 
-            # Directions for discriminating cues in original indexing
-            dirs = np.where(b[discrim] > a[discrim], 1.0, -1.0)  # +1 favors B, -1 favors A
+    # Combine lexicographic and additive components:
+    # If discriminating cue found: core evidence from lexicographic;
+    # Else: fall back to additive only.
+    lex_dv = signed_evidence  # positive favors B
+    # Mix with additive difference using 'fallback' both as soft mix and as hard fallback when no cue.
+    dv = np.where(has_disc, (1.0 - fallback) * lex_dv + fallback * dv_add,
+                  dv_add)
 
-            # Logistic decision at the first discriminating cue, mixed over which cue is first
-            logits = temperature * dirs + bias_shift
-            pB_cue = 1.0 / (1.0 + np.exp(-logits))
-            pB = np.sum(pri_disc_sharp * pB_cue)
+    # Map decision variable to probability of choosing B
+    pB_core = 1.0 / (1.0 + np.exp(-temperature * dv))
+    pB = (1.0 - lapse) * pB_core + 0.5 * lapse
+    pB = np.clip(pB, 1e-12, 1.0 - 1e-12)
 
-        pB_all[t] = pB
-
-    # Lapse mixture
-    pB_all = (1.0 - lapse) * pB_all + lapse * 0.5
-
-    # Likelihood
-    p = decisions * pB_all + (1.0 - decisions) * (1.0 - pB_all)
-    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
-    return nll
+    decisions = np.asarray(decisions).astype(int)
+    loglik = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
+    return -np.sum(loglik)
 
 
 def cognitive_model3(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Hybrid reliability model: blends objective validities with subjective reliabilities,
-    includes feature nonlinearity, bias, temperature, and lapse.
-    
-    Process:
-    - Each cue's effective weight is a convex combination of objective validity and a subjective reliability:
-        w_i = g * validity_i + (1 - g) * s_i
-      where s_i are learned/reported subjective reliabilities.
-    - Feature nonlinearity alpha warps 0/1 features toward or away from positivity:
-        x' = alpha if original x=1, and x' = (1 - alpha) if x=0.
-      Thus alpha>0.5 overweights positive cues; alpha<0.5 overweights negative cues.
-    - Compute weighted additive value difference using warped features and effective weights.
-    - Add response bias in logit space, transform via logistic with inverse temperature.
-    - Apply lapse rate.
-    
-    Parameters (all used):
-    - s1: [0,1] subjective reliability for cue 1
-    - s2: [0,1] subjective reliability for cue 2
-    - s3: [0,1] subjective reliability for cue 3
-    - s4: [0,1] subjective reliability for cue 4
-    - g: [0,1] blending parameter between objective validities (g=1) and subjective reliabilities (g=0)
-    - alpha: [0,1] feature nonlinearity (0.5 = linear; >0.5 increases weight of positive cue values)
-    - bias: [0,1] response bias toward choosing B (0.5 = neutral)
-    - temperature: [0,10] inverse temperature for the logistic choice function
-    - lapse: [0,1] lapse probability mixing with random choice
-    
-    Inputs:
-    - decisions: array-like of 0/1 choices (1 = chose B, 0 = chose A)
-    - A_feature1..A_feature4: arrays of 0/1 cue values for option A
-    - B_feature1..B_feature4: arrays of 0/1 cue values for option B
-    
+    """Bayesian cue integration with personalized trust calibration and prior bias.
+    Each expert is treated as a noisy informant with validity v_k. The participant
+    personalizes trust per cue and globally calibrates validities toward 0.5. For each option,
+    the log-odds of being a high-quality product given its ratings are computed under
+    independence, combined with a prior bias for 'goodness'. Choices depend on the log-odds
+    difference between B and A via a logistic rule with lapse.
+
+    Parameters (all in [0,1] except temperature in [0,10]):
+    - trust1, trust2, trust3, trust4: [0,1] Cue-specific trust scaling (0=no trust, 1=full trust).
+    - calibrate: [0,1] Global calibration toward 0.5: v_eff = 0.5 + calibrate*(v-0.5).
+    - prior_good: [0,1] Prior probability that any given option is a high-quality product.
+    - lapse: [0,1] Lapse probability mixing with random choice (0.5).
+    - temperature: [0,10] Inverse temperature scaling the log-odds difference.
+
     Returns:
-    - negative log-likelihood of the observed decisions under the model
+    - Negative log-likelihood of observed choices (0 = A, 1 = B).
     """
-    s1, s2, s3, s4, g, alpha, bias, temperature, lapse = parameters
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
-    subj_rel = np.array([s1, s2, s3, s4], dtype=float)
+    trust1, trust2, trust3, trust4, calibrate, prior_good, lapse, temperature = parameters
+    base_v = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
+    trust = np.array([trust1, trust2, trust3, trust4], dtype=float)
 
-    # Effective weights blending validity and subjective reliability; normalize to unit sum
-    eff_w = g * validities + (1.0 - g) * subj_rel
-    eff_w = eff_w / (np.sum(eff_w) + 1e-12)
+    # Personalized effective validities: shrink toward 0.5 by calibrate, then scale by trust toward 0.5
+    # Two-stage: first calibrate global, then cue-wise trust
+    v_cal = 0.5 + calibrate * (base_v - 0.5)
+    v_eff = 0.5 + trust * (v_cal - 0.5)
+    v_eff = np.clip(v_eff, 1e-6, 1.0 - 1e-6)  # numerical safety
 
-    # Warp feature values using alpha
-    # Map 1 -> alpha; 0 -> (1 - alpha)
-    def warp(x):
-        return alpha * x + (1.0 - alpha) * (1.0 - x)
+    # Prior log-odds for an option being good
+    prior_good = np.clip(prior_good, 1e-6, 1.0 - 1e-6)
+    logit_prior = np.log(prior_good / (1.0 - prior_good))
 
-    A_raw = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(float)
-    B_raw = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(float)
-    A = warp(A_raw)
-    B = warp(B_raw)
+    # Features
+    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(int)
+    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(int)
 
-    # Value difference
-    delta = np.dot(B - A, eff_w)
+    # For each option X, compute log-odds that X is good given its ratings:
+    # logit P(Good|ratings) = logit(prior) + sum_k [ r_k*log(v/(1-v)) + (1-r_k)*log((1-v)/v) ]
+    # which simplifies to: logit(prior) + sum_k (2*r_k - 1)*log(v/(1-v))
+    logit_coef = np.log(v_eff / (1.0 - v_eff))  # per cue
 
-    # Add bias in logit space
-    bias_shift = (bias - 0.5) * 2.0
-    logits = temperature * delta + bias_shift
+    def option_logit(X):
+        s = (2 * X - 1)  # +1 if rating=1, -1 if rating=0
+        # broadcast multiply and sum across cues
+        return logit_prior + s.dot(logit_coef)
 
-    # Choice probability of B
-    pB = 1.0 / (1.0 + np.exp(-logits))
+    logit_A = option_logit(A)
+    logit_B = option_logit(B)
 
-    # Lapse mixture
-    pB = (1.0 - lapse) * pB + lapse * 0.5
+    # Decision variable: difference in goodness log-odds between B and A
+    dv = logit_B - logit_A
 
-    # Likelihood
-    decisions = np.asarray(decisions).astype(float)
-    p = decisions * pB + (1.0 - decisions) * (1.0 - pB)
-    nll = -np.sum(np.log(np.clip(p, 1e-12, 1.0)))
-    return nll
+    # Choice probability for B
+    pB_core = 1.0 / (1.0 + np.exp(-temperature * dv))
+    pB = (1.0 - lapse) * pB_core + 0.5 * lapse
+    pB = np.clip(pB, 1e-12, 1.0 - 1e-12)
+
+    decisions = np.asarray(decisions).astype(int)
+    loglik = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
+    return -np.sum(loglik)

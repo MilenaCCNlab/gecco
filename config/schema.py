@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 import yaml
 import pandas as pd
-from data.data2text import narrative
+from gecco.prepare_data.data2text import narrative
 from types import SimpleNamespace
 
 class TaskConfig(BaseModel):

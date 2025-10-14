@@ -4,10 +4,10 @@ import os
 import json
 import numpy as np
 
-from llm.generator import generate
-from engine.run_fit import run_fit
-from utils.extraction import extract_full_function
-from engine.feedback import FeedbackGenerator  # <— new import
+from gecco.offline_evaluation.fit_generated_models import run_fit
+from gecco.utils import extract_full_function
+from gecco.construct_feedback.feedback import FeedbackGenerator, LLMFeedbackGenerator
+from gecco.load_llms.model_loader import load_llm
 from pathlib import Path
 
 
@@ -21,10 +21,8 @@ class GeCCoModelSearch:
 
         # --- Choose feedback generator based on config ---
         if hasattr(cfg, "feedback") and getattr(cfg.feedback, "type", "manual") == "llm":
-            from engine.feedback import LLMFeedbackGenerator
             self.feedback = LLMFeedbackGenerator(cfg, model, tokenizer)
         else:
-            from engine.feedback import FeedbackGenerator
             self.feedback = FeedbackGenerator(cfg)
 
         # --- Set project root ---
@@ -42,6 +40,60 @@ class GeCCoModelSearch:
         self.best_iter = -1
         self.tried_param_sets = []
 
+    def generate(self, model, tokenizer=None, prompt=None):
+        """
+        Unified text generation function for any supported backend.
+        Handles both OpenAI GPT and Hugging Face-style models cleanly.
+        """
+        if model is None:
+            raise ValueError("Model not initialized correctly.")
+        provider = self.cfg.llm.provider.lower()
+
+        # -----------------------------
+        # OpenAI / GPT-style generation
+        # -----------------------------
+        if "openai" in provider or "gpt" in provider:
+            max_out = self.cfg.llm.max_output_tokens
+            reasoning_effort = getattr(self.cfg.llm, "reasoning_effort", "medium")
+            text_verbosity = getattr(self.cfg.llm, "text_verbosity", "low")
+
+            print(
+                f"[GeCCo] Using GPT model '{self.cfg.llm.base_model}' "
+                f"(reasoning={reasoning_effort}, verbosity={text_verbosity}, max_output_tokens={max_out})"
+            )
+
+            resp = model.responses.create(
+                model=self.cfg.llm.base_model,
+                reasoning={"effort": "low"},
+                input=[
+                    {"role": "developer", "content": self.cfg.llm.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            decoded = resp.output_text.strip()
+
+            return decoded
+
+        # -----------------------------
+        # Hugging Face-style generation
+        # -----------------------------
+        else:
+            max_new = getattr(self.cfg.llm, "max_output_tokens", getattr(self.cfg.llm, "max_tokens", 2048))
+
+            print(
+                f"[GeCCo] Using HF model '{self.cfg.llm.base_model}' "
+                f"(max_new_tokens={max_new}, temperature={self.cfg.llm.temperature})"
+            )
+
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            output = model.generate(
+                **inputs,
+                max_new_tokens=max_new,
+                temperature=self.cfg.llm.temperature,
+                do_sample=True,
+            )
+            return tokenizer.decode(output[0], skip_special_tokens=True)
+
     def run(self):
         for it in range(self.cfg.loop.max_iterations):
             print(f"\n[GeCCo] --- Iteration {it} ---")
@@ -55,8 +107,8 @@ class GeCCoModelSearch:
                 )
 
             prompt = self.prompt_builder.build_input_prompt(feedback_text=feedback)
-            code_text = generate(self.model, self.tokenizer, prompt, self.cfg)
-
+            code_text = self.generate(self.model, self.tokenizer, prompt)
+            import ipdb; ipdb.set_trace()
             model_file = self.results_dir / "models" / f"iter{it}.py"
             with open(model_file, "w") as f:
                 f.write(code_text)
@@ -115,3 +167,5 @@ class GeCCoModelSearch:
         )
 
         return self.best_model, self.best_metric, self.best_params
+
+    
