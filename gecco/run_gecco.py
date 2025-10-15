@@ -107,7 +107,7 @@ class GeCCoModelSearch:
 
             prompt = self.prompt_builder.build_input_prompt(feedback_text=feedback)
             code_text = self.generate(self.model, self.tokenizer, prompt)
-            import ipdb; ipdb.set_trace()
+
             model_file = self.results_dir / "models" / f"iter{it}.py"
             with open(model_file, "w") as f:
                 f.write(code_text)
