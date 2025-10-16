@@ -48,6 +48,15 @@ def _find_first_function(ns: Dict[str, Any]) -> Optional[Any]:
             return v
     return None
 
+def find_softmax_index_in_list(target_list):
+    search_terms = {'beta', 'beta1', 'beta2', 'beta_1', 'beta_2', 'softmax', 'softmax_beta', 'theta', 'temperature',
+                    'inverse_temperature'}
+
+    indices = [i for i, element in enumerate(target_list) if element in search_terms]
+
+    return indices  # Returns an empty list [] if no matches are found
+
+
 
 # ============================================================
 # Parameter & bounds extraction

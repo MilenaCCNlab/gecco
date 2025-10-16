@@ -1,65 +1,63 @@
-def cognitive_model2(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
+def cognitive_model1(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Probabilistic take-the-best with personalized cue salience, noisy ordering, and lapses.
-    The model approximates lexicographic decision making: it searches cues in order of a
-    personalized 'effective validity' and stops at the first discriminating cue. The indicated
-    option is chosen via a logistic choice rule. If no cue discriminates, it falls back to a
-    simple additive rule. Lapses mix in random responding.
+    """
+    Probabilistic Take-The-Best (PTTB) heuristic with lapse.
+    The model inspects cues in order of expert validity (0.9, 0.8, 0.7, 0.6). If a cue discriminates,
+    the decision is driven primarily by that cue's direction and its utilization strength. If no cue
+    discriminates, the model falls back to an additive weighted difference. Choices are transformed
+    by a logistic with inverse temperature, with a small lapse to allow stimulus-independent errors.
 
-    Parameters (all in [0,1] except temperature in [0,10]):
-    - sal1, sal2, sal3, sal4: [0,1] Participant-specific salience for each cue, blending with
-                              true validities to form effective ordering.
-    - blend: [0,1] Blending between true validities and salience: eff = blend*validity + (1-blend)*salience.
-    - fallback: [0,1] Weight of fallback additive rule when no discriminating cue is found; also
-                        softly included even when a discriminating cue exists.
-    - lapse: [0,1] Lapse probability mixing with random choice (0.5).
-    - temperature: [0,10] Inverse temperature scaling the (signed) discriminating evidence.
+    Parameters (and bounds):
+    - util1: [0,1] utilization strength for cue 1 (validity 0.9)
+    - util2: [0,1] utilization strength for cue 2 (validity 0.8)
+    - util3: [0,1] utilization strength for cue 3 (validity 0.7)
+    - util4: [0,1] utilization strength for cue 4 (validity 0.6)
+    - temperature: [0,10] inverse temperature (choice sensitivity); higher = more deterministic
+    - lapse: [0,1] lapse/guessing rate that mixes 50/50 with the model choice
+
+    Inputs:
+    - decisions: array-like of 0/1 choices (1 = chose option B, 0 = chose option A)
+    - A_feature1..4, B_feature1..4: arrays of 0/1 expert ratings per trial
 
     Returns:
-    - Negative log-likelihood of observed choices (0 = A, 1 = B).
+    - negative log-likelihood of observed choices under the model
     """
-    sal1, sal2, sal3, sal4, blend, fallback, lapse, temperature = parameters
-    base_validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
-    sal = np.array([sal1, sal2, sal3, sal4], dtype=float)
+    util1, util2, util3, util4, temperature, lapse = parameters
+    n_trials = len(decisions)
+    validities = [0.9, 0.8, 0.7, 0.6]
 
-    eff_strength = blend * base_validities + (1.0 - blend) * sal
+    log_likelihood = 0.0
+    eps = 1e-12
 
-    A = np.column_stack([A_feature1, A_feature2, A_feature3, A_feature4]).astype(int)
-    B = np.column_stack([B_feature1, B_feature2, B_feature3, B_feature4]).astype(int)
+    for t in range(n_trials):
+        A = [A_feature1[t], A_feature2[t], A_feature3[t], A_feature4[t]]
+        B = [B_feature1[t], B_feature2[t], B_feature3[t], B_feature4[t]]
+        utils = [util1, util2, util3, util4]
 
-    nT = len(decisions)
+        score = 0.0
+        first_found = False
+        for i in range(4):
+            d = B[i] - A[i]  # -1, 0, or 1
+            if d != 0:
 
-    add_w = np.ones(4, dtype=float) / 4.0
-    vA_add = A.dot(add_w)
-    vB_add = B.dot(add_w)
-    dv_add = vB_add - vA_add  # in [-1,1]
+                score = utils[i] * (1.0 if d > 0 else -1.0)
+                first_found = True
+                break
 
-    order = np.argsort(-eff_strength)  # descending
+        if not first_found:
 
-    signed_evidence = np.zeros(nT, dtype=float)
-    has_disc = np.zeros(nT, dtype=bool)
+            score = 0.0
+            for i in range(4):
+                score += utils[i] * (B[i] - A[i])
 
-    for idx in order:
-        disc = A[:, idx] != B[:, idx]
+        z = temperature * score
+        pB = 1.0 / (1.0 + np.exp(-z))
+        pB = (1.0 - lapse) * pB + 0.5 * lapse
 
-        need = ~has_disc & disc
-        if np.any(need):
+        pB = min(max(pB, eps), 1.0 - eps)
+        if decisions[t] == 1:
+            log_likelihood += np.log(pB)
+        else:
+            log_likelihood += np.log(1.0 - pB)
 
-            sign = (B[need, idx] - A[need, idx]).astype(float)  # +1 or -1
-            signed_evidence[need] = sign * eff_strength[idx]
-            has_disc[need] = True
-
-
-
-    lex_dv = signed_evidence  # positive favors B
-
-    dv = np.where(has_disc, (1.0 - fallback) * lex_dv + fallback * dv_add,
-                  dv_add)
-
-    pB_core = 1.0 / (1.0 + np.exp(-temperature * dv))
-    pB = (1.0 - lapse) * pB_core + 0.5 * lapse
-    pB = np.clip(pB, 1e-12, 1.0 - 1e-12)
-
-    decisions = np.asarray(decisions).astype(int)
-    loglik = decisions * np.log(pB) + (1 - decisions) * np.log(1.0 - pB)
-    return -np.sum(loglik)
+    return -log_likelihood

@@ -93,7 +93,7 @@ class GeCCoModelSearch:
             )
             return tokenizer.decode(output[0], skip_special_tokens=True)
 
-    def run(self):
+    def run_n_shots(self, run_idx):
         for it in range(self.cfg.loop.max_iterations):
             print(f"\n[GeCCo] --- Iteration {it} ---")
 
@@ -108,7 +108,7 @@ class GeCCoModelSearch:
             prompt = self.prompt_builder.build_input_prompt(feedback_text=feedback)
             code_text = self.generate(self.model, self.tokenizer, prompt)
 
-            model_file = self.results_dir / "models" / f"iter{it}.py"
+            model_file = self.results_dir / "models" / f"iter{it}_run{run_idx}.py"
             with open(model_file, "w") as f:
                 f.write(code_text)
 
@@ -145,7 +145,7 @@ class GeCCoModelSearch:
                         self.best_params = params
                         print(f"[⭐ GeCCo] New best model: {func_name} ({metric_name}={mean_metric:.2f})")
 
-                        best_model_file = self.results_dir / "models" / "best_model.py"
+                        best_model_file = self.results_dir / "models" / f"best_model_{run_idx}.py"
                         with open(best_model_file, "w") as f:
                             f.write(func_code)
 
@@ -153,7 +153,7 @@ class GeCCoModelSearch:
                     print(f"[⚠️ GeCCo] Error fitting {func_name}: {e}")
 
             # Save iteration results
-            bic_file = self.results_dir / "bics" / f"iter{it}.json"
+            bic_file = self.results_dir / "bics" / f"iter{it}_run{run_idx}.json"
             with open(bic_file, "w") as f:
                 json.dump(iteration_results, f, indent=2)
 

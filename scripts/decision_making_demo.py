@@ -27,6 +27,7 @@ def main():
     project_root = Path(__file__).resolve().parents[1]
     cfg = load_config(project_root / "config" / "decision_making.yaml")
     data_cfg = cfg.data
+    max_independent_runs  = cfg.loop.max_independent_runs
 
     df = load_data(data_cfg.path, data_cfg.input_columns)
     splits = split_by_participant(df, data_cfg.id_column, data_cfg.splits)
@@ -61,12 +62,13 @@ def main():
 
     # --- Run GeCCo iterative model search ---
     search = GeCCoModelSearch(model, tokenizer, cfg, df_eval, prompt_builder)
-    best_model, best_bic, best_params = search.run()
 
-    # --- Print final results ---
-    print("\n[🏁 GeCCo] Search complete.")
-    print(f"Best model parameters: {', '.join(best_params)}")
-    print(f"Best mean BIC: {best_bic:.2f}")
+    for r in range(max_independent_runs):
+        best_model, best_bic, best_params = search.run_n_shots(r)
+        # --- Print final results ---
+        print("\n[🏁 GeCCo] Search complete.")
+        print(f"Best model parameters: {', '.join(best_params)}")
+        print(f"Best mean BIC: {best_bic:.2f}")
 
 
 # -------------------------------------------------------------------------

@@ -49,22 +49,7 @@ def run_fit(df, code_text, cfg, expected_func_name="cognitive_model"):
     data_cfg = cfg.data
     participants = df[data_cfg.id_column].unique()
     print(spec.param_names)
-    # parameter_bounds = list(spec.bounds.values())
-
-
-
-
-    def find_softmax_index_in_list(target_list):
-        search_terms = {'beta', 'beta1', 'beta2', 'beta_1', 'beta_2', 'softmax', 'softmax_beta', 'theta', 'temperature',
-                        'inverse_temperature'}
-
-        indices = [i for i, element in enumerate(target_list) if element in search_terms]
-
-        return indices  # Returns an empty list [] if no matches are found
-
-    parameter_bounds = [[0, 1] for _ in spec.param_names]
-    for i in find_softmax_index_in_list(spec.param_names):
-        parameter_bounds[i] = [0, 10]
+    parameter_bounds = list(spec.bounds.values())
 
     n_starts = getattr(cfg.evaluation, "n_starts", 10)
 
