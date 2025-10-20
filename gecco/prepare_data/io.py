@@ -33,17 +33,19 @@ def split_by_participant(df, id_col, splits_cfg):
     n = len(unique_ids)
 
     def parse_split(value):
-        if isinstance(value, str):
-            if value.startswith("first"):
-                k = int(value.replace("first", ""))
-                return unique_ids[:k]
-            elif value.startswith("next"):
-                k = int(value.replace("next", ""))
-                return unique_ids[k : 2 * k]
-            elif value == "remainder":
-                return None
-        elif isinstance(value, list):
+        if isinstance(value, list):
             return value
+        elif isinstance(value, str):
+            if value == "remainder":
+                return None
+            elif value.startswith("[") and value.endswith("]"):
+                slice_str = value[1:-1]
+                start_str, end_str = slice_str.split(":")
+                start = int(start_str) if start_str else None
+                end = int(end_str) if end_str else None
+                return unique_ids[start:end]
+            else:
+                raise ValueError(f"Invalid split string format: {value}")
         else:
             raise ValueError(f"Unsupported split format: {value}")
 
@@ -54,7 +56,7 @@ def split_by_participant(df, id_col, splits_cfg):
     used = set((prompt_ids or []) + (eval_ids or []))
     if test_ids is None:
         test_ids = [pid for pid in unique_ids if pid not in used]
-
+    import pdb; pdb.set_trace()
     return {
         "prompt": df[df[id_col].isin(prompt_ids)],
         "eval": df[df[id_col].isin(eval_ids)],
