@@ -1,31 +1,31 @@
+[![arXiv Badge](https://img.shields.io/badge/arXiv-B31B1B?logo=arxiv&logoColor=fff&style=for-the-badge)](https://arxiv.org/abs/2502.00879)
+
 # 🧠 GeCCo: Guided Generation of Computational Cognitive Models
 
 Authors: [Milena Rmus](https://github.com/MilenaCCNlab) and [Akshay K. Jagadish](https://akjagadish.github.io/)
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 ## 📘 Overview
 
-GeCCo (Generative Cognitive Composer) is a research framework for automatically generating, fitting, and evaluating computational cognitive models using large language models (LLMs).
+Guided Generation of Computational Cognitive Models (GeCCo) is a pipeline for automated generation of computational cognitive models using large language models (LLMs).
 
-Given behavioral data from cognitive tasks (e.g., decision-making, reinforcement learning), GeCCo:
+Given task instructions, participant data from cognitive tasks, and a template function, GeCCo:
 
 1. Prompts an LLM to generate candidate cognitive models as executable Python functions
-2. Fits these models to participant data using maximum likelihood estimation
-3. Evaluates model quality using AIC/BIC
-4. Iteratively refines models via structured feedback
+2. Fits these models offline to held-out participant data using maximum likelihood estimation
+3. Uses measures using AIC/BIC to evaluate the model quality and uses that to guide further model generation
+4. Refines the generated models over multiple iterations based on structured feedback
 
-This combines the creativity of LLMs with principled statistical model comparison.
+![GeCCo Schematic](GeCCo.png)
 
 ## 🧩 Key Features
 
-- 🤖 LLM-driven model generation as interpretable Python functions
-- ⚙️ YAML configuration for tasks, data, LLM settings, and evaluation
-- 📊 Automated fitting with multi-start L-BFGS-B optimization
-- 🔁 Iterative search loop with optional manual or LLM-generated feedback
 - 🧮 Task-agnostic design through configurable input columns
-- 📈 BIC/AIC tracking with persisted best models and iteration results
+- ⚙️ YAML configuration for tasks, data, LLM settings, and evaluation
 - 🧱 Modular architecture (prompting, fitting, evaluation, feedback)
+- 🤖 LLM-driven model generation as interpretable Python functions
+- 📊 Automated fitting with multi-start L-BFGS-B optimization
+- 📈 BIC/AIC tracking with persisted best models and iteration results
+- 🔁 Iterative search loop with optional manual or LLM-generated feedback
 
 ## 📂 Repository Structure
 
@@ -34,7 +34,6 @@ This combines the creativity of LLMs with principled statistical model compariso
 ├── README.md
 ├── requirements.txt
 ├── config/
-│   ├── decision_making_openmodels.yaml
 │   ├── decision_making.yaml
 │   ├── schema.py
 │   └── two_step.yaml
@@ -108,6 +107,15 @@ export OPENAI_API_KEY=your_openai_api_key_here
 
 All experiment parameters are specified in YAML files under `config/`.
 
+Key sections include:
+
+- `task`: task description and modeling goal for the LLM
+- `data`: dataset path/columns and narrative template used for prompting
+- `llm`: provider/model and output constraints/guardrails
+- `evaluation`: metric and optimizer options
+- `feedback`: feedback mode between iterations
+- `loop`: number of iterations and runs
+
 Example (`config/two_step.yaml`):
 
 ```yaml
@@ -147,22 +155,14 @@ evaluation:
   optimizer: "L-BFGS-B"
   n_starts: 10
 
+feedback:
+  type: "manual"          # or "llm"
+
 loop:
   max_iterations: 5
   max_independent_runs: 1
 
-feedback:
-  type: "manual"          # or "llm"
 ```
-
-Key sections:
-
-- `task`: task description and modeling goal for the LLM
-- `data`: dataset path/columns and narrative template used for prompting
-- `llm`: provider/model and output constraints/guardrails
-- `evaluation`: metric and optimizer options
-- `loop`: number of iterations and runs
-- `feedback`: feedback mode between iterations
 
 ## 🎯 Usage
 
@@ -281,7 +281,7 @@ Contributions are welcome! Please open an issue or pull request.
 
 ## 📄 License
 
-MIT License. See `LICENSE` if provided.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 📚 Citation
 
