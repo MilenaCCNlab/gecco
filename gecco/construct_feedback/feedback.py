@@ -21,18 +21,24 @@ class FeedbackGenerator:
         Construct feedback string for the next prompt.
         Default: discourage reuse of past parameter combinations.
         """
-        feedback = (
-            f"Your best model so far:\n {best_model}).\n\n"
-            "These are parameter combinations tried so far:\n"
-        )
 
-        for param_set in tried_param_sets:
-            feedback += f"- {', '.join(param_set)}\n"
-
-        feedback += (
-            "\nAvoid repeating these exact combinations, "
+        previous_parameters = "\n".join([", ".join(s) for s in tried_param_sets])   # Summarize all tried parameter sets
+        default_prompt = (
+            f"Your best model so far:\n "
+            f" {best_model}.\n"
+            f"The parameter combinations tried so far:\n{previous_parameters}\n\n"
+            "Avoid repeating these exact combinations, "
             "and explore alternative parameter configurations or mechanisms.\n"
         )
+
+        if self.cfg.feedback.prompt:
+            # Allow user to use {best_model} and {previous_parameters} in their custom prompt
+            feedback = self.cfg.feedback.prompt.format(
+                best_model=best_model,
+                previous_parameters=previous_parameters
+            )
+        else:
+            feedback = default_prompt
 
         return feedback
 
@@ -48,16 +54,27 @@ class LLMFeedbackGenerator(FeedbackGenerator):
         self.tokenizer = tokenizer
 
     def get_feedback(self, best_model, tried_param_sets):
+        """
+        Construct feedback string for the next prompt using an LLM.
+        """
         # Summarize all tried parameter sets
-        summary = "\n".join([", ".join(s) for s in tried_param_sets])
+        previous_parameters = "\n".join([", ".join(s) for s in tried_param_sets])
 
-        prompt = (
+        default_prompt = (
             f"The best model so far was:\n "
             f" {best_model}.\n"
-            f"The following parameter combinations have already been explored:\n{summary}\n\n"
+            f"The following parameter combinations have already been explored:\n{previous_parameters}\n\n"
             "Please suggest high-level guidance for generating new model variants "
             "that differ conceptually but might still perform well."
         )
+
+        if self.cfg.feedback.prompt is not None:
+            prompt = self.cfg.feedback.prompt.format(
+                best_model=best_model,
+                previous_parameters=previous_parameters
+            )
+        else:
+            prompt = default_prompt
 
         # from llm.generator import generate
         feedback_text = self.generate(prompt)
