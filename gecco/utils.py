@@ -1,7 +1,5 @@
 import re
 from typing import Dict, List
-from gecco.prompt_builder.prompt import build_prompt
-
 
 def extract_full_function(text: str, func_name: str) -> str:
     """
@@ -30,10 +28,3 @@ def extract_full_function(text: str, func_name: str) -> str:
     # Clean up markdown or stray comments
     func_block = re.sub(r"^(\s*#+.*$)", "", func_block, flags=re.M)
     return func_block.strip()
-
-class PromptBuilderWrapper:
-    def __init__(self, cfg, data_text):
-        self.cfg = cfg
-        self._data_text = data_text
-    def build_input_prompt(self, feedback_text: str = ""):
-        return build_prompt(self.cfg, self._data_text, feedback_text)

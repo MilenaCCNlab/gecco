@@ -9,7 +9,7 @@ from gecco.prepare_data.io import load_data, split_by_participant
 from gecco.prepare_data.data2text import get_data2text_function
 from gecco.load_llms.model_loader import load_llm
 from gecco.run_gecco import GeCCoModelSearch
-from gecco.utils import PromptBuilderWrapper
+from gecco.prompt_builder.prompt import PromptBuilderWrapper
 
 def main():
     # --- Load configuration & data ---

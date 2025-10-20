@@ -70,3 +70,10 @@ Your function:
         """.strip()
 
     return prompt
+
+class PromptBuilderWrapper:
+    def __init__(self, cfg, data_text):
+        self.cfg = cfg
+        self._data_text = data_text
+    def build_input_prompt(self, feedback_text: str = ""):
+        return build_prompt(self.cfg, self._data_text, feedback_text=feedback_text)
