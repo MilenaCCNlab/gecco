@@ -97,6 +97,17 @@ cd gecco
 pip install -r requirements.txt
 ```
 
+## 🧰 Requirements
+
+See `requirements.txt` for full list. Core packages include:
+
+- numpy, pandas, scipy
+- torch, transformers
+- pyyaml, pydantic
+- openai (for OpenAI backend)
+
+Optional (for local LLMs): vllm, accelerate
+
 ### API keys (if using OpenAI)
 
 ```bash
@@ -263,17 +274,6 @@ Each JSON contains entries like:
   }
 ]
 ```
-
-## 🧰 Requirements
-
-See `requirements.txt` for full list. Core packages include:
-
-- numpy, pandas, scipy
-- torch, transformers
-- pyyaml, pydantic
-- openai (for OpenAI backend)
-
-Optional (for local LLMs): vllm, accelerate
 
 ## 🤝 Contributing
 
