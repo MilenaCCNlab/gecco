@@ -9,19 +9,8 @@ from gecco.prepare_data.io import load_data, split_by_participant
 from gecco.prepare_data.data2text import get_data2text_function
 from gecco.load_llms.model_loader import load_llm
 from gecco.run_gecco import GeCCoModelSearch
-from gecco.prompt_builder.prompt import build_prompt
+from gecco.utils import PromptBuilderWrapper
 
-
-
-# -------------------------------------------------------------------------
-# Configuration
-# -------------------------------------------------------------------------
-
-
-
-# -------------------------------------------------------------------------
-# Main entrypoint
-# -------------------------------------------------------------------------
 def main():
     # --- Load configuration & data ---
     project_root = Path(__file__).resolve().parents[1]
@@ -42,18 +31,6 @@ def main():
         max_trials=getattr(data_cfg, "max_prompt_trials", None),
         value_mappings=getattr(data_cfg, "value_mappings", None)  # 👈 add this
     )
-
-    # --- Prepare prompt builder wrapper ---
-    class PromptBuilderWrapper:
-        """Light adapter so the engine can reuse build_prompt without re-passing data/template."""
-
-        def __init__(self, cfg, data_text):
-            self.cfg = cfg
-            self._data_text = data_text  # keep the prepared narrative
-
-        def build_input_prompt(self, feedback_text: str = ""):
-            # only pass the stored narrative; build_prompt reads template from cfg.llm.template_model
-            return build_prompt(self.cfg, self._data_text, feedback_text=feedback_text)
 
     prompt_builder = PromptBuilderWrapper(cfg, data_text)
 
