@@ -144,7 +144,7 @@ data:
     The participant chose spaceship {choice_1}, traveled to planet {state},
     asked alien {choice_2}, and received {reward} coins.
   splits:
-    prompt: "first3"
+    prompt: "[1:3]"
     eval: "next10"
     test: "remainder"
 
