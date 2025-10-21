@@ -20,8 +20,6 @@ def load_data(path, input_columns=None):
             else df[input_columns]
     return df
 
-
-
 def split_by_participant(df, id_col, splits_cfg):
     """
     Split data into prompt/eval/test sets based on participant IDs.
