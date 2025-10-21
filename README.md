@@ -24,7 +24,7 @@ Given the task instructions, participant data from cognitive tasks, model genera
 - 🧱 Modular architecture (prompting, fitting, evaluation, feedback)
 - 🤖 LLM-driven model generation as interpretable Python functions
 - 📊 Automated fitting with multi-start L-BFGS-B optimization
-- 📈 BIC/AIC tracking with best models and iteration results
+- 📈 BIC/AIC tracking to identify the best models and iteration results
 - 🔁 Iterative search loop with optional manual or LLM-generated feedback
 
 ## 📂 Repository Structure
