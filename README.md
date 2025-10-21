@@ -12,7 +12,7 @@ Given task instructions, participant data from cognitive tasks, and a template f
 
 1. Prompts an LLM to generate candidate cognitive models as executable Python functions
 2. Fits these models offline to held-out participant data using maximum likelihood estimation
-3. Uses measures using AIC/BIC to evaluate the model quality and uses that to guide further model generation
+3. Evaluates their model using measures such as Bayesian Information Criterion (BIC) and uses that to guide further model generation
 4. Refines the generated models over multiple iterations based on structured feedback
 
 ![GeCCo Schematic](GeCCo.png)
