@@ -121,7 +121,7 @@ All experiment parameters are specified in YAML files under `config/`.
 Key sections include:
 
 - `task`: task description and modeling goal for the LLM
-- `data`: dataset path/columns and narrative template used for prompting; note that the pipeline currently assumes a trial structure
+- `data`: dataset path/columns and narrative template used for prompting; note that the pipeline currently assumes a trial structure in the data
 - `llm`: provider/model and output constraints/guardrails
 - `evaluation`: metric and optimizer options
 - `feedback`: feedback mode between iterations
