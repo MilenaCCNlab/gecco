@@ -2,8 +2,6 @@ import pandas as pd
 from typing import Optional
 import string
 
-
-
 def narrative(
     df: pd.DataFrame,
     template: str,
