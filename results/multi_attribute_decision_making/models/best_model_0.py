@@ -1,83 +1,92 @@
-def cognitive_model2(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
+def cognitive_model1(decisions, A_feature1, A_feature2, A_feature3, A_feature4,
                      B_feature1, B_feature2, B_feature3, B_feature4, parameters):
-    """Stochastic Take-The-Best with sequential adherence, fallback integration, bias, and lapse.
-
-    Description:
-    - Processes cues in descending validity (0.9, 0.8, 0.7, 0.6).
-    - If a cue discriminates (A_i != B_i), with probability rho_i the decision is made based on that cue
-      (choosing the option with the positive rating); otherwise continue to the next cue.
-    - If no decision has been made after all cues, a fallback weighted-integration is used
-      combining validity weights and equal weights controlled by omega, then passed through a logistic
-      with inverse temperature and bias.
-    - A lapse rate mixes in random choice.
-
-    Inputs:
-    - decisions: array-like of 0/1 choices; 1 indicates choosing option B.
-    - A_feature1..A_feature4: arrays of 0/1 expert ratings for option A, ordered by validity 0.9..0.6.
-    - B_feature1..B_feature4: arrays of 0/1 expert ratings for option B, ordered by validity 0.9..0.6.
-    - parameters: list or array of 8 parameters:
-        rho1: [0,1] probability to decide on the most valid discriminating cue (0.9) when it discriminates
-        rho2: [0,1] probability to decide on the second cue (0.8) when it discriminates and no decision yet
-        rho3: [0,1] probability to decide on the third cue (0.7)
-        rho4: [0,1] probability to decide on the fourth cue (0.6)
-        omega: [0,1] mixing between validity weights and equal weights in fallback (0=equal, 1=validity)
-        bias_B: [0,1] response bias toward B in fallback stage (converted to log-odds)
-        lapse: [0,1] lapse rate; mixture with uniform choice
-        temperature: [0,10] inverse temperature in fallback logistic
-
+    """Choice-driven adaptive attention (online cue-weight learning with decay and asymmetry).
+    
+    Idea:
+    - The decision maker maintains internal attention/weight on each cue and updates it trial-by-trial based on
+      the chosen option (choice-driven reinforcement of supportive cues).
+    - Cues that support the chosen option are reinforced; cues that contradict the chosen option are penalized
+      with an asymmetric strength.
+    - A small decay implements forgetting. A softmax/logit transforms the weighted evidence into a choice
+      probability with an inverse temperature.
+    
+    Decision rule per trial t:
+    - Evidence S_t = sum_i w_{t,i} * (B_i - A_i).
+    - P(B)_t = sigmoid(beta * S_t).
+    - Update after observing decision d_t in {0,1}:
+        pe_t = d_t - P(B)_t
+        w_{t+1,i} = (1 - decay) * w_{t,i} + alpha * pe_t * g_i(d_t, A_i, B_i)
+      where g_i scales the update by cue direction and asymmetry:
+        dir_i = sign(B_i - A_i) in {-1,0,1}
+        agree_with_choice = 1 if dir_i == +1 when d_t=1 or dir_i == -1 when d_t=0, else 0
+        disagree_with_choice = 1 - agree_with_choice (for |dir_i|==1; 0 when dir_i==0)
+        g_i = dir_i * [agree_with_choice + lambda_loss * disagree_with_choice]
+      No update if the cue does not discriminate (dir_i=0).
+    
+    Initialization of w_0:
+    - Validity vector v = [0.9, 0.8, 0.7, 0.6].
+    - Prior blending: w_0 = prior_bias * v + (1 - prior_bias) * 0.5 for each cue.
+      This sets a prior attention near 0.5 and pulls toward known validities as prior_bias increases.
+    
+    Parameters (all are used):
+    - alpha: [0,1] learning rate for attention updates.
+    - decay: [0,1] exponential forgetting of weights each trial.
+    - prior_bias: [0,1] blend between uniform 0.5 and validity prior; higher = more aligned with validities.
+    - lambda_loss: [0,1] asymmetry factor for penalizing cues that contradict the chosen option
+                   (0 = ignore contradictory cues in updates; 1 = symmetric reinforcement/penalty).
+    - beta: [0,10] inverse temperature scaling of the decision evidence.
+    
     Returns:
-    - Negative log-likelihood of observed decisions under the model.
+    - Negative log-likelihood of the observed choices under the model.
     """
-    rho1, rho2, rho3, rho4, omega, bias_B, lapse, temperature = parameters
-    rho = np.array([rho1, rho2, rho3, rho4], dtype=float)
+    alpha, decay, prior_bias, lambda_loss, beta = parameters
 
-    validities = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
-    equal_w = np.ones(4, dtype=float) / 4.0
-    fallback_w = omega * validities + (1.0 - omega) * equal_w
+    v = np.array([0.9, 0.8, 0.7, 0.6], dtype=float)
 
-    A = np.vstack([A_feature1, A_feature2, A_feature3, A_feature4]).T.astype(float)
-    B = np.vstack([B_feature1, B_feature2, B_feature3, B_feature4]).T.astype(float)
+    w = prior_bias * v + (1.0 - prior_bias) * 0.5
 
-    n = len(decisions)
-    p_B = np.zeros(n, dtype=float)
+    A1 = np.asarray(A_feature1, dtype=float)
+    A2 = np.asarray(A_feature2, dtype=float)
+    A3 = np.asarray(A_feature3, dtype=float)
+    A4 = np.asarray(A_feature4, dtype=float)
+    B1 = np.asarray(B_feature1, dtype=float)
+    B2 = np.asarray(B_feature2, dtype=float)
+    B3 = np.asarray(B_feature3, dtype=float)
+    B4 = np.asarray(B_feature4, dtype=float)
+    D = np.asarray(decisions, dtype=float)
 
-    eps = 1e-9
-    bias_logodds = np.log((bias_B + eps) / (1.0 - bias_B + eps))
+    n = len(D)
+    nll = 0.0
+    eps = 1e-12
 
     for t in range(n):
-        a = A[t]
-        b = B[t]
-        disc = (a != b).astype(int)  # 1 if discriminates
+        d_vec = np.array([
+            B1[t] - A1[t],
+            B2[t] - A2[t],
+            B3[t] - A3[t],
+            B4[t] - A4[t]
+        ], dtype=float)
 
-        favors = np.where(b > a, 1, -1)
+        S = float(np.dot(w, d_vec))
+        pB = 1.0 / (1.0 + np.exp(-beta * S))
+        pB = np.clip(pB, eps, 1.0 - eps)
 
-        mass_reaching = 1.0
-        p_B_t = 0.0
+        if D[t] == 1.0:
+            nll -= np.log(pB)
+        else:
+            nll -= np.log(1.0 - pB)
 
-        for i in range(4):
-            if disc[i] == 1:
+        dir_vec = np.sign(d_vec)  # {-1,0,1}
+        agree_choice = ((D[t] == 1.0) & (dir_vec == 1)) | ((D[t] == 0.0) & (dir_vec == -1))
+        disagree_choice = ((D[t] == 1.0) & (dir_vec == -1)) | ((D[t] == 0.0) & (dir_vec == 1))
 
-                decide_prob = mass_reaching * rho[i]
-                if favors[i] == 1:
-                    p_B_t += decide_prob
+        agree_choice = agree_choice.astype(float)
+        disagree_choice = disagree_choice.astype(float)
 
+        g = dir_vec * (agree_choice + lambda_loss * disagree_choice)
 
-                mass_reaching *= (1.0 - rho[i])
-            else:
+        pe = D[t] - pB  # signed prediction error
 
-                mass_reaching *= 1.0
+        w = (1.0 - decay) * w + alpha * pe * g
 
-        if mass_reaching > 0.0:
-            dv_fb = np.dot((b - a), fallback_w)  # positive => evidence for B
-            logit_fb = temperature * dv_fb + bias_logodds
-            p_B_fb = 1.0 / (1.0 + np.exp(-logit_fb))
-            p_B_t += mass_reaching * p_B_fb
-
-        p_B[t] = p_B_t
-
-    p_B = lapse * 0.5 + (1.0 - lapse) * p_B
-    p_B = np.clip(p_B, 1e-12, 1.0 - 1e-12)
-
-    decisions = np.asarray(decisions).astype(float)
-    log_likelihood = np.sum(decisions * np.log(p_B) + (1.0 - decisions) * np.log(1.0 - p_B))
-    return -float(log_likelihood)
+    return float(nll)
