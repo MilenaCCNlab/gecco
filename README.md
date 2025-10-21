@@ -145,7 +145,7 @@ data:
     asked alien {choice_2}, and received {reward} coins.
   splits:
     prompt: "[1:3]"
-    eval: "next10"
+    eval: "[4:14]"
     test: "remainder"
 
 llm:
