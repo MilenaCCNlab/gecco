@@ -124,8 +124,8 @@ Key sections include:
 - `data`: dataset path/columns and narrative template used for prompting; note that the pipeline currently assumes a trial structure in the data
 - `llm`: provider/base model and output constraints/guardrails
 - `evaluation`: metric and optimizer options
-- `feedback`: feedback mode between iterations
-- `loop`: number of iterations and runs
+- `feedback`: feedback mode between iterations (manual or llm-based)
+- `loop`: number of model sampling iterations and independent runs
 
 Example (`config/two_step.yaml`):
 
