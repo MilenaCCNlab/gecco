@@ -11,20 +11,20 @@ Guided Generation of Computational Cognitive Models (GeCCo) is a pipeline for au
 Given the task instructions, participant data from cognitive tasks, model generation specs and a template function, GeCCo:
 
 1. Prompts an LLM to generate candidate cognitive models as executable Python functions
-2. Fits these models offline to held-out participant data using maximum likelihood estimation
-3. Evaluates their model using measures such as Bayesian Information Criterion (BIC) and uses that to guide further model generation
+2. Fits these models offline to the held-out participant data using maximum likelihood estimation (via scipy.optimize)
+3. Evaluates the generated model using metrics such as Bayesian Information Criterion (BIC), and uses this performance metric to guide further model generation
 4. Refines the generated models over multiple iterations based on structured feedback
 
 ![GeCCo Schematic](GeCCo.png)
 
 ## 🧩 Key Features
 
-- 🧮 Task-agnostic design through configurable input columns
+- 🧮 Task-agnostic design through configurable input data columns
 - ⚙️ YAML configuration for tasks, data, LLM settings, and evaluation
 - 🧱 Modular architecture (prompting, fitting, evaluation, feedback)
 - 🤖 LLM-driven model generation as interpretable Python functions
 - 📊 Automated fitting with multi-start L-BFGS-B optimization
-- 📈 BIC/AIC tracking with persisted best models and iteration results
+- 📈 BIC/AIC tracking with best models and iteration results
 - 🔁 Iterative search loop with optional manual or LLM-generated feedback
 
 ## 📂 Repository Structure
