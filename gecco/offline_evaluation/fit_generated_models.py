@@ -1,10 +1,8 @@
 # engine/run_fit.py
-
 import numpy as np
 from scipy.optimize import minimize
 from gecco.offline_evaluation.utils import build_model_spec_from_llm_output
 from gecco.offline_evaluation.evaluation_functions import aic as _aic, bic as _bic
-
 
 def run_fit(df, code_text, cfg, expected_func_name="cognitive_model"):
     """
