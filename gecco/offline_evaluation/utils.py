@@ -57,7 +57,6 @@ def find_softmax_index_in_list(target_list):
     return indices  # Returns an empty list [] if no matches are found
 
 
-
 # ============================================================
 # Parameter & bounds extraction
 # ============================================================
@@ -79,7 +78,6 @@ def extract_parameter_names(text):
             if len(params) > 1:
                 return params
     return []
-
 
 def parse_bounds_from_docstring(doc: Optional[str]) -> Dict[str, List[float]]:
     """
