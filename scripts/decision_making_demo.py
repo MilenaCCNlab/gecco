@@ -42,7 +42,7 @@ def main():
 
     for r in range(max_independent_runs):
         best_model, best_bic, best_params = search.run_n_shots(r)
-        # --- Print final results ---
+        # --- Print final results across sampling iterations ---
         print("\n[🏁 GeCCo] Search complete.")
         print(f"Best model parameters: {', '.join(best_params)}")
         print(f"Best mean BIC: {best_bic:.2f}")
