@@ -146,7 +146,7 @@ data:
   splits:
     prompt: "[1:3]"
     eval: "[4:14]"
-    test: "remainder"
+    test: "[14:]"
 
 llm:
   provider: "openai"
