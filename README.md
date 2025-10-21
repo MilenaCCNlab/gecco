@@ -8,7 +8,7 @@ Authors: [Milena Rmus](https://github.com/MilenaCCNlab) and [Akshay K. Jagadish]
 
 Guided Generation of Computational Cognitive Models (GeCCo) is a pipeline for automated generation of computational cognitive models using large language models (LLMs).
 
-Given task instructions, participant data from cognitive tasks, and a template function, GeCCo:
+Given the task instructions, participant data from cognitive tasks, model generation specs and a template function, GeCCo:
 
 1. Prompts an LLM to generate candidate cognitive models as executable Python functions
 2. Fits these models offline to held-out participant data using maximum likelihood estimation
