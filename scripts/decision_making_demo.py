@@ -32,6 +32,7 @@ def main():
         value_mappings=getattr(data_cfg, "value_mappings", None)  # 👈 add this
     )
 
+    # --- Define the prompt ---
     prompt_builder = PromptBuilderWrapper(cfg, data_text)
 
     # --- Load LLM ---
