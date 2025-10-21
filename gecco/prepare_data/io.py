@@ -2,6 +2,7 @@ import pandas as pd
 from typing import List
 import os
 import numpy as np
+import pdb
 
 def load_data(path, input_columns=None):
     # If path is relative, make it relative to project root
@@ -56,7 +57,7 @@ def split_by_participant(df, id_col, splits_cfg):
     used = set((prompt_ids or []) + (eval_ids or []))
     if test_ids is None:
         test_ids = [pid for pid in unique_ids if pid not in used]
-    import pdb; pdb.set_trace()
+    # pdb.set_trace()
     return {
         "prompt": df[df[id_col].isin(prompt_ids)],
         "eval": df[df[id_col].isin(eval_ids)],
