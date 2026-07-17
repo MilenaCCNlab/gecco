@@ -1,0 +1,35 @@
+import json
+from pathlib import Path
+
+from library_learning.compose.gemini import GeminiClient, load_env_key
+
+
+def test_load_env_key(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text('GEMINI_API_KEY="bad"\nGEMINI_API_KEY_LAKELAB="AIzaGOOD"\n')
+    assert load_env_key(env_path=env) == "AIzaGOOD"
+
+
+def test_generate_logs_verbatim(tmp_path):
+    calls = []
+
+    def fake_transport(url, payload):
+        calls.append((url, payload))
+        return {"candidates": [{"content": {"parts": [{"text": "hello"}]}}],
+                "modelVersion": "gemini-3.1-pro-preview"}
+
+    client = GeminiClient(log_dir=tmp_path, api_key="k", transport=fake_transport)
+    out = client.generate("say hello", tag="smoke")
+    assert out == "hello"
+    assert "gemini-3.1-pro-preview" in calls[0][0]
+    assert calls[0][1]["generationConfig"]["temperature"] == 0.0
+
+    log_files = sorted(tmp_path.glob("call_*.json"))
+    assert len(log_files) == 1 and log_files[0].name == "call_000_smoke.json"
+    logged = json.loads(log_files[0].read_text())
+    assert logged["prompt"] == "say hello"
+    assert logged["response"]["candidates"][0]["content"]["parts"][0]["text"] == "hello"
+    assert logged["model"] == "gemini-3.1-pro-preview"
+
+    client.generate("again", tag="smoke")
+    assert (tmp_path / "call_001_smoke.json").exists()
