@@ -49,3 +49,12 @@ def test_freeze_discipline(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         evaluate_models(target, GRP, tmp_path, [14], set_name="test")
+
+
+def test_wilcoxon_p_all_zero_differences():
+    import numpy as np
+    from library_learning.compose.evaluate import _wilcoxon_p
+    a = np.array([1.0, 2.0, 3.0])
+    assert _wilcoxon_p(a, a.copy()) == 1.0
+    b = a + np.array([0.5, -0.4, 0.9])
+    assert 0.0 <= _wilcoxon_p(a, b) <= 1.0

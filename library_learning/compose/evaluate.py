@@ -16,6 +16,14 @@ TIE_TOL = 1.0
 CROSS_CHECK_TOL = 5.0
 
 
+def _wilcoxon_p(a, b):
+    """Wilcoxon signed-rank p; 1.0 when all differences are zero (no signal)."""
+    try:
+        return float(wilcoxon(a, b).pvalue)
+    except ValueError:
+        return 1.0
+
+
 def _bounds_for(code):
     names = extract_unpack_names(code)
     b = parse_bounds(code, names)
@@ -119,10 +127,10 @@ def summarize(results_val, results_test, warnings, out_dir, target=None):
     losses = int((delta > TIE_TOL).sum())
     stats = {
         "mean_bic": means,
-        "composed_vs_group": {"wilcoxon_p": float(wilcoxon(comp, grp).pvalue),
+        "composed_vs_group": {"wilcoxon_p": _wilcoxon_p(comp, grp),
                               "wins": wins, "ties": ties, "losses": losses,
                               "mean_delta": float(delta.mean())},
-        "composed_vs_hybrid": {"wilcoxon_p": float(wilcoxon(comp, hyb).pvalue),
+        "composed_vs_hybrid": {"wilcoxon_p": _wilcoxon_p(comp, hyb),
                                "mean_delta": float((comp - hyb).mean())},
         "warnings": warnings,
     }
