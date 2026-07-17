@@ -52,6 +52,24 @@ def test_validate_smokes_pairs():
     assert errors == []  # pair (stick, decay) smoke-tested together
 
 
+def test_validate_flags_destructured_and_loop_state_vars():
+    bad = make_good()
+    bad["modules"][0]["slots"]["init"] = "a_var, b_var = -1, 0.0"
+    inv, errors = validate_inventory_obj(bad)
+    assert any("unprefixed" in e and "a_var" in e for e in errors)
+
+    bad2 = make_good()
+    bad2["modules"][0]["slots"]["init"] = "for leaked in range(2):\n    pass"
+    inv, errors = validate_inventory_obj(bad2)
+    assert any("unprefixed" in e and "leaked" in e for e in errors)
+
+
+def test_parse_json_reply_prefers_valid_json_fence():
+    reply = ("Here is an example:\n```python\nnot json\n```\n"
+             "```json\n{\"modules\": []}\n```")
+    assert _parse_json_reply(reply) == {"modules": []}
+
+
 def test_audit_coverage():
     obj = {"modules": [], "coverage": [
         {"pid": 1, "mechanism": "stickiness", "module": "stick",

@@ -66,16 +66,24 @@ Problems:
 Previous JSON:
 {previous}'''
 
-FENCE_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+FENCE_RE = re.compile(r"```(\w*)[ \t]*\n?(.*?)```", re.DOTALL)
 
 
 def _parse_json_reply(text):
-    m = FENCE_JSON_RE.search(text)
-    raw = m.group(1) if m else text
-    try:
-        return json.loads(raw.strip())
-    except Exception as e:
-        raise ValueError("Gemini reply is not valid JSON (%s):\n%s" % (e, text[:2000]))
+    """Parse a Gemini reply as JSON, tolerating extra fenced examples in the
+    reply (e.g. an illustrative ```python block before the real ```json
+    block). Tries, in order: each ```json-tagged fence (in appearance
+    order), each other fence, then the whole text stripped."""
+    matches = FENCE_RE.findall(text)
+    json_tagged = [content for lang, content in matches if lang.lower() == "json"]
+    other_fenced = [content for lang, content in matches if lang.lower() != "json"]
+    last_err = None
+    for candidate in json_tagged + other_fenced + [text]:
+        try:
+            return json.loads(candidate.strip())
+        except Exception as e:
+            last_err = e
+    raise ValueError("Gemini reply is not valid JSON (%s):\n%s" % (last_err, text[:2000]))
 
 
 def annotate_seed(client, pid, code):
@@ -93,9 +101,28 @@ CANONICAL_NAMES = {
 }
 
 
+def _target_names(target):
+    """Recursively collect ast.Name ids bound by an assignment-style target
+    expression, following through tuple/list destructuring and starred
+    targets. Subscript/Attribute targets are ignored — they mutate existing
+    state (allowed), not introduce a new name."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names = []
+        for elt in target.elts:
+            names.extend(_target_names(elt))
+        return names
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    return []
+
+
 def _unprefixed_assignments(module):
-    """Names assigned in append-slot snippets that are neither canonical nor
-    '{id}_'-prefixed (state-isolation check)."""
+    """Names assigned/bound in append-slot snippets that are neither
+    canonical nor '{id}_'-prefixed (state-isolation check). Covers plain
+    assignment targets as well as tuple/list destructuring, starred
+    targets, for-loop targets, comprehension targets, and 'with ... as x'."""
     bad = set()
     for code in module.slots.values():
         try:
@@ -108,9 +135,15 @@ def _unprefixed_assignments(module):
                 targets = node.targets
             elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
                 targets = [node.target]
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                targets = [node.target]
+            elif isinstance(node, ast.comprehension):
+                targets = [node.target]
+            elif isinstance(node, ast.withitem):
+                if node.optional_vars is not None:
+                    targets = [node.optional_vars]
             for t in targets:
-                if isinstance(t, ast.Name):
-                    name = t.id
+                for name in _target_names(t):
                     if (name not in CANONICAL_NAMES
                             and name not in {p.name for p in module.params}
                             and not name.startswith(module.id + "_")):
