@@ -23,18 +23,22 @@ of exactly the participants group gecco saw (1, 2, 4–13 — same information
 budget), (2) composing library modules into a single program via deterministic
 search, and (3) testing generalization on unseen participants?
 
-## Splits (no double-dipping)
+## Splits (revised 2026-07-17 after pitfall review)
 
 | Set | Participants | Used for |
 |---|---|---|
-| Library seed | 1, 2, 4–13 (12 subjects) | Module extraction only; never re-scored |
-| Validation | 10 of 14–44, OCI-stratified, seeded | Composition selection (mean BIC) |
-| Final test | remaining 21 of 14–44 | Frozen winner + baselines only |
+| Library seed | 1, 2, 4–13 (12 subjects) | Module extraction (+ seed reconstruction gate) |
+| Composition validation | 4–13 (group gecco's eval set) | Selecting the single composed program (mean BIC) |
+| Library reconstruction | 10 of 14–44, OCI-stratified, deterministic | Per-participant best composition — does the library span unseen individuals? |
+| Final test | remaining 21 of 14–44 | The ONLY set results are claimed on |
 
-Validation/test assignment is written once to `splits.json` (seeded,
-OCI-stratified: sort test participants by `oci`, alternate/seeded-sample within
-strata to get 10 validation + 21 test) and reused everywhere. Report OCI
-mean/std per half as a balance check.
+Rationale: selecting the composition on 4–13 matches group gecco's
+information budget exactly (it scored candidates on those same 10 each
+iteration). The library overlap on those subjects is deliberate and
+disclosed; every reported claim lives on the untouched 21. The
+reconstruction 10 are assigned deterministically (sort held-out pids by
+`(oci, pid)`, indices `i % 3 == 1`), written once to `splits.json` with OCI
+mean/std per subset as a balance check.
 
 ## Stage 1 — Module extraction (Gemini-curated, miner-grounded, fully logged)
 
@@ -42,7 +46,8 @@ mean/std per half as a balance check.
 through the **Gemini API** — not in-session — with **every prompt and response
 logged verbatim** to disk.
 
-- **Model:** `gemini-3.5-flash` (verified available and generating,
+- **Model:** `gemini-3.1-pro-preview` for ALL calls (annotation, merge,
+  repair — user decision after pitfall review; listed as available
   2026-07-17), temperature 0. **Key:** `GEMINI_API_KEY_LAKELAB` from `.env`
   (verified working; plain `GEMINI_API_KEY` is invalid — do not use).
 - **Logging:** every call writes `llm_log/call_{NNN}.json` containing
@@ -55,6 +60,27 @@ logged verbatim** to disk.
   bounds, provenance, incompatibilities). Deterministic Python validates and
   renders the inventory into `module_inventory.py`; malformed LLM output fails
   loudly, and any manual repair is recorded in `llm_log/MANUAL_EDITS.md`.
+
+**Extraction quality gates (added after pitfall review, all user-approved):**
+
+1. **Seed reconstruction gate** — for each seed participant, render the
+   candidate composed of exactly their annotated modules, fit it to their own
+   data (seeded protocol), and compare BIC to their stored individual-gecco
+   BIC. Written to `reconstruction_report.json`; a seed whose reconstructed
+   BIC exceeds stored by > 15 fails the gate → repair loop / manual fix.
+   Catches extraction infidelity (mechanism distorted in translation).
+2. **Slot-expressibility escape hatch** — the annotation prompt lets Gemini
+   mark a mechanism `"expressible_in_slots": false` with a reason instead of
+   shoehorning it; the validator reports these per seed so slot-contract
+   extensions are deliberate decisions, not silent distortions.
+3. **Coverage audit** — the merge reply must map every annotated mechanism to
+   a module id or an explicit logged decision; the validator fails if any
+   annotated mechanism is unaccounted for.
+4. **Bounds cross-check** — module parameter bounds are checked against the
+   provenance participants' source docstring bounds (`parse_bounds`).
+5. **Module state isolation** — module-internal state variables must be
+   prefixed with the module id (prompt rule + AST validator check), and all
+   module PAIRS are smoke-tested at inventory time, not just singletons.
 - `google-genai` gets pip-installed into `gecco-env/` (or plain REST via
   urllib — decide at implementation; REST avoids a new dependency).
 
@@ -98,14 +124,31 @@ Pipeline details:
 - **Fitting protocol** (mirrors `run_fit`): per-participant L-BFGS-B, uniform
   random starts within bounds, n_starts = 10, **seeded RNG** (seed = f(participant
   id, candidate hash)) for full reproducibility. Objective = mean BIC across the
-  10 validation participants. Ties (< 1 BIC point) → fewer parameters wins.
-- Every candidate logged in `search_log.json` (module set, param count,
+  composition-validation participants (4–13). Ties (< 1 BIC point) → fewer
+  parameters wins.
+- Every candidate logged in `search_log.jsonl` (module set, param count,
   per-participant BICs, mean BIC).
+- **Selection stability report** (`selection_report.json`): top-10 candidates
+  by validation mean BIC, plus leave-one-participant-out rank stability of
+  the top candidates — reported alongside the winner to expose winner's-curse
+  noise on a 10-subject validation set.
+
+## Stage 2b — Library reconstruction on unseen participants
+
+For each of the 10 reconstruction participants (OCI-stratified from 14–44):
+search the library for that individual's best module combination (same cap,
+same seeded fitting, same search mode as Stage 2) and compare the resulting
+BIC against (a) their individual-gecco program refit (ceiling) and (b) the
+group gecco model refit. This measures whether the library spans unseen
+individuals — a library-quality metric reported separately
+(`reconstruction_results.json` + RESULTS.md section) and never mixed into
+the single-program claim.
 
 ## Stage 3 — Generalization test
 
 Winner frozen as `composed_model.txt`, then all models fit per-participant on
-the 21 final-test participants under the identical seeded protocol:
+the **21 final-test participants** (the only set results are claimed on)
+under the identical seeded protocol:
 
 | Model | Role |
 |---|---|
@@ -124,8 +167,10 @@ New dir `results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_
 - `module_inventory.py`, `MODULES.md`
 - `llm_log/` (every Gemini prompt/response, verbatim, numbered)
 - `splits.json`
-- `candidates/` (rendered candidate programs), `search_log.json`
-- `composed_model.txt`, `winner_params_validation.csv`
+- `search_log.jsonl`, `selection_report.json` (top-10 + LOO rank stability)
+- `reconstruction_report.json` (seed fidelity gate),
+  `reconstruction_results.json` (unseen-participant library coverage)
+- `composed_model.txt`, `winner.json`
 - `test_results.json`, `test_results.csv` (per-participant BICs, all models)
 - `RESULTS.md` + comparison figure, paper style (teal = hybrid reference,
   blue = composed winner, gray = others; PNG + PDF)

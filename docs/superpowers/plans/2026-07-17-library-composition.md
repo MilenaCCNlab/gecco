@@ -13,17 +13,17 @@
 ## Global Constraints
 
 - Python 3.9 — no `X | Y` annotations, no `match`. Interpreter: `/Users/akshay/projects/gecco/gecco-env/bin/python`; run everything from repo root `/Users/akshay/projects/gecco`.
-- Gemini: model `gemini-3.5-flash`, `temperature: 0`, key from `.env` var **`GEMINI_API_KEY_LAKELAB`** (verified working 2026-07-17; plain `GEMINI_API_KEY` is invalid — never use it). Every call logged verbatim to `llm_log/call_{NNN}_{tag}.json`.
+- Gemini: model **`gemini-3.1-pro-preview`** for ALL calls, `temperature: 0`, key from `.env` var **`GEMINI_API_KEY_LAKELAB`** (verified working 2026-07-17; plain `GEMINI_API_KEY` is invalid — never use it). Every call logged verbatim to `llm_log/call_{NNN}_{tag}.json`.
 - Individual results dir (seeds + output home): `results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_individual`
 - Group results dir: `results/two_step_psychiatry_group_function_ocibalanced_maxsetting` (its config: `config/two_step_psychiatry_group_ocd_maxsetting.yaml`, matched by `task.name`).
 - Output dir: `<individual results dir>/library_composition/` (constant `OUT_DIRNAME = "library_composition"`).
-- Splits: library seeds = group prompt+eval participants (expect `[1, 2, 4..13]`); validation = 10 of test pids (OCI-stratified, deterministic); final test = remaining 21. Participants 0 and 3 unused.
+- Splits (REVISED after pitfall review): library seeds = group prompt+eval participants (expect `[1, 2, 4..13]`); **composition validation = group eval participants `[4..13]`** (matches group gecco's information budget); **reconstruction set = 10 of held-out pids 14–44** (OCI-stratified, deterministic, `i % 3 == 1` over `(oci, pid)`-sorted); **final test = remaining 21** — the only set results are claimed on. Participants 0 and 3 unused.
 - Parameter cap: **8** total (backbone 2 + modules). Missed trials are coded `-1` in `choice_1/state/choice_2/reward` — all rendered code must be `-1`-safe.
 - Every fit seeded: L-BFGS-B, `n_starts=10`, `seed = int(hashlib.md5(f"{tag}:{pid}".encode()).hexdigest()[:8], 16)`.
 - BIC = `log(n_trials)*k + 2*nll`, `n_trials=200` per participant (matches `gecco/offline_evaluation/evaluation_functions.py`).
 - Rendered model code: numpy-only, no imports, gecco-compatible (docstring bounds parseable by `library_learning/loading.py::BOUNDS_RE`, unpack line `a, b = model_parameters`).
 - Tests: `gecco-env/bin/python -m pytest tests/ -v`. No live-API calls in tests (inject fake transport).
-- **USER CHECKPOINT** after Task 11's count step: report candidate count to Akshay; he chooses exhaustive vs greedy. Do not start fitting before that.
+- **USER CHECKPOINT** after Task 12's count step: report candidate count to Akshay; he chooses exhaustive vs greedy. Do not start the composition search before that.
 - Commit code per task on branch `gecco-individual-differences`. Result artifacts committed only in Task 12.
 
 ## Existing utilities to reuse (do not rewrite)
@@ -37,23 +37,25 @@
 
 ```
 library_learning/
-  __main__.py               # CLI: compose-modules | compose-count | compose-search | compose-eval  (Task 10)
+  __main__.py               # CLI: compose-modules | compose-count | compose-search | compose-reconstruct | compose-eval  (Task 11)
   compose/
     __init__.py             # empty                                                (Task 1)
     gemini.py               # .env loading, logged REST client, retry              (Task 1)
-    splits.py               # seed/test pid derivation + OCI-stratified val/test   (Task 2)
+    splits.py               # seed/val pids from group config + OCI-stratified reconstruction/test  (Task 2)
     inventory.py            # Module/Inventory dataclasses, JSON validation        (Task 3)
     render.py               # backbone template + slot assembly + smoke check      (Task 4)
     fitting.py              # seeded per-participant L-BFGS-B fits + BIC           (Task 5)
-    extract.py              # Gemini prompts, annotate/merge, MODULES.md           (Task 6)
-    search.py               # enumeration, exhaustive + greedy search, logs        (Task 7)
+    extract.py              # Gemini prompts, annotate/merge, gates, MODULES.md    (Task 6)
+    search.py               # enumeration, searches, selection report, logs        (Task 7)
     hybrid.py               # Daw hybrid likelihood source (baseline)              (Task 8)
     evaluate.py             # final-test fits, stats, RESULTS.md                   (Task 9)
-    figure.py               # comparison figure, paper palette                     (Task 10)
+    reconstruct.py          # per-participant library coverage on unseen pids      (Task 10)
+    figure.py               # comparison figure, paper palette                     (Task 11)
 tests/
   test_compose_gemini.py test_compose_splits.py test_compose_inventory.py
   test_compose_render.py test_compose_fitting.py test_compose_search.py
-  test_compose_hybrid.py test_compose_evaluate.py test_compose_cli.py
+  test_compose_hybrid.py test_compose_evaluate.py test_compose_reconstruct.py
+  test_compose_cli.py
 ```
 
 ---
@@ -66,7 +68,7 @@ tests/
 
 **Interfaces:**
 - Produces: `load_env_key(env_path=REPO_ROOT/".env", var="GEMINI_API_KEY_LAKELAB") -> str`;
-  `class GeminiClient(log_dir, api_key=None, model="gemini-3.5-flash", temperature=0.0, transport=None)` with
+  `class GeminiClient(log_dir, api_key=None, model="gemini-3.1-pro-preview", temperature=0.0, transport=None)` with
   `generate(prompt: str, tag: str) -> str` (returns response text, writes `log_dir/call_{NNN}_{tag}.json`).
   `transport` is an injectable `fn(url, payload_dict) -> response_dict` for tests; default uses urllib with 5 retries / exponential backoff on HTTP 429/500/503.
 
@@ -99,12 +101,12 @@ def test_generate_logs_verbatim(tmp_path):
     def fake_transport(url, payload):
         calls.append((url, payload))
         return {"candidates": [{"content": {"parts": [{"text": "hello"}]}}],
-                "modelVersion": "gemini-3.5-flash"}
+                "modelVersion": "gemini-3.1-pro-preview"}
 
     client = GeminiClient(log_dir=tmp_path, api_key="k", transport=fake_transport)
     out = client.generate("say hello", tag="smoke")
     assert out == "hello"
-    assert "gemini-3.5-flash" in calls[0][0]
+    assert "gemini-3.1-pro-preview" in calls[0][0]
     assert calls[0][1]["generationConfig"]["temperature"] == 0.0
 
     log_files = sorted(tmp_path.glob("call_*.json"))
@@ -112,7 +114,7 @@ def test_generate_logs_verbatim(tmp_path):
     logged = json.loads(log_files[0].read_text())
     assert logged["prompt"] == "say hello"
     assert logged["response"]["candidates"][0]["content"]["parts"][0]["text"] == "hello"
-    assert logged["model"] == "gemini-3.5-flash"
+    assert logged["model"] == "gemini-3.1-pro-preview"
 
     client.generate("again", tag="smoke")
     assert (tmp_path / "call_001_smoke.json").exists()
@@ -144,7 +146,7 @@ from pathlib import Path
 from ..config import REPO_ROOT
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_MODEL = "gemini-3.1-pro-preview"
 ENV_VAR = "GEMINI_API_KEY_LAKELAB"  # plain GEMINI_API_KEY in .env is invalid
 RETRY_STATUSES = {429, 500, 503}
 
@@ -230,10 +232,10 @@ git commit -m "feat(compose): package skeleton + logged Gemini REST client"
 **Interfaces:**
 - Consumes: `resolve_target` (config.py), group config yaml.
 - Produces: `parse_split(value, unique_ids) -> list` (mirror of `gecco/prepare_data/io.py`, reimplemented to avoid importing gecco);
-  `group_split_pids(group_dir, config_dir=None, data_path=None) -> dict` with keys `seed` (prompt+eval), `heldout` (test);
+  `group_split_pids(group_dir, config_dir=None, data_path=None) -> dict` with keys `prompt`, `eval`, `heldout`, `seed` (= prompt+eval sorted);
   `make_splits(target, group_dir) -> dict` returning and writing `splits.json`:
-  `{"seed_pids": [...], "validation_pids": [10], "test_pids": [21], "method": "oci-sorted alternation i%3==1", "oci_stats": {...}}`.
-  Stratification rule (deterministic, no RNG): sort held-out pids by `(oci, pid)`; indices with `i % 3 == 1` → validation (10 of 31), rest → final test.
+  `{"seed_pids": [12], "composition_validation_pids": [10] (= eval pids 4..13), "reconstruction_pids": [10], "test_pids": [21], "method": "oci-sorted alternation i%3==1", "oci_stats": {...}}`.
+  Stratification rule (deterministic, no RNG): sort held-out pids by `(oci, pid)`; indices with `i % 3 == 1` → reconstruction set (10 of 31), rest → final test (21).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -256,6 +258,8 @@ def test_parse_split_slice():
 
 def test_group_split_pids():
     pids = group_split_pids(GRP)
+    assert pids["prompt"] == [1, 2]
+    assert pids["eval"] == list(range(4, 14))
     assert pids["seed"] == [1, 2] + list(range(4, 14))
     assert pids["heldout"] == list(range(14, 45))
 
@@ -265,12 +269,13 @@ def test_make_splits_deterministic_and_balanced(tmp_path):
     s1 = make_splits(target, GRP, out_dir=tmp_path)
     s2 = make_splits(target, GRP, out_dir=tmp_path)
     assert s1 == s2
-    assert len(s1["validation_pids"]) == 10 and len(s1["test_pids"]) == 21
-    assert not set(s1["validation_pids"]) & set(s1["test_pids"])
-    assert set(s1["validation_pids"]) | set(s1["test_pids"]) == set(range(14, 45))
+    assert s1["composition_validation_pids"] == list(range(4, 14))
+    assert len(s1["reconstruction_pids"]) == 10 and len(s1["test_pids"]) == 21
+    assert not set(s1["reconstruction_pids"]) & set(s1["test_pids"])
+    assert set(s1["reconstruction_pids"]) | set(s1["test_pids"]) == set(range(14, 45))
     # OCI balance: means within 0.15 of each other
     st = s1["oci_stats"]
-    assert abs(st["validation_mean"] - st["test_mean"]) < 0.15
+    assert abs(st["reconstruction_mean"] - st["test_mean"]) < 0.15
     assert json.loads((tmp_path / "splits.json").read_text()) == s1
 ```
 
@@ -326,17 +331,22 @@ def group_split_pids(group_dir, config_dir=None, data_path=None):
     df = pd.read_csv(path)
     unique_ids = sorted(df[data_sec.get("id_column", "participant")].unique().tolist())
     splits = data_sec["splits"]
-    prompt = parse_split(splits["prompt"], unique_ids)
-    ev = parse_split(splits["eval"], unique_ids)
-    heldout = parse_split(splits["test"], unique_ids)
-    return {"seed": sorted(prompt + ev), "heldout": sorted(heldout)}
+    prompt = sorted(parse_split(splits["prompt"], unique_ids))
+    ev = sorted(parse_split(splits["eval"], unique_ids))
+    heldout = sorted(parse_split(splits["test"], unique_ids))
+    return {"prompt": prompt, "eval": ev, "heldout": heldout,
+            "seed": sorted(prompt + ev)}
 
 
 def make_splits(target, group_dir, out_dir=None, oci_column="oci"):
-    """Write splits.json: seeds + OCI-stratified validation(10)/test(21).
+    """Write splits.json.
 
-    Deterministic: held-out pids sorted by (oci, pid); index i % 3 == 1 ->
-    validation. 31 held-out => 10 validation, 21 final test.
+    - seed_pids: prompt+eval participants (library extraction)
+    - composition_validation_pids: the group config's eval participants
+      (composition selection — matches group gecco's information budget)
+    - reconstruction_pids: 10 of the held-out, OCI-stratified deterministic
+      (held-out pids sorted by (oci, pid); index i % 3 == 1)
+    - test_pids: remaining 21 held-out — the only set results are claimed on
     """
     out_dir = Path(out_dir) if out_dir else target.results_dir / "library_composition"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -344,16 +354,17 @@ def make_splits(target, group_dir, out_dir=None, oci_column="oci"):
     df = pd.read_csv(target.data_path)
     oci = df.groupby(target.id_column)[oci_column].first()
     ranked = sorted(pids["heldout"], key=lambda p: (float(oci[p]), p))
-    validation = [p for i, p in enumerate(ranked) if i % 3 == 1]
-    test = [p for p in pids["heldout"] if p not in validation]
+    reconstruction = [p for i, p in enumerate(ranked) if i % 3 == 1]
+    test = [p for p in pids["heldout"] if p not in reconstruction]
     result = {
         "seed_pids": pids["seed"],
-        "validation_pids": sorted(validation),
+        "composition_validation_pids": pids["eval"],
+        "reconstruction_pids": sorted(reconstruction),
         "test_pids": sorted(test),
         "method": "oci-sorted alternation i%3==1",
         "oci_stats": {
-            "validation_mean": float(oci[validation].mean()),
-            "validation_std": float(oci[validation].std()),
+            "reconstruction_mean": float(oci[reconstruction].mean()),
+            "reconstruction_std": float(oci[reconstruction].std()),
             "test_mean": float(oci[test].mean()),
             "test_std": float(oci[test].std()),
         },
@@ -1011,11 +1022,14 @@ git commit -m "feat(compose): seeded L-BFGS-B fitting + BIC"
 **Interfaces:**
 - Consumes: `GeminiClient` (Task 1), `mine_fragments`/`render_mining_report` (mining.py), `load_original_code` (loading.py), `parse_inventory`/`InventoryError` (Task 3), `render_candidate`/`smoke_check` (Task 4).
 - Produces:
-  - `annotate_seed(client, pid, code) -> dict` — one logged call, tag `annotate_p{pid}`; returns parsed JSON `{"mechanisms": [...]}`.
-  - `merge_inventory(client, annotations, mining_report, max_repair_rounds=3) -> dict` — tag `merge` (+ `merge_repair{i}`); returns raw inventory dict.
-  - `validate_inventory_obj(obj) -> Tuple[Inventory, List[str]]` — parses via `parse_inventory`, then smoke-tests **each module rendered alone with the backbone**; returns errors list (empty = good).
-  - `run_extraction(target, group_dir, out_dir) -> Inventory` — full pipeline: mine seeds → annotate 12 → merge (with repair loop feeding validation errors back to Gemini, all logged) → write `module_inventory.json`, `mining_report.md`, `MODULES.md`. Raises with instructions to record manual fixes in `llm_log/MANUAL_EDITS.md` if still invalid after repairs.
-  - `PROMPT_ANNOTATE`, `PROMPT_MERGE` string templates (kept in this file so the exact prompts are versioned).
+  - `annotate_seed(client, pid, code) -> dict` — one logged call, tag `annotate_p{pid}`; returns parsed JSON `{"mechanisms": [...]}`. Each mechanism carries `"expressible_in_slots": bool` (+ `"reason"` when false) — the escape hatch against shoehorning.
+  - `merge_inventory(client, annotations, mining_report, max_repair_rounds=3) -> dict` — tag `merge` (+ `merge_repair{i}`); returns raw inventory dict which must also contain a `"coverage"` list mapping EVERY annotated mechanism to a module id or an explicit decision (`"merged_into"`, `"inexpressible"`, `"backbone"`).
+  - `validate_inventory_obj(obj) -> Tuple[Inventory, List[str]]` — parses via `parse_inventory`, then (a) smoke-tests each module alone with the backbone, (b) smoke-tests **every compatible module PAIR**, (c) AST-checks that names assigned in module snippets (other than backbone/canonical names) start with `"{module_id}_"` (state isolation).
+  - `audit_coverage(obj, annotations) -> List[str]` — errors for any annotated mechanism `(pid, name)` absent from `obj["coverage"]`.
+  - `check_bounds_against_sources(inv, target) -> List[str]` — WARN strings where a module param's bounds disagree with `parse_bounds` of any provenance participant's source docstring (matched by param name).
+  - `reconstruction_gate(inv, obj, target, seed_pids, out_dir) -> List[str]` — for each seed pid: modules whose provenance includes pid AND are mutually `compatible` (drop, with a note, any that conflict) → `render_candidate` → seeded fit (`tag="recon"`) on that pid's data → compare BIC vs `load_stored_bic`. Writes `reconstruction_report.json` (per-seed: module set, recon BIC, stored BIC, delta). Returns failures where `recon_bic - stored_bic > 15`.
+  - `run_extraction(target, group_dir, out_dir) -> Inventory` — full pipeline: mine seeds → annotate 12 (saved to `annotations.json`) → merge → validate + audit_coverage (failures feed the repair loop, all logged) → bounds cross-check (WARN) → reconstruction gate (failures feed repair loop too) → write `module_inventory.json`, `mining_report.md`, `MODULES.md`, `reconstruction_report.json`. Raises with instructions to record manual fixes in `llm_log/MANUAL_EDITS.md` if still invalid after repairs.
+  - `PROMPT_ANNOTATE`, `PROMPT_MERGE`, `PROMPT_REPAIR` string templates (kept in this file so the exact prompts are versioned).
 - `_parse_json_reply(text)` — strips ``` fences, `json.loads`, raises with the offending text on failure.
 
 **Prompt templates (exact content to put in the file):**
@@ -1030,9 +1044,9 @@ PROMPT_ANNOTATE = '''You are a renowned cognitive scientist analyzing computatio
 List every distinct psychological mechanism in this model. A mechanism is one separable computational assumption (e.g. "MB/MF mixture weight", "choice stickiness", "reward-dependent stickiness", "separate stage-2 learning rate", "value decay/forgetting", "eligibility trace", "optimistic Q initialization").
 
 Return STRICT JSON only (no prose, no markdown fences):
-{{"mechanisms": [{{"name": "short snake_case id", "title": "human name", "description": "one sentence", "params": [{{"name": "param name as in code", "bounds": [lo, hi]}}], "evidence": "the exact code lines implementing it"}}]}}
+{{"mechanisms": [{{"name": "short snake_case id", "title": "human name", "description": "one sentence", "params": [{{"name": "param name as in code", "bounds": [lo, hi]}}], "evidence": "the exact code lines implementing it", "expressible_in_slots": true, "reason": "only when expressible_in_slots is false: why the slot contract cannot express this mechanism faithfully"}}]}}
 
-Rules: do NOT list backbone machinery shared by all models (softmax choice, basic TD updates, MB lookahead with the fixed 0.7/0.3 transition matrix, NLL accumulation) as mechanisms. Only list deviations from that backbone.'''
+Rules: do NOT list backbone machinery shared by all models (softmax choice, basic TD updates, MB lookahead with the fixed 0.7/0.3 transition matrix, NLL accumulation) as mechanisms. Only list deviations from that backbone. If a mechanism cannot be faithfully expressed as code injected into a fixed backbone (slots described below in the pipeline), set "expressible_in_slots": false and explain — do NOT distort a mechanism to make it fit. Slot contract summary: appended statements at init / per-trial pre-stage-1 / after stage-1 logits / after stage-2 logits / after TD updates / end of trial; replaceable expressions for q2 init, stage-1 and stage-2 value and inverse-temperature terms, and the two TD update statements.'''
 
 PROMPT_MERGE = '''You are building a library of cognitive mechanism modules for the two-step task. You are given (A) mechanism annotations extracted from 12 participants' models, (B) a mining report of literally-shared code fragments, and (C) the fixed BACKBONE program that modules will be injected into.
 
@@ -1054,15 +1068,17 @@ Slot contract — a module may provide:
 Available variable names (use ONLY these plus your own module parameters): action_1, state, action_2, reward, n_trials, trial, a1, s_idx, a2, r, transition_matrix, q_stage1_mf, q_stage2_mf, q_stage1_mb, max_q_stage2, stage1_values, stage2_values, logits_1, logits_2, delta_stage1, delta_stage2, learning_rate, beta, np.
 
 Produce the deduplicated module inventory. Return STRICT JSON only:
-{{"modules": [{{"id": "snake_case", "name": "...", "description": "...", "params": [{{"name": "...", "bounds": [lo, hi]}}], "slots": {{...}}, "overrides": {{...}}, "provenance": [participant ids], "excludes": ["ids of incompatible modules"]}}]}}
+{{"modules": [{{"id": "snake_case", "name": "...", "description": "...", "params": [{{"name": "...", "bounds": [lo, hi]}}], "slots": {{...}}, "overrides": {{...}}, "provenance": [participant ids], "excludes": ["ids of incompatible modules"]}}], "coverage": [{{"pid": 1, "mechanism": "annotated mechanism name", "module": "module id or null", "decision": "mapped | merged_into | inexpressible | backbone"}}]}}
 
 Rules:
 1. One module per distinct mechanism — merge identical mechanisms across participants (union their provenance). Keep singletons (mechanisms found in only one participant).
 2. Parameter names must be globally unique across ALL modules and must not be "learning_rate" or "beta"; suffix if needed (e.g. "alpha_2", "beta_2").
 3. Code must be -1-safe: missed trials have a1/s_idx/a2 == -1; never index an array with a possibly -1 value inside your snippets (the backbone already guards likelihood and TD updates; guard your own "post_trial"/"init"-state updates like `if a1 != -1:`).
 4. Use plain numpy, no imports, no helper functions.
-5. Bounds: probabilities/rates/weights [0, 1]; inverse temperatures [0, 10]; additive bonuses (stickiness etc.) [0, 5] unless the source model's docstring says otherwise.
-6. List modules that implement alternative versions of the same computation (e.g. two different stage1_values formulas) in each other's "excludes".'''
+5. Bounds: use the bounds from the source model's docstring where available; otherwise probabilities/rates/weights [0, 1]; inverse temperatures [0, 10]; additive bonuses (stickiness etc.) [0, 5].
+6. List modules that implement alternative versions of the same computation (e.g. two different stage1_values formulas) in each other's "excludes".
+7. State isolation: any NEW variable your module creates (in "init", "post_trial", etc.) must be prefixed with the module id (e.g. module "stick" uses "stick_last_a1"), so no two modules can collide. Never assign to backbone variables except through your declared overrides.
+8. The "coverage" list must account for EVERY mechanism in the annotations — one entry per (pid, mechanism), mapping it to the module that absorbed it, or marking it "inexpressible" (annotator flagged it) or "backbone" (it was actually backbone machinery). Nothing may be silently dropped.'''
 
 PROMPT_REPAIR = '''Your previous module inventory JSON had problems. Fix ALL of them and return the corrected STRICT JSON (same schema, no prose):
 
@@ -1080,7 +1096,17 @@ Previous JSON:
 import json
 
 from library_learning.compose.extract import (
-    _parse_json_reply, validate_inventory_obj)
+    _parse_json_reply, audit_coverage, validate_inventory_obj)
+
+
+def make_good():
+    return {"modules": [
+        {"id": "stick", "name": "stickiness", "description": "d",
+         "params": [{"name": "stickiness", "bounds": [0, 5]}],
+         "slots": {"init": "stick_last_a1 = -1",
+                   "stage1_logits_extra": "if stick_last_a1 != -1:\n    logits_1[stick_last_a1] += stickiness",
+                   "post_trial": "if a1 != -1:\n    stick_last_a1 = a1"},
+         "overrides": {}, "provenance": [1], "excludes": []}]}
 
 
 def test_parse_json_reply_strips_fences():
@@ -1091,20 +1117,44 @@ def test_parse_json_reply_strips_fences():
 
 
 def test_validate_inventory_smoke_catches_bad_code():
-    good = {"modules": [
-        {"id": "stick", "name": "stickiness", "description": "d",
-         "params": [{"name": "stickiness", "bounds": [0, 5]}],
-         "slots": {"init": "last_a1 = -1",
-                   "stage1_logits_extra": "if last_a1 != -1:\n    logits_1[last_a1] += stickiness",
-                   "post_trial": "if a1 != -1:\n    last_a1 = a1"},
-         "overrides": {}, "provenance": [1], "excludes": []}]}
-    inv, errors = validate_inventory_obj(good)
+    inv, errors = validate_inventory_obj(make_good())
     assert errors == [] and inv is not None
 
-    bad = json.loads(json.dumps(good))
-    bad["modules"][0]["slots"]["init"] = "last_a1 = undefined_thing"
+    bad = make_good()
+    bad["modules"][0]["slots"]["init"] = "stick_last_a1 = undefined_thing"
     inv, errors = validate_inventory_obj(bad)
     assert errors and "stick" in errors[0]
+
+
+def test_validate_flags_unprefixed_state_vars():
+    bad = make_good()
+    bad["modules"][0]["slots"]["init"] = "last_a1 = -1"
+    bad["modules"][0]["slots"]["stage1_logits_extra"] = (
+        "if last_a1 != -1:\n    logits_1[last_a1] += stickiness")
+    bad["modules"][0]["slots"]["post_trial"] = "if a1 != -1:\n    last_a1 = a1"
+    inv, errors = validate_inventory_obj(bad)
+    assert any("unprefixed" in e for e in errors)
+
+
+def test_validate_smokes_pairs():
+    obj = make_good()
+    obj["modules"].append(
+        {"id": "decay", "name": "decay", "description": "d",
+         "params": [{"name": "decay_rate", "bounds": [0, 1]}],
+         "slots": {"post_trial": "q_stage2_mf *= (1.0 - decay_rate)"},
+         "overrides": {}, "provenance": [2], "excludes": []})
+    inv, errors = validate_inventory_obj(obj)
+    assert errors == []  # pair (stick, decay) smoke-tested together
+
+
+def test_audit_coverage():
+    obj = {"modules": [], "coverage": [
+        {"pid": 1, "mechanism": "stickiness", "module": "stick",
+         "decision": "mapped"}]}
+    annotations = {"1": {"mechanisms": [{"name": "stickiness"},
+                                        {"name": "decay"}]}}
+    errors = audit_coverage(obj, annotations)
+    assert len(errors) == 1 and "decay" in errors[0]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1122,7 +1172,7 @@ import json
 import re
 from pathlib import Path
 
-from .gemini import GeminiClient
+from .gemini import DEFAULT_MODEL, GeminiClient
 from .inventory import InventoryError, parse_inventory
 from .render import render_candidate, smoke_check
 from ..loading import load_original_code
@@ -1149,7 +1199,48 @@ def annotate_seed(client, pid, code):
     return _parse_json_reply(reply)
 
 
+CANONICAL_NAMES = {
+    "action_1", "state", "action_2", "reward", "n_trials", "trial", "a1",
+    "s_idx", "a2", "r", "transition_matrix", "q_stage1_mf", "q_stage2_mf",
+    "q_stage1_mb", "max_q_stage2", "stage1_values", "stage2_values",
+    "logits_1", "logits_2", "delta_stage1", "delta_stage2", "log_loss",
+    "eps", "np",
+}
+
+
+def _unprefixed_assignments(module):
+    """Names assigned in append-slot snippets that are neither canonical nor
+    '{id}_'-prefixed (state-isolation check)."""
+    import ast
+    bad = set()
+    for code in module.slots.values():
+        try:
+            tree = ast.parse(textwrap_dedent(code))
+        except SyntaxError:
+            continue  # caught later by smoke_check
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    name = t.id
+                    if (name not in CANONICAL_NAMES
+                            and name not in {p.name for p in module.params}
+                            and not name.startswith(module.id + "_")):
+                        bad.add(name)
+    return sorted(bad)
+
+
+def textwrap_dedent(code):
+    import textwrap
+    return textwrap.dedent(code)
+
+
 def validate_inventory_obj(obj):
+    from .inventory import compatible
     try:
         inv = parse_inventory(obj)
     except InventoryError as e:
@@ -1160,10 +1251,102 @@ def validate_inventory_obj(obj):
             smoke_check(render_candidate(inv, [m.id]))
         except Exception as e:
             errors.append("module '%s' fails alone with backbone: %s" % (m.id, e))
+        bad = _unprefixed_assignments(m)
+        if bad:
+            errors.append(
+                "module '%s' assigns unprefixed state variables %s — prefix "
+                "them with '%s_'" % (m.id, bad, m.id))
+    ids = inv.ids()
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            ok, _ = compatible(inv, [a, b])
+            if not ok:
+                continue
+            try:
+                smoke_check(render_candidate(inv, [a, b]))
+            except Exception as e:
+                errors.append("module pair ('%s', '%s') fails together: %s"
+                              % (a, b, e))
     return (inv if not errors else None), errors
 
 
-def merge_inventory(client, annotations, mining_report, max_repair_rounds=3):
+def audit_coverage(obj, annotations):
+    """Every annotated mechanism (pid, name) must appear in obj['coverage']."""
+    covered = {(c.get("pid"), c.get("mechanism"))
+               for c in obj.get("coverage", [])}
+    errors = []
+    for pid, ann in annotations.items():
+        for mech in ann.get("mechanisms", []):
+            if (int(pid), mech["name"]) not in covered:
+                errors.append("coverage missing for participant %s mechanism "
+                              "'%s'" % (pid, mech["name"]))
+    return errors
+
+
+def check_bounds_against_sources(inv, target):
+    """WARN where a module param's bounds disagree with a provenance
+    participant's docstring bounds for the same param name."""
+    from ..loading import load_original_code, extract_unpack_names, parse_bounds
+    warnings = []
+    for m in inv.modules:
+        for pid in m.provenance:
+            try:
+                code = load_original_code(target, pid)
+                names = extract_unpack_names(code)
+                src_bounds = parse_bounds(code, names)
+            except Exception:
+                continue
+            for p in m.params:
+                base = p.name
+                for cand in (base, base.rsplit("_", 1)[0]):
+                    if cand in src_bounds and tuple(src_bounds[cand]) != tuple(p.bounds):
+                        warnings.append(
+                            "WARN %s.%s bounds %s != participant %d docstring %s"
+                            % (m.id, p.name, list(p.bounds), pid,
+                               list(src_bounds[cand])))
+                        break
+    return warnings
+
+
+def reconstruction_gate(inv, obj, target, seed_pids, out_dir, tol=15.0):
+    """Fidelity gate: recompose each seed from its provenance modules, fit to
+    that seed's own data, compare BIC to the stored individual-gecco BIC."""
+    from .inventory import compatible
+    from .fitting import fit_model_on_pids
+    from .render import candidate_params
+    from ..loading import load_stored_bic
+    report, failures = [], []
+    for pid in seed_pids:
+        mods, dropped = [], []
+        for m in inv.modules:
+            if pid not in m.provenance:
+                continue
+            ok, why = compatible(inv, mods + [m.id])
+            if ok:
+                mods.append(m.id)
+            else:
+                dropped.append({"module": m.id, "why": why})
+        src = render_candidate(inv, mods)
+        bounds = [p.bounds for p in candidate_params(inv, mods)]
+        fits = fit_model_on_pids(src, target, [pid], bounds, tag="recon")
+        stored = load_stored_bic(target, pid)
+        delta = (fits[pid]["bic"] - stored) if stored is not None else None
+        entry = {"pid": pid, "modules": mods, "dropped": dropped,
+                 "recon_bic": fits[pid]["bic"], "stored_bic": stored,
+                 "delta": delta}
+        report.append(entry)
+        if delta is not None and delta > tol:
+            failures.append(
+                "seed %d reconstruction BIC %.2f exceeds stored %.2f by %.2f "
+                "(> %.1f): extraction likely distorted a mechanism (modules %s)"
+                % (pid, fits[pid]["bic"], stored, delta, tol, mods))
+    Path(out_dir, "reconstruction_report.json").write_text(
+        json.dumps(report, indent=2))
+    return failures
+
+
+def merge_inventory(client, annotations, mining_report, target=None,
+                    seed_pids=None, out_dir=None, max_repair_rounds=3):
     from .render import render_candidate as _rc
     from .inventory import Inventory
     backbone_src = _rc(Inventory(modules=[]), [])
@@ -1173,7 +1356,16 @@ def merge_inventory(client, annotations, mining_report, max_repair_rounds=3):
         backbone=backbone_src)
     reply = client.generate(prompt, tag="merge")
     obj = _parse_json_reply(reply)
-    inv, errors = validate_inventory_obj(obj)
+
+    def all_errors(obj):
+        inv, errors = validate_inventory_obj(obj)
+        errors = errors + audit_coverage(obj, annotations)
+        if not errors and target is not None and seed_pids and out_dir:
+            errors = errors + reconstruction_gate(
+                inv, obj, target, seed_pids, out_dir)
+        return inv, errors
+
+    inv, errors = all_errors(obj)
     rounds = 0
     while errors and rounds < max_repair_rounds:
         rounds += 1
@@ -1182,7 +1374,7 @@ def merge_inventory(client, annotations, mining_report, max_repair_rounds=3):
                                  previous=json.dumps(obj, indent=1)),
             tag="merge_repair%d" % rounds)
         obj = _parse_json_reply(reply)
-        inv, errors = validate_inventory_obj(obj)
+        inv, errors = all_errors(obj)
     if errors:
         raise InventoryError(
             "inventory still invalid after %d repair rounds: %s\n"
@@ -1193,7 +1385,7 @@ def merge_inventory(client, annotations, mining_report, max_repair_rounds=3):
 
 def render_modules_md(inv, seed_pids):
     lines = ["# Cognitive module library", "",
-             "Extracted by gemini-3.5-flash (temperature 0, logged in llm_log/) "
+             "Extracted by %s (temperature 0, logged in llm_log/) " % DEFAULT_MODEL
              "from the individual best programs of participants %s." % seed_pids, ""]
     for m in inv.modules:
         lines += ["## %s (`%s`)" % (m.name, m.id), "", m.description, "",
@@ -1219,10 +1411,14 @@ def run_extraction(target, group_dir, out_dir, client=None):
 
     annotations = {pid: annotate_seed(client, pid, code)
                    for pid, code in models.items()}
-    obj = merge_inventory(client, annotations, report)
+    (out_dir / "annotations.json").write_text(json.dumps(annotations, indent=2))
+    obj = merge_inventory(client, annotations, report, target=target,
+                          seed_pids=seed_pids, out_dir=out_dir)
     (out_dir / "module_inventory.json").write_text(json.dumps(obj, indent=2))
     inv, errors = validate_inventory_obj(obj)
     assert not errors
+    for w in check_bounds_against_sources(inv, target):
+        print(w)
     (out_dir / "MODULES.md").write_text(render_modules_md(inv, seed_pids))
     return inv
 ```
@@ -1230,13 +1426,13 @@ def run_extraction(target, group_dir, out_dir, client=None):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `gecco-env/bin/python -m pytest tests/test_compose_extract.py -v`
-Expected: 2 PASS.
+Expected: 5 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add library_learning/compose/extract.py tests/test_compose_extract.py
-git commit -m "feat(compose): Gemini extraction pipeline with validation/repair loop"
+git commit -m "feat(compose): Gemini extraction with coverage audit, state isolation, reconstruction gate"
 ```
 
 ---
@@ -1255,6 +1451,7 @@ git commit -m "feat(compose): Gemini extraction pipeline with validation/repair 
   - `score_candidates(inventory, target, validation_pids, candidates, out_dir) -> list` — smoke-check then fit each candidate on validation pids; appends each result to `search_log.jsonl` immediately (crash-safe); returns list of `{"candidate_id", "module_ids", "n_params", "per_pid": {...}, "mean_bic"}`.
   - `greedy_search(inventory, target, validation_pids, out_dir, param_cap=8) -> list` — forward selection from backbone; same result-record shape; logs every evaluated candidate.
   - `select_winner(results) -> dict` — best mean BIC; ties within 1.0 → fewer params.
+  - `selection_report(results, out_dir, k=10) -> dict` — top-k candidates by mean BIC, plus leave-one-participant-out rank stability: for each validation pid, recompute candidate means excluding that pid and record each top-k candidate's rank; writes `selection_report.json` `{"top_k": [...], "loo_ranks": {candidate_id: [rank per left-out pid]}}`.
   - `freeze_winner(result, inventory, out_dir)` — writes `composed_model.txt` (rendered source) and `winner.json` (module ids, validation BICs).
 
 - [ ] **Step 1: Write the failing test** (stub fitting → fast)
@@ -1307,6 +1504,20 @@ def test_select_winner_tiebreak():
         {"candidate_id": "backbone", "n_params": 2, "mean_bic": 420.0},
     ]
     assert S.select_winner(results)["candidate_id"] == "a"  # fewer params wins tie
+
+
+def test_selection_report(tmp_path):
+    results = []
+    for cid, base in [("x", 400.0), ("y", 405.0), ("z", 500.0)]:
+        results.append({"candidate_id": cid, "module_ids": [cid], "n_params": 3,
+                        "per_pid": {"4": {"bic": base - 5}, "5": {"bic": base + 5}},
+                        "mean_bic": base})
+    rep = S.selection_report(results, tmp_path, k=2)
+    assert [t["candidate_id"] for t in rep["top_k"]] == ["x", "y"]
+    assert set(rep["loo_ranks"]) == {"x", "y"}
+    assert rep["loo_ranks"]["x"] == [1, 1]
+    import json as _json
+    assert _json.loads((tmp_path / "selection_report.json").read_text()) == rep
 
 
 def test_greedy_uses_stub_scores(tmp_path, monkeypatch):
@@ -1441,6 +1652,31 @@ def select_winner(results):
     return min(contenders, key=lambda r: (r["n_params"], r["mean_bic"]))
 
 
+def selection_report(results, out_dir, k=10):
+    """Top-k + leave-one-participant-out rank stability (winner's-curse probe)."""
+    ranked = sorted(results, key=lambda r: r["mean_bic"])[:k]
+    top_ids = [r["candidate_id"] for r in ranked]
+    pids = sorted(next(iter(results))["per_pid"].keys()) if results else []
+    loo_ranks = {cid: [] for cid in top_ids}
+    for left_out in pids:
+        loo = sorted(
+            results,
+            key=lambda r: (sum(v["bic"] for p, v in r["per_pid"].items()
+                               if p != left_out)
+                           / max(1, len(r["per_pid"]) - 1)))
+        order = [r["candidate_id"] for r in loo]
+        for cid in top_ids:
+            loo_ranks[cid].append(order.index(cid) + 1)
+    report = {
+        "top_k": [{"candidate_id": r["candidate_id"],
+                   "n_params": r["n_params"],
+                   "mean_bic": r["mean_bic"]} for r in ranked],
+        "loo_ranks": loo_ranks,
+    }
+    Path(out_dir, "selection_report.json").write_text(json.dumps(report, indent=2))
+    return report
+
+
 def freeze_winner(result, inventory, out_dir):
     out_dir = Path(out_dir)
     src = render_candidate(inventory, result["module_ids"])
@@ -1453,7 +1689,7 @@ Note for Step 3: `greedy_search` must call `score_candidates` via module attribu
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `gecco-env/bin/python -m pytest tests/test_compose_search.py -v`
-Expected: 4 PASS.
+Expected: 5 PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -1836,7 +2072,134 @@ git commit -m "feat(compose): held-out evaluation, cross-checks, stats, RESULTS.
 
 ---
 
-### Task 10: Figure + CLI
+### Task 10: Library reconstruction on unseen participants
+
+**Files:**
+- Create: `library_learning/compose/reconstruct.py`
+- Test: `tests/test_compose_reconstruct.py`
+
+**Interfaces:**
+- Consumes: `enumerate_candidates`/`greedy_search`/`score_candidates`/`select_winner` (Task 7), `fit_model_on_pids` (Task 5), `load_original_code`/`function_name_and_args` + `_bounds_for` pattern (Task 9), `HYBRID_SOURCE` not needed here.
+- Produces: `reconstruct_participants(inventory, target, group_dir, pids, out_dir, mode="greedy") -> list` — for each pid: per-participant best library composition (same cap/protocol; per-pid search artifacts under `out_dir/reconstruction/p{pid}/`), plus that pid's individual-gecco refit (ceiling) and group-model refit; writes `reconstruction_results.json`:
+  `[{"pid", "best_candidate_id", "best_module_ids", "best_n_params", "library_bic", "individual_bic", "group_bic"}]`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_compose_reconstruct.py
+import json
+
+from library_learning.compose.inventory import parse_inventory
+from library_learning.compose.reconstruct import reconstruct_participants
+from library_learning.config import resolve_target
+
+IND = "results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_individual"
+GRP = "results/two_step_psychiatry_group_function_ocibalanced_maxsetting"
+
+SMALL_INV = parse_inventory({"modules": [
+    {"id": "stick", "name": "stickiness", "description": "d",
+     "params": [{"name": "stickiness", "bounds": [0, 5]}],
+     "slots": {"init": "stick_last_a1 = -1",
+               "stage1_logits_extra": "if stick_last_a1 != -1:\n    logits_1[stick_last_a1] += stickiness",
+               "post_trial": "if a1 != -1:\n    stick_last_a1 = a1"},
+     "overrides": {}, "provenance": [1], "excludes": []}]})
+
+
+def test_reconstruct_one_pid(tmp_path):
+    target = resolve_target(IND)
+    results = reconstruct_participants(SMALL_INV, target, GRP, [14], tmp_path,
+                                       mode="greedy")
+    assert len(results) == 1
+    r = results[0]
+    assert r["pid"] == 14
+    assert r["library_bic"] > 0 and r["individual_bic"] > 0 and r["group_bic"] > 0
+    saved = json.loads((tmp_path / "reconstruction_results.json").read_text())
+    assert saved == results
+    assert (tmp_path / "reconstruction" / "p14" / "search_log.jsonl").exists()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `gecco-env/bin/python -m pytest tests/test_compose_reconstruct.py -v`
+Expected: FAIL — no module `reconstruct`.
+
+- [ ] **Step 3: Implement**
+
+```python
+# library_learning/compose/reconstruct.py
+"""Stage 2b: per-participant best library composition on unseen participants
+(library-coverage metric; kept separate from the single-program claim)."""
+import json
+from pathlib import Path
+
+from .fitting import fit_model_on_pids
+from .search import (enumerate_candidates, greedy_search, score_candidates,
+                     select_winner)
+from ..loading import (extract_unpack_names, function_name_and_args,
+                       load_original_code, parse_bounds, strip_fences)
+
+
+def _bounds_for(code):
+    names = extract_unpack_names(code)
+    b = parse_bounds(code, names)
+    return [b[n] for n in names]
+
+
+def reconstruct_participants(inventory, target, group_dir, pids, out_dir,
+                             mode="greedy"):
+    out_dir = Path(out_dir)
+    group_src = strip_fences(
+        (Path(group_dir) / "models" / "best_model_0.txt").read_text())
+    group_fname, _ = function_name_and_args(group_src)
+
+    results = []
+    for pid in pids:
+        pid_dir = out_dir / "reconstruction" / ("p%d" % pid)
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        if mode == "exhaustive":
+            cands = enumerate_candidates(inventory)
+            recs = score_candidates(inventory, target, [pid], cands, pid_dir)
+        else:
+            recs = greedy_search(inventory, target, [pid], pid_dir)
+        best = select_winner(recs)
+
+        own_code = load_original_code(target, pid)
+        own_fname, _ = function_name_and_args(own_code)
+        own = fit_model_on_pids(own_code, target, [pid], _bounds_for(own_code),
+                                tag="recon:individual", func_name=own_fname)
+        grp = fit_model_on_pids(group_src, target, [pid], _bounds_for(group_src),
+                                tag="recon:group", func_name=group_fname)
+        results.append({
+            "pid": pid,
+            "best_candidate_id": best["candidate_id"],
+            "best_module_ids": best["module_ids"],
+            "best_n_params": best["n_params"],
+            "library_bic": best["mean_bic"],  # mean over one pid == that pid's BIC
+            "individual_bic": own[pid]["bic"],
+            "group_bic": grp[pid]["bic"],
+        })
+        print("[reconstruct] p%d library %.2f vs individual %.2f vs group %.2f"
+              % (pid, best["mean_bic"], own[pid]["bic"], grp[pid]["bic"]))
+    (out_dir / "reconstruction_results.json").write_text(
+        json.dumps(results, indent=2))
+    return results
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `gecco-env/bin/python -m pytest tests/test_compose_reconstruct.py -v`
+Expected: 1 PASS (real fits on one participant — takes a minute or two).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add library_learning/compose/reconstruct.py tests/test_compose_reconstruct.py
+git commit -m "feat(compose): per-participant library reconstruction on unseen subjects"
+```
+
+---
+
+### Task 11: Figure + CLI
 
 **Files:**
 - Create: `library_learning/compose/figure.py`, `library_learning/__main__.py`
@@ -1870,7 +2233,8 @@ def run_cli(*args):
 def test_help_lists_subcommands():
     r = run_cli("--help")
     assert r.returncode == 0
-    for sub in ["compose-modules", "compose-count", "compose-search", "compose-eval"]:
+    for sub in ["compose-modules", "compose-count", "compose-search",
+                "compose-reconstruct", "compose-eval"]:
         assert sub in r.stdout
 
 
@@ -1962,6 +2326,7 @@ from .compose.evaluate import cross_checks, evaluate_models, summarize
 from .compose.extract import run_extraction, validate_inventory_obj
 from .compose.figure import plot_comparison
 from .compose.inventory import load_inventory
+from .compose.reconstruct import reconstruct_participants
 from .compose.splits import load_splits, make_splits
 
 DEFAULT_IND = "results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_individual"
@@ -2006,7 +2371,7 @@ def cmd_search(args):
     target = resolve_target(args.results_dir, config_dir=args.config_dir)
     out = out_dir_for(target)
     inv = load_inventory(out / "module_inventory.json")
-    val_pids = load_splits(target)["validation_pids"]
+    val_pids = load_splits(target)["composition_validation_pids"]
     if args.mode == "exhaustive":
         cands = search_mod.enumerate_candidates(inv)
         results = search_mod.score_candidates(inv, target, val_pids, cands, out)
@@ -2014,8 +2379,20 @@ def cmd_search(args):
         results = search_mod.greedy_search(inv, target, val_pids, out)
     winner = search_mod.select_winner(results)
     search_mod.freeze_winner(winner, inv, out)
+    search_mod.selection_report(results, out)
     print("WINNER %s mean validation BIC %.2f -> composed_model.txt frozen"
           % (winner["candidate_id"], winner["mean_bic"]))
+    return 0
+
+
+def cmd_reconstruct(args):
+    target = resolve_target(args.results_dir, config_dir=args.config_dir)
+    out = out_dir_for(target)
+    inv = load_inventory(out / "module_inventory.json")
+    pids = load_splits(target)["reconstruction_pids"]
+    reconstruct_participants(inv, target, args.group_dir, pids, out,
+                             mode=args.mode)
+    print("reconstruction -> %s" % (out / "reconstruction_results.json"))
     return 0
 
 
@@ -2027,7 +2404,8 @@ def cmd_eval(args):
     results_val = None
     if "validation" in sets:
         results_val = evaluate_models(target, args.group_dir, out,
-                                      splits["validation_pids"], "validation")
+                                      splits["composition_validation_pids"],
+                                      "validation")
     results_test = evaluate_models(target, args.group_dir, out,
                                    splits["test_pids"], "test")
     warnings = cross_checks(results_test, target, args.group_dir,
@@ -2056,6 +2434,12 @@ def main(argv=None):
     p.add_argument("--mode", choices=["exhaustive", "greedy"], required=True)
     p.set_defaults(fn=cmd_search)
 
+    p = subs.add_parser("compose-reconstruct",
+                        help="per-participant library coverage on the reconstruction set")
+    add_common(p)
+    p.add_argument("--mode", choices=["exhaustive", "greedy"], default="greedy")
+    p.set_defaults(fn=cmd_reconstruct)
+
     p = subs.add_parser("compose-eval", help="final-test evaluation vs baselines")
     add_common(p)
     p.add_argument("--sets", default="validation,test")
@@ -2083,7 +2467,7 @@ git commit -m "feat(compose): comparison figure + CLI subcommands"
 
 ---
 
-### Task 11: Live run — extraction, count, **USER CHECKPOINT**
+### Task 12: Live run — extraction, count, **USER CHECKPOINT**
 
 **Files:** no code changes; produces artifacts under `results/.../library_composition/`.
 
@@ -2092,7 +2476,7 @@ git commit -m "feat(compose): comparison figure + CLI subcommands"
 ```bash
 gecco-env/bin/python -m library_learning compose-modules
 ```
-Expected: `library_composition/` now contains `splits.json`, `mining_report.md`, `llm_log/` (13+ call files: 12 annotate + 1 merge [+ repairs]), `module_inventory.json`, `MODULES.md`. Sanity: `splits.json` seed pids `[1,2,4..13]`, 10 validation + 21 test pids, OCI means within ~0.1.
+Expected: `library_composition/` now contains `splits.json`, `mining_report.md`, `llm_log/` (13+ call files: 12 annotate + 1 merge [+ repairs]), `annotations.json`, `module_inventory.json`, `MODULES.md`, `reconstruction_report.json`. Sanity: `splits.json` seed pids `[1,2,4..13]`, composition validation `[4..13]`, 10 reconstruction + 21 test pids, OCI means within ~0.1; every seed's reconstruction delta ≤ 15 BIC (gate passed); any `expressible_in_slots: false` mechanisms in `annotations.json` reviewed and their coverage decisions sensible.
 
 - [ ] **Step 2: Review the inventory** — read `MODULES.md` + `module_inventory.json`; spot-check 2–3 modules against their source participants' code (provenance pids). If a module misrepresents its source mechanism, re-run Step 1 (new logged calls) or hand-fix `module_inventory.json` + record in `llm_log/MANUAL_EDITS.md`, then `compose-modules --skip-llm` to re-validate.
 
@@ -2102,18 +2486,25 @@ Expected: `library_composition/` now contains `splits.json`, `mining_report.md`,
 gecco-env/bin/python -m library_learning compose-count
 ```
 
-- [ ] **Step 4: 🛑 STOP — report to Akshay.** Message must include: number of modules, `n_candidates`, histogram by param count, and a fit-time estimate (`n_candidates × 10 validation pids × ~1–2 s`). **Akshay chooses `--mode exhaustive` or `--mode greedy`. Do not proceed without his reply.**
+- [ ] **Step 4: 🛑 STOP — report to Akshay.** Message must include: number of modules, `n_candidates`, histogram by param count, a fit-time estimate (`n_candidates × 10 validation pids × ~1–2 s`), the seed-reconstruction gate summary (max delta), and any `expressible_in_slots: false` mechanisms. **Akshay chooses `--mode exhaustive` or `--mode greedy` (the choice applies to both the composition search and per-participant reconstruction). Do not proceed without his reply.**
 
 ---
 
-### Task 12: Live run — search, evaluation, results
+### Task 13: Live run — search, reconstruction, evaluation, results
 
 - [ ] **Step 1: Run the search in Akshay's chosen mode** (background; it can take a while)
 
 ```bash
 gecco-env/bin/python -m library_learning compose-search --mode <exhaustive|greedy> 2>&1 | tee /tmp/compose_search.log
 ```
-Expected: `search_log.jsonl` grows one line per candidate; ends with `WINNER ... frozen`. Sanity-check the winner: its validation mean BIC must be ≤ backbone's.
+Expected: `search_log.jsonl` grows one line per candidate; ends with `WINNER ... frozen`; `selection_report.json` written (inspect top-10 + LOO rank stability — note in the final report whether the winner's rank is stable across left-out participants). Sanity-check the winner: its validation mean BIC must be ≤ backbone's.
+
+- [ ] **Step 1b: Run per-participant reconstruction** (same mode as Akshay chose)
+
+```bash
+gecco-env/bin/python -m library_learning compose-reconstruct --mode <exhaustive|greedy> 2>&1 | tee /tmp/compose_reconstruct.log
+```
+Expected: `reconstruction_results.json` with 10 entries; for each pid, `library_bic` should land near `individual_bic` (library spans the person) and the summary should note how often the library beats the group model on these unseen subjects.
 
 - [ ] **Step 2: Run evaluation**
 
@@ -2129,7 +2520,7 @@ Expected: `test_results.{json,csv}`, `RESULTS.md`, `comparison.{png,pdf}`. Read 
 
 - [ ] **Step 4: Report + commit artifacts**
 
-Summarize for Akshay: winner modules, validation mean BIC, test mean BICs (all 4 models), W/T/L + Wilcoxon p, warnings. Then:
+Summarize for Akshay: winner modules, validation mean BIC + top-k/LOO stability, reconstruction-set library coverage (library vs individual vs group per pid), test mean BICs (all 4 models), W/T/L + Wilcoxon p, warnings. Then:
 
 ```bash
 git add results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_individual/library_composition
@@ -2140,6 +2531,6 @@ git commit -m "results: library composition — winner, search log, held-out eva
 
 ## Self-Review Notes
 
-- Spec coverage: splits/no-double-dipping (Task 2), Gemini-logged extraction with singletons+dedup (Task 6), 8-param cap + count checkpoint (Tasks 7, 11), seeded fitting protocol (Task 5), freeze discipline (Task 9 `FileNotFoundError` + Task 12 order), baselines incl. ceiling + cross-checks (Tasks 8–9), figure w/ paper palette (Task 10), reproducibility (seeds everywhere, llm_log, MANUAL_EDITS.md).
+- Spec coverage: revised splits incl. matched information budget (Task 2), Gemini-logged extraction with singletons+dedup and all five quality gates — seed reconstruction, escape hatch, coverage audit, bounds cross-check, state isolation + pairwise smoke (Task 6), 8-param cap + count checkpoint (Tasks 7, 12), seeded fitting protocol (Task 5), selection stability report (Task 7), per-participant reconstruction on unseen subjects (Task 10), freeze discipline (Task 9 `FileNotFoundError` + Task 13 order), baselines incl. ceiling + cross-checks (Tasks 8–9), figure w/ paper palette (Task 11), reproducibility (seeds everywhere, llm_log, MANUAL_EDITS.md).
 - Deliberately out of scope (per spec non-goals): per-participant model assignment, compression-pipeline `scan/verify/report` CLI wiring (the `__main__.py` docstring leaves the door open).
 - Spec deviations (intentional): `search_log.jsonl` instead of `search_log.json` (append-per-candidate is crash-safe); no `candidates/` dir — every candidate's source is reproducible from `render_candidate(inventory, module_ids)` and its module ids are in the log; winner's validation params live in `winner.json` (`per_pid`) instead of a separate `winner_params_validation.csv`.
