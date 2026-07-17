@@ -166,7 +166,7 @@ def plot_bic_comparison():
          MODEL_COLORS["individual"]),
     ]
 
-    fig, ax = plt.subplots(figsize=(3.2, 3.4))
+    fig, ax = plt.subplots(figsize=(2.6, 3.2))
     x = np.arange(len(models))
     means = [np.mean(v) for _, v, _ in models]
     errs = [sem(v) for _, v, _ in models]
@@ -177,7 +177,7 @@ def plot_bic_comparison():
                 ecolor="black", elinewidth=1.6, capsize=0, zorder=3)
 
     ax.set_xticks(x)
-    ax.set_xticklabels([m[0] for m in models], fontsize=11)
+    ax.set_xticklabels([m[0] for m in models], fontsize=10.5)
     ax.set_ylabel("BIC")
     ax.set_ylim(360, 450)
     ax.set_yticks(np.arange(360, 451, 20))
