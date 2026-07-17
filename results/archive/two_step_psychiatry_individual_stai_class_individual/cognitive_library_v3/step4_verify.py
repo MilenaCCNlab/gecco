@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any
 
-from step0_config import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step0_config import (
     load_model_files,
     load_stored_bics,
     OUTPUT_DIR,
@@ -91,8 +91,8 @@ def verify_all():
     # Import reconstructor
     sys.path.insert(0, OUTPUT_DIR)
     try:
-        from reconstructor import reconstruct_model, make_cognitive_model, CognitiveModelBase
-        from participants import PARTICIPANT_SPECS
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.reconstructor import reconstruct_model, make_cognitive_model, CognitiveModelBase
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.participants import PARTICIPANT_SPECS
     except ImportError as e:
         print(f"ERROR: Could not import library files: {e}")
         print("Make sure steps 1-3 have been run.")

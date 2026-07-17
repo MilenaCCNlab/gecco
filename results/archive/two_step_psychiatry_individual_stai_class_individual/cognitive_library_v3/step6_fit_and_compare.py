@@ -20,7 +20,7 @@ from scipy.optimize import minimize
 from typing import Dict, List, Tuple, Optional, Callable
 from dataclasses import dataclass, asdict
 
-from step0_config import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step0_config import (
     load_model_files,
     load_stored_bics,
     OUTPUT_DIR,
@@ -30,7 +30,7 @@ from step0_config import (
 
 # Import library components
 sys.path.insert(0, OUTPUT_DIR)
-from reconstructor import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.reconstructor import (
     CognitiveModelBase,
     make_cognitive_model,
     reconstruct_model,

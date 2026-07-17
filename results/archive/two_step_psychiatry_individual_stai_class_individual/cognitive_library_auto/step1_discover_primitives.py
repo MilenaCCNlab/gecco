@@ -8,7 +8,7 @@ Outputs: primitives.py
 
 import os
 import sys
-from step0_config import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_auto.step0_config import (
     load_gemini_client,
     call_gemini,
     extract_code_block,

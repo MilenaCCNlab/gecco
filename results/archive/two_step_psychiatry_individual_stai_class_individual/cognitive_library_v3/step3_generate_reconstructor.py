@@ -7,7 +7,7 @@ Create reconstructor.py that assembles models from primitives + specs.
 
 import os
 import json
-from step0_config import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step0_config import (
     load_gemini_client,
     call_gemini,
     extract_code_block,
@@ -19,34 +19,15 @@ from step0_config import (
 RECONSTRUCTOR_PROMPT = """
 Generate a reconstructor that assembles cognitive models from primitives and specifications.
 
-## Primitives (with registries)
+## Primitives
 ```python
 {primitives_code}
 ```
 
-## Key Registries from Primitives
-The primitives.py contains these registries you MUST use:
-- `PRIMITIVES`: Maps category -> list of function names (e.g., "helper": ["softmax"])
-- `SIGNATURES`: Maps "category::name" -> (required_args, optional_args, return_type)
-- `PARAM_TO_PRIMITIVE`: Maps parameter names -> primitive category
-- `STAI_PATTERNS`: Maps modulation type -> code pattern
-
-## Specifications (structured format)
+## Specifications
 ```python
 {participants_code}
 ```
-
-## Specification Format
-Each participant spec contains:
-- `primitives`: List of "category::name" strings for all primitives used
-- `parameters`: List of parameter names in order
-- `parameter_order`: Explicit tuple unpacking order
-- `stai_modulation`: Dict mapping param_name -> modulation_type
-- `primitive_calls`: Dict mapping method -> list of primitives called:
-  - "policy_stage1": primitives for stage1 action selection
-  - "policy_stage2": primitives for stage2 action selection
-  - "value_update": primitives for learning
-  - "post_trial": primitives for decay/cleanup
 
 ## Sample Original Models (CRITICAL - match this interface exactly)
 {sample_models}
@@ -152,58 +133,32 @@ def make_cognitive_model(ModelClass):
     return cognitive_model
 ```
 
-## STAI Modulation Routing (NEW STRUCTURED FORMAT)
-Use spec["stai_modulation"] which is now a DICT mapping param_name -> modulation_type:
-```python
-# Example spec["stai_modulation"]:
-{
-    "phi": "inverse_division",      # effective_phi = phi / (1 + stai)
-    "stick_slope": "additive",      # effective_stick = base + slope * stai
-    "w": "inverse_linear"           # effective_w = w * (1 - stai)
-}
-```
+## STAI Modulation Routing
+Based on spec["stai_modulation"]:
+- "multiplicative" → param * stai
+- "additive" → base + slope * stai  
+- "inverse_linear" → param * (1 - stai)
+- "inverse_division" → param / (1 + stai)
 
-Modulation types and their implementations:
-- "multiplicative" → `primitives.stai_multiplicative(param, stai)` → param * stai
-- "additive" → `primitives.stai_additive(base, slope, stai)` → base + slope * stai  
-- "inverse_linear" → `primitives.stai_inverse_linear(param, stai)` → param * (1 - stai)
-- "inverse_division" → `primitives.stai_inverse_division(param, stai)` → param / (1 + stai)
-- "affine_amplification" → `primitives.stai_affine_amplification(base, bias, stai)` → base * (1 + bias * stai)
-
-## Primitive Calls Routing (NEW STRUCTURED FORMAT)
-Use spec["primitive_calls"] to know exactly which primitives each method should call:
-```python
-# Example spec["primitive_calls"]:
-{
-    "policy_stage1": ["helper::softmax", "policy::add_perseveration_bonus"],
-    "policy_stage2": ["helper::softmax"],
-    "value_update": ["value_update::td_update_stage1", "value_update::td_update_stage2"],
-    "post_trial": []
-}
-```
-
-## Parameter Routing (fallback if primitive_calls not available)
-Use PARAM_TO_PRIMITIVE registry from primitives.py or detect from parameter names:
-- 'persev' or 'phi' → policy::add_perseveration_bonus
-- 'wsls' or 'win_stay' → policy::add_win_stay_bonus
-- 'w' or 'w_base' or 'w_max' → policy::mb_mf_mixture
-- 'decay' → decay::apply_memory_decay
-- 'habit' → policy::add_habit_influence
+## Parameter Routing Patterns
+Detect from parameter names in spec["parameters"]:
+- 'persev' or 'phi' → perseveration bonus
+- 'wsls' or 'win_stay' → win-stay/lose-shift
+- 'w' or 'w_base' or 'w_max' → MB/MF mixture weight
+- 'decay' → memory decay
+- 'habit' → habit trace
 
 ## Instructions
 Create reconstructor.py with:
 
-1. **Import primitives**: `import primitives as P` - use the primitives module, don't redefine functions
+1. **CognitiveModelBase**: Exact interface as shown above
 
-2. **CognitiveModelBase**: Exact interface as shown above
-
-3. **reconstruct_model(participant_id)**: Returns a dynamically created model class that:
+2. **reconstruct_model(participant_id)**: Returns a dynamically created model class that:
    - Inherits from CognitiveModelBase
-   - Reads spec from participants.PARTICIPANT_SPECS[participant_id]
-   - Implements unpack_parameters based on spec["parameter_order"]
-   - Implements init_model to compute effective parameters using spec["stai_modulation"]
-   - Overrides policy_stage1/policy_stage2/value_update/post_trial based on spec["primitive_calls"]
-   - Calls primitives from `import primitives as P` (e.g., `P.softmax(...)`, `P.add_perseveration_bonus(...)`)
+   - Implements unpack_parameters based on spec["parameters"]
+   - Implements init_model for STAI modulation calculations
+   - Overrides policy_stage1/policy_stage2/value_update/post_trial as needed
+   - Uses primitives from primitives.py via `import primitives as P`
 
 3. **make_cognitive_model(ModelClass)**: Wrapper for fitting API (exact signature above)
 

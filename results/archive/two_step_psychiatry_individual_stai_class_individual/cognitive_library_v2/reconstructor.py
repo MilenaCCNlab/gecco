@@ -17,8 +17,8 @@ Assembly patterns verified:
 
 import numpy as np
 from typing import Tuple, Callable, Optional
-import primitives as P
-from participants import PARTICIPANT_SPECS
+import results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.primitives as P
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.participants import PARTICIPANT_SPECS
 
 
 # ============================================================

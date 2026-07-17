@@ -29,11 +29,11 @@ sys.path.insert(0, '/home/aj9225/gecco-1')
 sys.path.insert(0, '/home/aj9225/gecco-1/results/two_step_psychiatry_individual_stai_class_individual/cognitive_library_v2')
 
 # Import library components
-from participants import PARTICIPANT_SPECS
-import primitives as P
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.participants import PARTICIPANT_SPECS
+import results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.primitives as P
 
 # Import model reconstruction from shared reconstructor module
-from reconstructor import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.reconstructor import (
     CognitiveModelBase,
     make_cognitive_model,
     reconstruct_model,

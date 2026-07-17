@@ -7,7 +7,7 @@ Express each model as primitives + parameters → participants.py
 
 import os
 import json
-from step0_config import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step0_config import (
     load_gemini_client,
     call_gemini,
     extract_code_block,

@@ -31,7 +31,7 @@ def run_pipeline(max_iterations: int = 10, start_step: int = 1):
         print("\n" + "=" * 70)
         print("STEP 1: DISCOVER PRIMITIVES")
         print("=" * 70)
-        from step1_discover_primitives import discover_primitives
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step1_discover_primitives import discover_primitives
         discover_primitives()
     
     # Step 2: Generate specs
@@ -39,7 +39,7 @@ def run_pipeline(max_iterations: int = 10, start_step: int = 1):
         print("\n" + "=" * 70)
         print("STEP 2: GENERATE SPECIFICATIONS")
         print("=" * 70)
-        from step2_generate_specs import generate_specs
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step2_generate_specs import generate_specs
         generate_specs()
     
     # Step 3: Generate reconstructor
@@ -47,7 +47,7 @@ def run_pipeline(max_iterations: int = 10, start_step: int = 1):
         print("\n" + "=" * 70)
         print("STEP 3: GENERATE RECONSTRUCTOR")
         print("=" * 70)
-        from step3_generate_reconstructor import generate_reconstructor
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step3_generate_reconstructor import generate_reconstructor
         generate_reconstructor()
     
     # Iteration loop: verify and refine
@@ -58,11 +58,11 @@ def run_pipeline(max_iterations: int = 10, start_step: int = 1):
         
         # Step 4: Verify
         print("\n--- Step 4: Verification ---")
-        from step4_verify import verify_all
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step4_verify import verify_all
         
         # Reload modules to get fresh state
         import importlib
-        import step4_verify
+        import results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step4_verify as step4_verify
         importlib.reload(step4_verify)
         
         results = step4_verify.verify_all()
@@ -82,9 +82,9 @@ def run_pipeline(max_iterations: int = 10, start_step: int = 1):
         
         # Step 5: Refine
         print("\n--- Step 5: Refinement ---")
-        from step5_refine import refine
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step5_refine import refine
         
-        import step5_refine
+        import results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.step5_refine as step5_refine
         importlib.reload(step5_refine)
         
         fixes = step5_refine.refine()

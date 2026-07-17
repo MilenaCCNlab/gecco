@@ -7,7 +7,7 @@ Diagnose and fix mismatches through iterative refinement.
 
 import os
 import json
-from step0_config import (
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_auto.step0_config import (
     load_gemini_client,
     call_gemini,
     extract_code_block,
@@ -193,7 +193,7 @@ def refine():
         print(f"\nApplying {spec_fixes_applied} spec fixes...")
         
         # Regenerate participants.py
-        from step2_generate_specs import generate_participants_code
+        from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_auto.step2_generate_specs import generate_participants_code
         participants_code = generate_participants_code(specs)
         
         participants_path = os.path.join(OUTPUT_DIR, "participants.py")

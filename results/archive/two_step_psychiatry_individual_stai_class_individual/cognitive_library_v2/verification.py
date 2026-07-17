@@ -8,8 +8,8 @@ all participant models with matching BIC values.
 
 import json
 import os
-from participants import PARTICIPANT_SPECS, PRIMITIVE_USAGE
-from reconstructor import reconstruct_model
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.participants import PARTICIPANT_SPECS, PRIMITIVE_USAGE
+from results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v2.reconstructor import reconstruct_model
 
 
 def load_original_bics(bics_dir: str) -> dict:

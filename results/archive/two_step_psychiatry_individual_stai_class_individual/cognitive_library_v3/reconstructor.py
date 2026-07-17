@@ -1,5 +1,5 @@
 import numpy as np
-import primitives as P
+import results.archive.two_step_psychiatry_individual_stai_class_individual.cognitive_library_v3.primitives as P
 from abc import ABC, abstractmethod
 
 # -----------------------------------------------------------------------------
