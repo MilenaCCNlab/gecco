@@ -33,3 +33,15 @@ def test_generate_logs_verbatim(tmp_path):
 
     client.generate("again", tag="smoke")
     assert (tmp_path / "call_001_smoke.json").exists()
+
+
+def test_log_numbering_skips_gaps(tmp_path):
+    (tmp_path / "call_000_a.json").write_text("{}")
+    (tmp_path / "call_005_b.json").write_text("{}")
+
+    def fake_transport(url, payload):
+        return {"candidates": [{"content": {"parts": [{"text": "x"}]}}]}
+
+    client = GeminiClient(log_dir=tmp_path, api_key="k", transport=fake_transport)
+    client.generate("p", tag="c")
+    assert (tmp_path / "call_006_c.json").exists()

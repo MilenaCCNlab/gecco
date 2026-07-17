@@ -50,7 +50,13 @@ class GeminiClient:
         self.model = model
         self.temperature = temperature
         self.transport = transport or _urllib_transport
-        self._n = len(list(self.log_dir.glob("call_*.json")))
+        # Parse max index from existing call_NNN_*.json files to handle gaps
+        indices = []
+        for f in self.log_dir.glob("call_*.json"):
+            m = re.search(r'call_(\d+)_', f.name)
+            if m:
+                indices.append(int(m.group(1)))
+        self._n = max(indices) + 1 if indices else 0
 
     def generate(self, prompt, tag):
         url = API_URL.format(model=self.model) + "?key=" + self.api_key
