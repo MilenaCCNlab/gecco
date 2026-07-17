@@ -1,0 +1,170 @@
+Here are three new cognitive models that hypothesize different ways anxiety (STAI) might influence decision-making in this task, specifically tailored for a low-anxiety participant (STAI ~0.29).
+
+### Model 1: Anxiety-Modulated Model-Based vs. Model-Free Control
+This model tests the hypothesis that anxiety levels shift the balance between Model-Based (planning) and Model-Free (habitual) control. The classic "hybrid" model in two-step tasks combines these two systems using a mixing weight `w`. Here, we hypothesize that `w` is not static but a function of anxiety. Low anxiety (like this participant) might facilitate higher cognitive resources for Model-Based planning (higher `w`), while high anxiety might drive reliance on Model-Free habits (lower `w`).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    
+    Low anxiety participants (STAI < 0.31) are hypothesized to have more cognitive resources 
+    available for planning, leading to a higher mixing weight 'w' (more Model-Based).
+    High anxiety participants rely more on habitual, Model-Free strategies (lower 'w').
+    
+    w_effective = w_base + w_mod * (1 - stai)
+    
+    Q_net = w * Q_MB + (1-w) * Q_MF
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    w_base: [0, 1]     # Base mixing weight
+    w_mod: [0, 1]      # Modulation strength of STAI on w
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective mixing weight based on STAI
+        # Lower STAI -> Higher (1-stai) -> Higher w (More Model-Based)
+        # We clamp w between 0 and 1
+        raw_w = self.w_base + self.w_mod * (1.0 - self.stai)
+        self.w = np.clip(raw_w, 0.0, 1.0)
+        
+        # Initialize transition model (counts) for MB
+        # We use the provided priors in self.trans_counts
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Free Q-values are self.q_stage1
+        
+        # Compute Model-Based Q-values
+        # Q_MB(a1) = sum(P(s|a1) * max(Q_stage2(s, :)))
+        # Update transition probabilities
+        T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+        
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Expected value of best action at stage 2
+            v_stage2_s0 = np.max(self.q_stage2[0])
+            v_stage2_s1 = np.max(self.q_stage2[1])
+            
+            q_mb[a] = T[a, 0] * v_stage2_s0 + T[a, 1] * v_stage2_s1
+            
+        # Combine MF and MB values
+        q_net = self.w * q_mb + (1 - self.w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 values (common to both)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Stage 1 Model-Free values (TD-learning)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # 3. Update Transition Model (Model-Based)
+        # Simple counting update
+        self.trans_counts[action_1, state] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Learning Rate Asymmetry (Pos/Neg)
+This model investigates if anxiety affects how participants learn from positive versus negative outcomes. The "negativity bias" hypothesis suggests anxious individuals might over-learn from punishments (or lack of reward) or under-learn from rewards. Since this participant has low anxiety, this model tests if they exhibit a more balanced learning profile or perhaps a "positivity bias" (learning more from gains), modulated by their STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the asymmetry between learning from positive (reward) 
+    and negative (no reward) prediction errors.
+    
+    We define two learning rates: alpha_pos and alpha_neg.
+    The ratio or difference between them is modulated by STAI.
+    
+    alpha_pos = alpha_base
+    alpha_neg = alpha_base * (1 + bias_param * stai)
+    
+    If bias_param > 0 and STAI is high, alpha_neg > alpha_pos (negativity bias).
+    For low STAI, alpha_neg is closer to alpha_pos.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] # Base learning rate
+    beta: [0, 10]      # Inverse temperature
+    bias_param: [0, 5] # Strength of anxiety-driven negativity bias
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.bias_param = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate specific learning rates
+        self.alpha_pos = self.alpha_base
+        # Anxiety increases sensitivity to negative outcomes
+        self.alpha_neg = np.clip(self.alpha_base * (1.0 + self.bias_param * self.stai), 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        # Note: We use the updated Q2 value for the TD target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Exploration (Inverse Temperature)
+This model posits that anxiety directly impacts the exploration-exploitation trade-off, represented by the softmax inverse temperature parameter `beta`. High anxiety is often associated with "behavioral inhibition" or risk aversion, which might manifest as a very high `beta` (deterministic, rigid choices). Conversely, low anxiety (like this participant) might allow for more relaxed, exploratory behavior (lower `beta`).
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the exploration-exploitation trade-off (beta).
+    
+    High anxiety leads to more rigid, exploitative behavior (higher beta).
+    Low anxiety allows for more stochasticity/exploration (lower beta).
+    
+    beta_effective = beta_base * (1 + stiff_param * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta_base: [0, 10]  # Base inverse temperature
+    stiff_param: [0, 5] # How much anxiety stiffens the policy
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stiff_param = model_parameters
+
+    def init_model(self) -> None:
+        # Modulate beta by STAI
+        # Higher STAI -> Higher Beta (more deterministic/rigid)
+        self.beta_eff = self.beta_base * (1.0 + self.stiff_param * self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.q_stage1, self.beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.softmax(self.q_stage2[state], self.beta_eff)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,223 @@
+Of course. As a cognitive scientist and Python programmer, I can certainly transform the provided model-fitting code into a simulation function. The goal is to use the model's logic not to evaluate its fit to existing data, but to *generate* new, synthetic data, trial by trial.
+
+The simulation will proceed as follows for each trial:
+1.  The model calculates the probabilities for the first-stage choices based on its current value estimates and any choice biases (like the anxiety-driven perseveration in `ParticipantModel2`).
+2.  We sample a first-stage action from these probabilities.
+3.  We sample a transition to a second-stage state based on the task's transition matrix.
+4.  The model calculates the probabilities for the second-stage choices, conditioned on the state reached.
+5.  We sample a second-stage action.
+6.  We determine the reward based on the externally provided, drifting reward probabilities for that state and action.
+7.  Finally, we feed the actions, state, and reward back into the model so it can perform its value update, preparing it for the next trial.
+
+Here is the simulation code built from the provided `ParticipantModel2` and the simulation template.
+
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+# The base class and specific model are included for context and to make the solution runnable.
+# These were provided in the prompt.
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety promotes choice perseveration ("stickiness"). A bonus value
+    is added to the previously chosen stage-1 action, making it more likely to be
+    selected again. The magnitude of this bonus is scaled by the participant's STAI score.
+    This model uses the standard TD learning from the base class.
+    """
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        kappa = self.kappa_base * self.stai
+        q_sticky = self.q_stage1.copy()
+        if self.last_action1 is not None:
+            q_sticky[self.last_action1] += kappa
+        return self.softmax(q_sticky, self.beta)
+
+def simulate_model(
+    ModelClass,
+    n_trials: int,
+    stai: float,
+    model_parameters: tuple,
+    drift1, drift2, drift3, drift4,
+    seed: int | None = None,
+):
+    """
+    Simulate a two-step task trajectory from a cognitive model class.
+
+    Task structure:
+      - Stage 1: choose action in {0,1}
+      - Transition: state in {0,1} sampled from model.T[action_1]
+      - Stage 2: choose action in {0,1} conditioned on state
+      - Reward: sampled from drifting reward probabilities:
+          state 0: [drift1[t], drift2[t]] for actions 0/1
+          state 1: [drift3[t], drift4[t]] for actions 0/1
+
+    Parameters
+    ----------
+    ModelClass : type
+        A subclass of CognitiveModelBase (e.g., ParticipantModel2).
+    n_trials : int
+        Number of trials to simulate.
+    stai : float
+        Participant anxiety score; passed into the model constructor.
+    model_parameters : tuple
+        Parameters expected by ModelClass.unpack_parameters(...).
+    drift1, drift2, drift3, drift4 : array-like (length n_trials)
+        Trial-wise reward probabilities for the 4 (state, action) pairs.
+    seed : int or None
+        RNG seed for reproducibility.
+
+    Returns
+    -------
+    stage1_choice : np.ndarray, shape (n_trials,)
+    state2        : np.ndarray, shape (n_trials,)
+    stage2_choice : np.ndarray, shape (n_trials,)
+    reward        : np.ndarray, shape (n_trials,)
+    """
+    rng = np.random.default_rng(seed)
+
+    # Instantiate the cognitive model
+    model = ModelClass(n_trials=n_trials, stai=float(stai), model_parameters=model_parameters)
+
+    # Initialize arrays to store the simulation data
+    stage1_choice = np.zeros(n_trials, dtype=int)
+    state2 = np.zeros(n_trials, dtype=int)
+    stage2_choice = np.zeros(n_trials, dtype=int)
+    reward = np.zeros(n_trials, dtype=int)
+
+    for t in range(n_trials):
+        # Set the model's internal trial counter and call any pre-trial logic
+        model.trial = t
+        model.pre_trial()
+
+        # --- Stage 1: Agent makes a choice ---
+        p1 = model.policy_stage1()
+        a1 = int(rng.choice([0, 1], p=p1))
+
+        # --- Transition: Environment determines the state ---
+        pT = model.T[a1]
+        s = int(rng.choice([0, 1], p=pT))
+
+        # --- Stage 2: Agent makes a choice ---
+        p2 = model.policy_stage2(s)
+        a2 = int(rng.choice([0, 1], p=p2))
+
+        # --- Reward: Environment provides feedback ---
+        if s == 0:
+            pr = float(drift1[t]) if a2 == 0 else float(drift2[t])
+        else: # s == 1
+            pr = float(drift3[t]) if a2 == 0 else float(drift4[t])
+        
+        r = int(rng.random() < pr)
+
+        # --- Model Update: Agent learns from the outcome ---
+        model.value_update(a1, s, a2, float(r))
+        model.post_trial(a1, s, a2, float(r))
+
+        # --- Store the results for this trial ---
+        stage1_choice[t] = a1
+        state2[t] = s
+        stage2_choice[t] = a2
+        reward[t] = r
+
+    return stage1_choice, state2, stage2_choice, reward
+```

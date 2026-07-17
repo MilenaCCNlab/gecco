@@ -1,0 +1,145 @@
+As a cognitive scientist and Python programmer, I will propose three distinct cognitive models to explain the decision-making patterns of this participant. Each model is grounded in established theories of how anxiety influences cognition and learning, and each translates a specific hypothesis into a computational mechanism.
+
+The participant exhibits a medium anxiety level (STAI score of 0.35), and their behavior shows a strong initial preference for one option before exploring others. My models will aim to capture these features by proposing that anxiety modulates different aspects of the decision process: the balance between planning and habit, the tendency to repeat actions, and the stability of learned values in memory.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+
+This model tests the hypothesis that anxiety arbitrates the balance between goal-directed (model-based) and habitual (model-free) decision systems. Computationally intensive model-based planning, which uses knowledge of the task structure (i.e., transition probabilities), may be impaired by anxiety. This model proposes that as anxiety increases, individuals rely more heavily on simpler, less demanding model-free learning. For this participant with medium anxiety, the model predicts a mixture of both strategies.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant uses a hybrid of model-based and model-free
+    control. The reliance on the computationally demanding model-based system
+    is reduced by anxiety. The weighting parameter 'w' determines the balance,
+    where w=1 is purely model-based. 'w' is calculated from the STAI score and
+    a sensitivity parameter, such that higher anxiety pushes the balance
+    towards the simpler model-free system.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_sensitivity: [-10, 10]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_sensitivity = model_parameters
+
+    def init_model(self) -> None:
+        # We need a separate value table for the model-free system
+        self.q_stage1_mf = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate the model-based values
+        q_stage1_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Q_MB(a) = P(s1|a) * max(Q(s1)) + P(s2|a) * max(Q(s2))
+            q_stage1_mb[a] = np.sum([self.T[a, s] * np.max(self.q_stage2[s]) for s in range(self.n_states)])
+
+        # 2. Determine the weighting 'w' based on anxiety
+        # A logistic function maps stai -> w. High sensitivity means stai has a strong effect.
+        # For this participant (stai=0.35), w will be > 0.5, favoring model-based control.
+        w = 1 / (1 + np.exp(self.w_sensitivity * (self.stai - 0.5)))
+
+        # 3. Combine model-based and model-free values
+        q_hybrid = w * q_stage1_mb + (1 - w) * self.q_stage1_mf
+
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage-2 values are learned the same way for both systems
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Only the model-free stage-1 values are updated via TD-learning
+        # This uses the value of the *next state* to update the *previous action*
+        delta_1_mf = np.max(self.q_stage2[state]) - self.q_stage1_mf[action_1]
+        self.q_stage1_mf[action_1] += self.alpha * delta_1_mf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Perseveration
+
+This model explores the idea that anxiety promotes behavioral rigidity. Instead of engaging in complex planning, the participant might adopt a simpler heuristic: repeating the last action, especially if it wasn't disastrous. The long string of initial choices for spaceship 0 suggests such a perseverative tendency. This model proposes a "stickiness" bonus added to the value of the previously chosen action, with the magnitude of this bonus being proportional to the participant's anxiety level.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant exhibits perseveration, a tendency to repeat
+    the previous action. This model assumes that anxiety increases this form of
+    behavioral rigidity. A 'stickiness' bonus is added to the value of the
+    action chosen on the previous trial, making it more likely to be chosen
+    again. The size of this bonus is scaled by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    perseveration_factor: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.perseveration_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_policy = self.q_stage1.copy()
+
+        # Add a perseveration bonus to the last chosen action
+        if self.last_action1 is not None:
+            # The bonus is a product of a base factor and the individual's anxiety
+            bonus = self.perseveration_factor * self.stai
+            q_policy[self.last_action1] += bonus
+
+        return self.softmax(q_policy, self.beta)
+
+    # The value_update logic is the standard Rescorla-Wagner / TD learning,
+    # so we don't need to override the base class method.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Value Decay
+
+This model tests the hypothesis that anxiety impacts the maintenance of learned information in memory. Cognitive load and worry associated with anxiety might interfere with working memory, causing the learned values of different options to "decay" or be forgotten over time, particularly for options that are not being actively chosen and reinforced. This model implements a forgetting mechanism where all action values decay towards their initial state on each trial, and the rate of this decay is scaled by the participant's anxiety level.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety impairs the stability of learned values, leading to
+    a faster "forgetting" or decay of Q-values for unchosen options. This
+    makes behavior more reliant on recent outcomes. On each trial, all Q-values
+    decay towards their initial value (0 for stage 1, 0.5 for stage 2). The
+    rate of this decay is proportional to the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    decay_factor: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Store initial values to decay towards
+        self.initial_q1 = 0.0
+        self.initial_q2 = 0.5
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate the trial-specific decay rate based on anxiety
+        # For this participant (stai=0.35), the decay will be moderate.
+        current_decay_rate = self.decay_factor * self.stai
+
+        # Apply decay to all Q-values before the update
+        self.q_stage1 = self.q_stage1 * (1 - current_decay_rate) + self.initial_q1 * current_decay_rate
+        self.q_stage2 = self.q_stage2 * (1 - current_decay_rate) + self.initial_q2 * current_decay_rate
+        
+        # Now, apply the standard TD update on the decayed values
+        super().value_update(action_1, state, action_2, reward)
+
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

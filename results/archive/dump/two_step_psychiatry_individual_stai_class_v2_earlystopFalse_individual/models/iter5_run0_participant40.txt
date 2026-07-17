@@ -1,0 +1,155 @@
+Here are the 3 new cognitive models.
+
+### Model 1: Dynamic Transition Learning (Model-Based)
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: The participant uses a Model-Based strategy where they actively learn 
+    the transition probabilities (Spaceship -> Planet) over time, rather than assuming 
+    fixed probabilities. 
+    
+    Anxiety (STAI) modulates the 'transition learning rate' (eta).
+    Low anxiety is hypothesized to allow for more efficient updating of the internal 
+    model of the environment structure.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Reward learning rate
+    beta: [0, 10]       # Inverse temperature
+    eta_base: [0, 1]    # Base transition learning rate
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize estimated transition probabilities (2 choices x 2 states)
+        # Start with uniform belief (0.5) or slight prior. Using 0.5 for neutrality.
+        self.trans_probs = 0.5 * np.ones((self.n_choices, self.n_states))
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based Control:
+        # Calculate expected value of each spaceship based on current transition beliefs
+        # and current values of the planets (max Q of aliens on that planet).
+        
+        # V(state) = max(Q_stage2[state])
+        v_stage2 = np.max(self.q_stage2, axis=1)
+        
+        # Q_MB(action) = sum(P(state|action) * V(state))
+        q_mb = np.dot(self.trans_probs, v_stage2)
+        
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Standard TD update for Stage 2 (Aliens)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Dynamic Transition Update
+        # Update belief about P(state | action_1)
+        # eta_eff decreases as anxiety increases (anxiety hinders structural learning)
+        # or we can frame it as: Low anxiety -> higher eta.
+        eta_eff = self.eta_base * (1.0 - self.stai)
+        
+        # Prediction error for transition: 1 if transition occurred, 0 otherwise
+        # We update the row corresponding to action_1
+        for s in range(self.n_states):
+            outcome = 1.0 if s == state else 0.0
+            self.trans_probs[action_1, s] += eta_eff * (outcome - self.trans_probs[action_1, s])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Reward Momentum (Trend Following)
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: The participant tracks reward 'momentum' (trends) in addition to 
+    absolute value. They prefer options that have been 'improving' recently.
+    
+    Anxiety (STAI) modulates the reliance on this momentum signal.
+    Low anxiety participants are hypothesized to be better at utilizing trend 
+    information (higher weight on momentum), whereas high anxiety leads to 
+    reliance on simple value (Q).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for both Q and Momentum
+    beta: [0, 10]       # Inverse temperature
+    mom_w: [0, 5]       # Weight of the momentum term
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.mom_w = model_parameters
+
+    def init_model(self) -> None:
+        # Momentum tracks the recent history of rewards for Stage 1 choices
+        self.momentum = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Effective momentum weight is higher for low anxiety
+        w_eff = self.mom_w * (1.0 - self.stai)
+        
+        # Combine Q-value (from base class tracking) and Momentum
+        # Note: Base class doesn't update q_stage1 automatically in a way we might want 
+        # if we are doing pure MF, but we will use the base class's q_stage1 which 
+        # is updated via TD in value_update below.
+        combined_values = self.q_stage1 + (w_eff * self.momentum)
+        
+        return self.softmax(combined_values, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD updates
+        super().value_update(action_1, state, action_2, reward)
+        
+        # Momentum Update:
+        # Tracks the raw reward signal directly associated with the Stage 1 choice.
+        # If reward is high, momentum increases.
+        # We use the same alpha for simplicity.
+        delta_mom = reward - self.momentum[action_1]
+        self.momentum[action_1] += self.alpha * delta_mom
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Stage-Specific Precision Control
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety differentially affects decision precision (beta) at different 
+    stages of the task. 
+    
+    High anxiety is hypothesized to degrade 'planning' precision (Stage 1) while 
+    leaving 'reactive' precision (Stage 2) relatively intact.
+    Low anxiety (like this participant) maintains high precision at both stages.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Base inverse temperature (Stage 2)
+    prec_drop: [0, 1]   # Factor by which anxiety reduces Stage 1 precision
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.prec_drop = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Stage 1 Beta is modulated by anxiety.
+        # beta_1 = beta * (1 - drop_factor * stai)
+        # If STAI is low (0.26), beta_1 is close to beta.
+        # If STAI is high, beta_1 drops (decisions become noisier/random).
+        beta_stage1 = self.beta * (1.0 - (self.prec_drop * self.stai))
+        
+        # Ensure beta doesn't go negative
+        beta_stage1 = max(0.0, beta_stage1)
+        
+        return self.softmax(self.q_stage1, beta_stage1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Stage 2 uses the base beta (reactive control assumed stable)
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    # Uses standard value_update from base class (TD learning)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

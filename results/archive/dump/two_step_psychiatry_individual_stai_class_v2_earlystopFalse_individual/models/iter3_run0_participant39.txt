@@ -1,0 +1,144 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making processes.
+
+### Model 1: Anxiety-Modulated Memory Decay
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety consumes cognitive resources, leading to faster forgetting 
+    of the values of unchosen options (attentional narrowing).
+    
+    While the chosen option is updated via reinforcement learning, the unchosen 
+    option's value decays towards 0. The rate of decay is proportional to the 
+    participant's STAI score.
+    
+    Q_unchosen(t+1) = Q_unchosen(t) * (1 - (decay_rate * STAI))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for chosen options
+    beta: [0, 10]       # Inverse temperature
+    decay_scale: [0, 1] # Scaling factor for anxiety-dependent decay
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD update for Stage 1 (Chosen)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Anxiety-modulated Decay for Stage 1 (Unchosen)
+        unchosen_action = 1 - action_1
+        decay_factor = self.decay_scale * self.stai
+        # Ensure decay factor doesn't exceed 1
+        decay_factor = np.clip(decay_factor, 0, 1)
+        
+        self.q_stage1[unchosen_action] *= (1.0 - decay_factor)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Transition Learning (Volatile MB)
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a "volatile" Model-Based strategy where 
+    the participant over-updates their belief about transition probabilities 
+    after every trial.
+    
+    This is a pure Model-Based agent (no Model-Free component in Stage 1 choice),
+    but the transition matrix T is updated dynamically. The learning rate for 
+    this transition update is scaled by STAI, implying anxious people are 
+    "paranoid" about the world structure changing.
+
+    T_new = T_old + (lr_trans_base * STAI) * PredictionError
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          # Learning rate for Stage 2 values
+    beta: [0, 10]          # Inverse temperature
+    lr_trans_scale: [0, 1] # Scaling factor for transition learning rate
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lr_trans_scale = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition matrix from prior counts
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Pure Model-Based Control:
+        # Q_MB(a) = Sum_s [ P(s|a) * Max_a' Q2(s, a') ]
+        q_mb = np.zeros(self.n_choices)
+        
+        # Calculate max Q-value for each state in stage 2
+        max_q2 = np.max(self.q_stage2, axis=1)
+        
+        # Compute expected value based on current transition matrix T
+        for a in range(self.n_choices):
+            q_mb[a] = np.dot(self.T[a], max_q2)
+            
+        return self.softmax(q_mb, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Dynamic Transition Update
+        # Learning rate depends on anxiety
+        lr = self.lr_trans_scale * self.stai
+        lr = np.clip(lr, 0, 1)
+        
+        # Update row for the chosen action
+        # Decrease probability of all states (decay)
+        self.T[action_1] *= (1 - lr)
+        # Increase probability of the observed state
+        self.T[action_1, state] += lr
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Negativity Bias
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety creates a "negativity bias" where neutral outcomes 
+    (0 coins) are perceived as punishments.
+    
+    The effective reward signal used for learning is modified such that 
+    0 rewards become negative values, proportional to the STAI score.
+    This reflects an intolerance of uncertainty or lack of success.
+
+    If Reward == 0: Effective_Reward = -1 * bias_scale * STAI
+    Else:           Effective_Reward = Reward
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    bias_scale: [0, 5] # Magnitude of negative bias for neutral outcomes
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.bias_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Apply Negativity Bias
+        effective_reward = reward
+        if reward == 0.0:
+            effective_reward = -1.0 * self.bias_scale * self.stai
+            
+        # Standard TD update with effective_reward
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

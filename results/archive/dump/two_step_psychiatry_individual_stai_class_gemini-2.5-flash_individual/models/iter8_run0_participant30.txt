@@ -1,0 +1,278 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, especially considering their high anxiety (STAI score = 0.5375). Each model uses `self.stai` to modulate a specific aspect of behavior.
+
+```python
+import numpy as np
+
+# Base class as provided (DO NOT MODIFY)
+from abc import ABC, abstractmethod
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to increased exploration at Stage 1 following a trial with no reward.
+    Participants with higher STAI scores will exhibit a greater reduction in their Stage 1 inverse temperature (beta)
+    after receiving a reward of 0, making their choices more random and exploratory. This might represent
+    a "panic switching" or "avoidance of past failure" mechanism.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_base: [0, 10] - Base inverse temperature for softmax choice.
+    stai_neg_outcome_beta_reduction: [0, 5] - How much STAI score amplifies beta reduction after a 0 reward.
+    beta_min: [0.1, 1.0] - Minimum allowable beta to prevent overly random choices.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stai_neg_outcome_beta_reduction, self.beta_min = model_parameters
+        self.current_beta = self.beta_base # Initialize current beta
+
+    def pre_trial(self) -> None:
+        """
+        Adjust beta for Stage 1 based on the reward from the previous trial and STAI score.
+        """
+        self.current_beta = self.beta_base
+        # If previous trial resulted in no reward (0.0) and it's not the very first trial
+        if self.trial > 0 and self.last_reward == 0.0:
+            # Reduce beta, amplified by STAI score. Higher STAI means greater reduction.
+            reduction_amount = self.stai * self.stai_neg_outcome_beta_reduction
+            self.current_beta = max(self.beta_min, self.beta_base - reduction_amount)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the potentially adjusted beta."""
+        return self.softmax(self.q_stage1, self.current_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using the base beta (exploration impulse is stage 1 specific)."""
+        return self.softmax(self.q_stage2[state], self.beta_base)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to an overestimation of rare transition probabilities.
+    When a rare transition occurs, anxious participants update their internal count for that
+    rare transition more strongly, making them perceive it as more likely in the future.
+    This biased transition knowledge then influences their Stage 1 choices via a model-based component.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    transition_alpha: [0, 1] - Learning rate for updating internal transition counts.
+    stai_rare_trans_overestimation_factor: [0, 5] - How much STAI amplifies rare transition count updates.
+    w_mb: [0, 1] - Weight of model-based control in Stage 1 Q-values (1-w_mb is model-free).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.transition_alpha, self.stai_rare_trans_overestimation_factor, self.w_mb = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize learned transition counts based on priors. Add a small value to avoid division by zero.
+        self.trans_counts_learned = np.copy(self.trans_counts).astype(float) + 0.1
+        self.T_learned = self.trans_counts_learned / self.trans_counts_learned.sum(axis=1, keepdims=True)
+        # Store model-free Q-values separately for blending, as self.q_stage1 will be the blend
+        self.q_stage1_mf = np.zeros(self.n_choices)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 Q-values (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # 2. Update internal transition counts
+        # Determine if the transition was rare
+        is_rare_transition = False
+        if action_1 == 0 and state == 1: # Spaceship A (0) commonly to Planet X (0), so A->Y (1) is rare
+            is_rare_transition = True
+        elif action_1 == 1 and state == 0: # Spaceship U (1) commonly to Planet Y (1), so U->X (0) is rare
+            is_rare_transition = True
+
+        # Update the specific transition count. Higher update_factor means faster learning/more weight to recent observation.
+        update_factor = self.transition_alpha
+        if is_rare_transition:
+            # Amplify update for rare transitions based on STAI. Higher STAI means greater overestimation.
+            update_factor += self.stai * self.stai_rare_trans_overestimation_factor
+            update_factor = np.clip(update_factor, 0, 5.0) # Clip to a reasonable range
+
+        # Simple exponential moving average for counts, then re-normalize
+        self.trans_counts_learned[action_1, :] *= (1 - update_factor)
+        self.trans_counts_learned[action_1, state] += update_factor
+        
+        # Ensure no row sums to zero before division (add small epsilon if necessary)
+        row_sums = self.trans_counts_learned[action_1, :].sum()
+        if row_sums == 0:
+            self.T_learned[action_1, :] = 0.5 # Default to uniform if no counts
+        else:
+            self.T_learned[action_1, :] = self.trans_counts_learned[action_1, :] / row_sums
+
+        # 3. Update Stage 1 Q-values (Model-Free and Model-Based blend)
+        # Model-Free update for Stage 1 (from the actual outcome)
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1_mf[action_1]
+        self.q_stage1_mf[action_1] += self.alpha * delta_1_mf
+
+        # Model-Based value for Stage 1 options using learned T and max Q2
+        V_stage2_max = np.max(self.q_stage2, axis=1) # Expected value of best action in each second stage state
+        q_stage1_mb = self.T_learned @ V_stage2_max
+
+        # Blend Model-Free and Model-Based for decision-making at Stage 1
+        self.q_stage1 = (1 - self.w_mb) * self.q_stage1_mf + self.w_mb * q_stage1_mb
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases reactive switching at Stage 2 after a negative outcome on the same planet.
+    If a participant receives 0 coins from an alien on a planet, and then returns to that same planet,
+    anxious individuals are more likely to switch to the alternative alien. This 'switching bonus' is amplified by STAI.
+    This contrasts with simple perseveration and is specific to negative outcomes at the second stage.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    switch_bonus_base: [0, 5] - Base bonus added to the alternative alien's Q-value after a 0 reward on the same planet.
+    stai_switch_impact: [0, 5] - How much STAI score amplifies this switching bonus.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.switch_bonus_base, self.stai_switch_impact = model_parameters
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities, adding a switching bonus to the alternative alien
+        if the last action on this planet resulted in 0 reward.
+        """
+        q_biased = np.copy(self.q_stage2[state])
+        
+        # Apply switching bonus only if conditions are met:
+        # 1. Not the very first trial
+        # 2. Returned to the same planet as the last trial
+        # 3. The last trial on this planet resulted in 0 reward
+        # 4. A previous Stage 2 action was made
+        if (self.trial > 0 and
+            self.last_state is not None and self.last_state == state and
+            self.last_reward == 0.0 and self.last_action2 is not None):
+            
+            # Calculate effective bonus, amplified by STAI. Higher STAI means greater switching.
+            effective_bonus = self.switch_bonus_base + self.stai * self.stai_switch_impact
+            effective_bonus = np.clip(effective_bonus, 0, 10.0) # Clip to a reasonable maximum
+
+            # Add bonus to the alternative action at Stage 2
+            alternative_action = 1 - int(self.last_action2)
+            q_biased[alternative_action] += effective_bonus
+        
+        return self.softmax(q_biased, self.beta)
+
+    # The default value_update method (TD learning) is used, as the switching
+    # only affects action selection at stage 2 and does not modify the underlying Q-values.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+
+```

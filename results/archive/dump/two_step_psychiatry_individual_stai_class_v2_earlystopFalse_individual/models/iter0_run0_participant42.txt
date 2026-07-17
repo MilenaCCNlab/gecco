@@ -1,0 +1,172 @@
+Here are three cognitive models designed to capture the behavior of a high-anxiety participant who exhibits strong perseveration and sudden switching behavior.
+
+### Model 1: Anxiety-Modulated Perseveration (Stickiness)
+This model hypothesizes that high anxiety leads to "stickiness" or choice perseveration. The participant tends to repeat their previous stage-1 choice regardless of the reward outcome, driven by a desire for safety or routine. The degree of this stickiness is modulated by their STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety (STAI) increases choice perseveration ('stickiness').
+    The participant has a tendency to repeat the last stage-1 action, 
+    modulated by their anxiety level.
+    
+    The model adds a 'stickiness' bonus to the Q-value of the previously chosen action.
+    The magnitude of this bonus is determined by a base stickiness parameter plus 
+    an anxiety-dependent component.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    stickiness: [0, 5]  # Base stickiness magnitude
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective stickiness based on anxiety
+        # Higher STAI -> higher tendency to stick
+        effective_stickiness = self.stickiness * (1.0 + self.stai)
+        
+        q_modified = self.q_stage1.copy()
+        if self.last_action1 is not None:
+            q_modified[self.last_action1] += effective_stickiness
+            
+        return self.softmax(q_modified, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-free update for stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Model-Based/Model-Free Hybrid
+This model tests the classic hypothesis that anxiety affects the balance between Model-Based (planning) and Model-Free (habitual) control. High anxiety might impair model-based reasoning, pushing the participant towards model-free habits. However, given the data shows a distinct switch, this model allows the mixing weight `w` to be modulated by STAI, potentially favoring model-free (habitual) control which can be slow to update but sticky.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    High anxiety reduces the weight of Model-Based planning (w), relying more on 
+    Model-Free caching.
+    
+    Q_net = w * Q_MB + (1-w) * Q_MF
+    
+    Where w is derived from a base parameter and reduced by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Base model-based weight
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Transition matrix learning (counting)
+        self.trans_counts = np.array([[1.0, 1.0], [1.0, 1.0]]) # Reset to flat prior for learning
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values
+        # Q_MB(a1) = sum(P(s|a1) * max(Q_stage2(s, :)))
+        # Normalize transition counts to probabilities
+        T_probs = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+        
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Expected value of best action in next state
+            v_next = np.max(self.q_stage2, axis=1) 
+            q_mb[a] = np.sum(T_probs[a] * v_next)
+
+        # Modulate weight w by anxiety: High anxiety reduces MB usage
+        # We clamp w between 0 and 1
+        w_eff = self.w_base * (1.0 - self.stai)
+        w_eff = np.clip(w_eff, 0.0, 1.0)
+
+        # Combined Q-value
+        q_net = w_eff * q_mb + (1 - w_eff) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 values (Model-Free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 values (Model-Free)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update Transition Model (Model-Based)
+        self.trans_counts[action_1, state] += 1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Win-Stay Lose-Shift with Inertia
+This model hypothesizes that the participant uses a heuristic strategy rather than full reinforcement learning. Specifically, a "Win-Stay, Lose-Shift" strategy, but with high "inertia" caused by anxiety. High anxiety makes the participant hesitant to shift even after losses, requiring accumulated negative evidence or a very strong signal to switch.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: The participant uses a heuristic strategy (Win-Stay, Lose-Shift) 
+    heavily dampened by anxiety-induced inertia.
+    
+    Instead of standard Q-learning, the stage 1 choice probability is updated 
+    directly based on the outcome.
+    
+    If Reward: Probability of choosing that action again increases.
+    If No Reward: Probability decreases (shift), BUT this shift is resisted by anxiety.
+    
+    High STAI reduces the learning rate specifically for negative outcomes (losses),
+    making the participant 'stuck' in a losing strategy longer.
+
+    Parameter Bounds:
+    -----------------
+    alpha_win: [0, 1]   # Learning rate for wins
+    alpha_loss: [0, 1]  # Base learning rate for losses
+    beta: [0, 10]       # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_win, self.alpha_loss, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize preferences to 0
+        self.preferences = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.preferences, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update stage 2 normally for context
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += 0.5 * delta_2 # Fixed learning rate for stage 2
+        
+        # Heuristic update for Stage 1
+        if reward > 0:
+            # Win: Reinforce current choice
+            self.preferences[action_1] += self.alpha_win * (1 - self.preferences[action_1])
+            # Decay the other
+            self.preferences[1 - action_1] *= (1 - self.alpha_win)
+        else:
+            # Loss: Should shift, but anxiety prevents it.
+            # Effective alpha_loss is reduced by STAI
+            eff_alpha_loss = self.alpha_loss * (1.0 - self.stai)
+            
+            # Decrease preference for chosen action
+            self.preferences[action_1] -= eff_alpha_loss * self.preferences[action_1]
+            # Increase preference for unchosen
+            self.preferences[1 - action_1] += eff_alpha_loss * (1 - self.preferences[1 - action_1])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

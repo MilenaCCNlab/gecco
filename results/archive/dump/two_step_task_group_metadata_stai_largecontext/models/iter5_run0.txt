@@ -1,0 +1,220 @@
+Here are the 3 cognitive models based on the hypotheses of Transition Uncertainty, Asymmetric Punishment Sensitivity, and Heuristic Eligibility Traces.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Impairs Model-Based Updating (Transition Distortion).
+    
+    High anxiety participants may perceive the world as more chaotic or uncertain. 
+    Instead of using the true transition probabilities (0.7/0.3), they rely on a 
+    distorted internal model that is closer to uniform (0.5/0.5), rendering the 
+    Model-Based system less effective.
+    
+    STAI modulates the 'flatness' of the transition matrix used for MB calculations.
+
+    Bounds:
+    learning_rate: [0, 1]
+    inverse_temperature: [0, 10]
+    mixing_weight: [0, 1] (0=100% MF, 1=100% MB)
+    stai_distortion: [0, 1] (Sensitivity of transition perception to anxiety)
+    """
+    learning_rate, inverse_temperature, mixing_weight, stai_distortion = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+
+    # Define the Subjective Transition Matrix
+    # True common probability is 0.7. 
+    # High STAI * High Distortion reduces this towards 0.5 (randomness).
+    # We clamp the lower bound at 0.5 to prevent inversion.
+    perceived_common_prob = 0.7 - (0.2 * stai * stai_distortion)
+    perceived_common_prob = np.maximum(perceived_common_prob, 0.5)
+    
+    transition_matrix = np.array([
+        [perceived_common_prob, 1 - perceived_common_prob], 
+        [1 - perceived_common_prob, perceived_common_prob]
+    ])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2)) # State x Action
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # Model-Based Value Calculation using Distorted Matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Integrated Value
+        q_net = (1 - mixing_weight) * q_stage1_mf + mixing_weight * q_stage1_mb
+        
+        # Softmax Choice 1
+        exp_q1 = np.exp(inverse_temperature * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        # Standard Softmax on Stage 2 MF values
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning Updates ---
+        # Stage 1 Update (TD-Learning)
+        # Note: We use the value of the chosen state/action pair in stage 2 as the target
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Stage 2 Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Induces Asymmetric Punishment Sensitivity.
+    
+    Anxious individuals are often characterized by a hypersensitivity to negative outcomes 
+    (or lack of reward) compared to positive ones. This model splits the learning rate.
+    STAI modulates the balance: High STAI increases learning from non-reward (0) 
+    and decreases learning from reward (1).
+
+    Bounds:
+    base_learning_rate: [0, 1]
+    inverse_temperature: [0, 10]
+    mixing_weight: [0, 1]
+    stai_bias: [0, 1] (Degree to which STAI skews learning rates)
+    """
+    base_learning_rate, inverse_temperature, mixing_weight, stai_bias = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+
+    # Calculate Asymmetric Learning Rates
+    # If bias is 0, both are base_lr.
+    # If bias is high and STAI is high, alpha_neg increases, alpha_pos decreases.
+    # We clip to ensure stability [0.01, 1.0].
+    alpha_pos = np.clip(base_learning_rate * (1.0 - (stai * stai_bias)), 0.01, 1.0)
+    alpha_neg = np.clip(base_learning_rate * (1.0 + (stai * stai_bias)), 0.01, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = (1 - mixing_weight) * q_stage1_mf + mixing_weight * q_stage1_mb
+        
+        exp_q1 = np.exp(inverse_temperature * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning Updates ---
+        # Determine which learning rate to use based on the outcome
+        current_alpha = alpha_pos if reward[trial] == 1.0 else alpha_neg
+
+        # Stage 1 Update
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_alpha * delta_stage1
+        
+        # Stage 2 Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += current_alpha * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Modulates Eligibility Traces (Heuristic Fallback).
+    
+    Anxious individuals may struggle with the cognitive load of the full two-step structure.
+    Instead, they may rely on a simpler heuristic: "I chose Spaceship A, I got a coin, 
+    so Spaceship A is good." This bypasses the state transition logic.
+    
+    This is modeled as an eligibility trace (lambda) where the Stage 2 reward directly 
+    updates the Stage 1 Q-value. STAI increases this trace parameter.
+
+    Bounds:
+    learning_rate: [0, 1]
+    inverse_temperature: [0, 10]
+    mixing_weight: [0, 1]
+    stai_trace_sensitivity: [0, 1] (How much STAI increases the eligibility trace)
+    """
+    learning_rate, inverse_temperature, mixing_weight, stai_trace_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+
+    # Calculate Eligibility Trace Lambda
+    # Lambda determines how much the Stage 2 prediction error 'bleeds back' to Stage 1.
+    # High STAI -> High Lambda (Direct Reinforcement).
+    lambda_val = np.clip(stai * stai_trace_sensitivity, 0.0, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = (1 - mixing_weight) * q_stage1_mf + mixing_weight * q_stage1_mb
+        
+        exp_q1 = np.exp(inverse_temperature * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning Updates ---
+        
+        # 1. Standard TD Update for Stage 1 (based on Stage 2 Q-value)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # 2. Stage 2 Update (based on Reward)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # 3. Eligibility Trace Update for Stage 1
+        # If lambda > 0, the Stage 2 prediction error (delta_stage2) is also applied 
+        # to Stage 1, effectively reinforcing Stage 1 choice based on the final outcome.
+        q_stage1_mf[action_1[trial]] += learning_rate * lambda_val * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

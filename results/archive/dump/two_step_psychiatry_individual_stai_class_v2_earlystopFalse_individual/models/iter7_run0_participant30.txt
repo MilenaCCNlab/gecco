@@ -1,0 +1,167 @@
+Here are three new cognitive models that explore different mechanisms for how high anxiety (STAI = 0.5375) might influence decision-making in this task.
+
+### Model 1: Anxiety-Driven Model-Based Suppression
+This model hypothesizes that high anxiety interferes with the complex cognitive processing required for model-based planning. Instead of a simple mixture, anxiety actively suppresses the model-based contribution, forcing the participant to rely more on simpler model-free strategies.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Driven Model-Based Suppression.
+    High anxiety consumes working memory resources, making it harder to maintain 
+    and use the transition matrix for model-based planning. This model posits a 
+    hybrid reinforcement learning agent where the weight 'w' (mixing parameter) 
+    is inversely proportional to anxiety.
+    
+    w_effective = w_max * (1 - stai)
+    
+    If w is high, behavior is Model-Based. If w is low (due to high anxiety), 
+    behavior is Model-Free.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_max: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize Model-Based values (Q_MB) separately
+        self.q_mb = np.zeros(self.n_choices)
+        # Initialize Model-Free values (Q_MF) separately
+        self.q_mf = np.zeros(self.n_choices)
+        # Transition matrix is fixed as per instructions (70/30)
+        self.T = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective mixing weight based on anxiety
+        # Higher anxiety -> lower w -> less model-based control
+        w_effective = self.w_max * (1.0 - self.stai)
+        
+        # Compute Model-Based values: Q_MB(a) = sum(T(s'|a) * max(Q_stage2(s', :)))
+        for a in range(self.n_choices):
+            # Map action to likely state (Action 0 -> State 0, Action 1 -> State 1 usually)
+            # But we use the full transition matrix T
+            # T[0] corresponds to transitions from 'state' defined by action 0? 
+            # Actually, in this task, Action 0 -> State 0 (70%), State 1 (30%)
+            # Action 1 -> State 1 (70%), State 0 (30%)
+            
+            # Expected value of best action in next state 0
+            v_s0 = np.max(self.q_stage2[0])
+            # Expected value of best action in next state 1
+            v_s1 = np.max(self.q_stage2[1])
+            
+            if a == 0:
+                self.q_mb[a] = self.T[0, 0] * v_s0 + self.T[0, 1] * v_s1
+            else:
+                self.q_mb[a] = self.T[1, 0] * v_s0 + self.T[1, 1] * v_s1
+
+        # Combine values: Q_net = w * Q_MB + (1-w) * Q_MF
+        q_net = w_effective * self.q_mb + (1.0 - w_effective) * self.q_mf
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Model-Free update (TD-learning)
+        # Using the value of the chosen stage 2 action as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+        
+        # Note: Q_MB is recomputed on the fly in policy_stage1, so no direct update needed here
+        # other than the fact that it depends on q_stage2 which just changed.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxious Risk Aversion (Loss Sensitivity)
+This model suggests that anxiety manifests as an asymmetric learning rate for negative prediction errors. Anxious individuals might be more sensitive to "losses" (getting 0 coins when expecting something, or just general disappointment) compared to gains.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxious Risk Aversion (Asymmetric Learning).
+    Anxiety heightens sensitivity to negative outcomes. This model implements 
+    separate learning rates for positive and negative prediction errors. 
+    The learning rate for negative errors (alpha_neg) is modulated by STAI, 
+    making anxious participants update their values more drastically after 
+    disappointment (0 reward).
+    
+    alpha_neg = alpha_pos * (1 + sensitivity * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]
+    beta: [0, 10]
+    sensitivity: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.beta, self.sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate alpha_neg based on anxiety
+        # If sensitivity is high and stai is high, alpha_neg becomes much larger than alpha_pos
+        alpha_neg = self.alpha_pos * (1.0 + self.sensitivity * self.stai)
+        # Cap alpha_neg at 1.0 to maintain stability
+        alpha_neg = min(alpha_neg, 1.0)
+
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        # We use the updated Q2 value to drive Q1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Choice Perseveration
+This model hypothesizes that high anxiety leads to a "safety behavior" strategy, manifesting as choice stickiness or perseveration. Anxious individuals may prefer to repeat the last action regardless of the outcome to reduce cognitive load or avoid the uncertainty of switching.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Induced Choice Perseveration.
+    Anxiety increases the tendency to repeat the previous Stage 1 choice, 
+    regardless of reward history. This is a 'stickiness' bias added to the 
+    Q-values before the softmax step. The magnitude of this stickiness is 
+    scaled by the participant's STAI score.
+    
+    Q_boosted(last_action) = Q(last_action) + (stickiness_factor * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    stickiness_factor: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Copy Q-values to avoid modifying the learned values permanently
+        q_vals = self.q_stage1.copy()
+        
+        # Apply stickiness bonus if a previous action exists
+        if self.last_action1 is not None:
+            bonus = self.stickiness_factor * self.stai
+            q_vals[int(self.last_action1)] += bonus
+            
+        return self.softmax(q_vals, self.beta)
+
+    # Standard value update (TD learning)
+    # We use the default implementation from BaseClass for value_update 
+    # and policy_stage2, as the hypothesis focuses specifically on Stage 1 choice bias.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

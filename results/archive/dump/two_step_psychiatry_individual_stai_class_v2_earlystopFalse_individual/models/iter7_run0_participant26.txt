@@ -1,0 +1,151 @@
+### Cognitive Model 1: Anxiety-Modulated Model-Based Deficit
+This model tests the hypothesis that high anxiety impairs computationally expensive model-based (planning) strategies, leading to a reliance on model-free (habitual) learning.
+We model the Stage 1 Q-value as a weighted mixture of Model-Based (MB) and Model-Free (MF) values. The weight of the MB component ($w$) is reduced by the participant's anxiety (STAI) score.
+$w_{eff} = w_{max} * (1 - STAI)$
+$Q_{net}(s1, a) = w_{eff} * Q_{MB}(s1, a) + (1 - w_{eff}) * Q_{MF}(s1, a)$
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs model-based planning.
+    The participant uses a mixture of Model-Based (MB) and Model-Free (MF) strategies.
+    The weight of the MB component is negatively modulated by STAI.
+    
+    w_effective = w_max * (1 - stai)
+    Q_stage1 = w_effective * Q_MB + (1 - w_effective) * Q_MF
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for MF values
+    beta: [0, 10]       # Inverse temperature
+    w_max: [0, 1]       # Maximum model-based weight (for STAI=0)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values
+        # Q_MB(a) = Sum_s' [ T(s'|a) * max_a'(Q_stage2(s', a')) ]
+        # self.T is shape (2, 2): [action, next_state]
+        # self.q_stage2 is shape (2, 2): [state, action]
+        
+        # Max value of each stage 2 state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # MB value for each stage 1 action
+        q_mb = self.T @ v_stage2 # Matrix multiplication: (2,2) @ (2,) -> (2,)
+        
+        # Calculate effective weight based on anxiety
+        # Higher anxiety -> lower w_eff -> less Model-Based
+        w_eff = self.w_max * (1.0 - self.stai)
+        w_eff = np.clip(w_eff, 0.0, 1.0)
+        
+        # Mix MB and MF values
+        q_hybrid = w_eff * q_mb + (1.0 - w_eff) * self.q_stage1
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    # policy_stage2 uses default softmax
+    # value_update uses default TD learning (which updates q_stage1 as the MF component)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Cognitive Model 2: Anxiety-Modulated Punishment Sensitivity
+This model tests the hypothesis that anxious individuals are hypersensitive to negative outcomes (omission of reward).
+We implement asymmetric learning rates for positive (Reward=1) and negative (Reward=0) prediction errors. The learning rate for negative errors is boosted by the STAI score.
+$\alpha_{neg} = \alpha_{base} * (1 + STAI * \text{sensitivity})$
+$\alpha_{pos} = \alpha_{base}$
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases sensitivity to negative prediction errors (punishment/omission).
+    When the outcome is worse than expected (negative PE), the learning rate is boosted
+    proportional to the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]  # Base learning rate
+    beta: [0, 10]       # Inverse temperature
+    sens: [0, 5]        # Sensitivity factor scaling the STAI effect on alpha_neg
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.sens = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine alpha for Stage 2
+        if delta_2 < 0:
+            # Negative PE: Boost alpha by anxiety
+            alpha_eff = self.alpha_base * (1.0 + self.stai * self.sens)
+            alpha_eff = np.clip(alpha_eff, 0.0, 1.0)
+        else:
+            alpha_eff = self.alpha_base
+            
+        self.q_stage2[state, action_2] += alpha_eff * delta_2
+        
+        # Stage 1 Update
+        # Using the updated Q2 value as target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Determine alpha for Stage 1
+        if delta_1 < 0:
+            alpha_eff_1 = self.alpha_base * (1.0 + self.stai * self.sens)
+            alpha_eff_1 = np.clip(alpha_eff_1, 0.0, 1.0)
+        else:
+            alpha_eff_1 = self.alpha_base
+            
+        self.q_stage1[action_1] += alpha_eff_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Cognitive Model 3: Anxiety-Driven Loss Chasing
+This model tests the hypothesis that high anxiety leads to a specific form of perseveration triggered by losses (outcomes of 0). This "loss chasing" or "doubling down" behavior means the participant is more likely to repeat an action that just resulted in a failure, potentially to resolve the uncertainty or regain control.
+$Q_{effective}(a) = Q_{learned}(a) + \text{bonus}$
+$\text{bonus} = STAI * w_{loss\_stay}$ if $a == a_{t-1}$ and $R_{t-1} == 0$.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety drives 'loss chasing' or perseveration specifically after failure.
+    If the previous trial resulted in 0 reward, the participant receives a 'stickiness' bonus
+    to the previously chosen action, proportional to their anxiety.
+    
+    Q(action) = Q_learned(action) + (w_loss_stay * STAI * is_last_action * last_was_loss)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_loss: [0, 5]      # Weight for loss-induced perseveration
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_loss = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_effective = self.q_stage1.copy()
+        
+        # Apply bonus only if previous trial existed, action was taken, and result was a loss (0.0)
+        if self.last_action1 is not None and self.last_reward == 0.0:
+            bonus = self.w_loss * self.stai
+            q_effective[int(self.last_action1)] += bonus
+            
+        return self.softmax(q_effective, self.beta)
+
+    # Standard value update
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

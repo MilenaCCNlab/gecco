@@ -1,0 +1,158 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) influences decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Uncertainty-Penalized Exploration (Intolerance of Uncertainty)
+    
+    Anxious individuals often exhibit Intolerance of Uncertainty (IU). 
+    This model hypothesizes that the participant tracks not just the expected value (Q) 
+    of each stage-1 choice, but also the variance (uncertainty) of the outcomes associated with it.
+    High anxiety leads to a penalty for options with high outcome variance, 
+    biasing the participant towards "safer," more predictable options, even if their mean value is lower.
+    
+    The penalty is scaled by STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]       (Inverse temperature)
+    iu_factor: [0, 5]   (Penalty weight for outcome variance, scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.iu_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance tracking for stage 1 choices
+        self.var_stage1 = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Penalize Q-values by the standard deviation of rewards (sqrt of variance)
+        # Penalty = stai * iu_factor * sqrt(variance)
+        penalty = self.stai * self.iu_factor * np.sqrt(self.var_stage1)
+        adjusted_q = self.q_stage1 - penalty
+        return self.softmax(adjusted_q, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # For Stage 1, we use the value of the second stage state-action pair as the target
+        target = self.q_stage2[state, action_2]
+        delta_1 = target - self.q_stage1[action_1]
+        
+        # Update Mean Q
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update Variance: V <- V + alpha * ((target - Q_old)^2 - V)
+        # We use the squared prediction error as the sample variance
+        sq_error = delta_1 ** 2
+        self.var_stage1[action_1] += self.alpha * (sq_error - self.var_stage1[action_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Triggered Hyper-Learning (Surprise Reactivity)
+    
+    This model hypothesizes that anxious individuals are hyper-reactive to 
+    surprising events (rare transitions). When a rare transition occurs 
+    (e.g., Spaceship A going to Planet Y), the participant perceives this 
+    as a signal of volatility and boosts their learning rate for that trial, 
+    updating their stage-1 preferences more aggressively than usual.
+    
+    Learning Rate Boost = 1 + (stai * shock_factor)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Base learning rate)
+    beta: [0, 10]       (Inverse temperature)
+    shock_factor: [0, 10] (Multiplier for learning rate boost on rare transitions)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.shock_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if transition was rare
+        # trans_counts: row is action, col is state. 
+        # Common if count is high relative to row sum.
+        row_counts = self.trans_counts[action_1]
+        is_common = row_counts[state] > (0.5 * np.sum(row_counts))
+        
+        # Calculate effective alpha for Stage 1
+        if not is_common:
+            # Rare transition: Boost alpha
+            # We clip to 1.0 to ensure stability
+            boost = 1.0 + (self.stai * self.shock_factor)
+            alpha_eff = min(1.0, self.alpha * boost)
+        else:
+            alpha_eff = self.alpha
+
+        # Stage 2 Update (Standard)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (With modulated alpha)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_eff * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Distorted Model-Based Control (Fatalism)
+    
+    This model hypothesizes that the participant uses a Model-Based (planning) 
+    strategy for Stage 1 choices, but their internal model of the transition 
+    structure is distorted by anxiety. High anxiety leads to a "fatalistic" 
+    flattening of the transition matrix, where the participant believes 
+    their choice has less influence on the outcome state (transitions approach 50/50).
+    
+    Distortion: T_perceived = (1 - distortion) * T_true + distortion * 0.5
+    where distortion = stai * control_loss
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate for Stage 2 values)
+    beta: [0, 10]       (Inverse temperature)
+    control_loss: [0, 2] (Degree to which anxiety flattens transition beliefs)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.control_loss = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate distorted transition matrix
+        # T is shape (2, 2) -> [action, next_state]
+        # We assume T is static (from instructions/practice) as per standard MB models in this task
+        
+        distortion = np.clip(self.stai * self.control_loss, 0, 1)
+        
+        # Flatten T towards 0.5 (randomness)
+        T_distorted = (1 - distortion) * self.T + distortion * 0.5
+        
+        # Calculate Model-Based Q-values for Stage 1
+        # Q_MB(a) = sum_s' ( T(s'|a) * max_a' Q_stage2(s', a') )
+        q_mb = np.zeros(self.n_choices)
+        
+        # Get max values from stage 2
+        max_q2 = np.max(self.q_stage2, axis=1) # Shape (2,) for the two states
+        
+        for a in range(self.n_choices):
+            # Dot product of transition probs for action 'a' and max values of next states
+            q_mb[a] = np.dot(T_distorted[a], max_q2)
+            
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Only update Stage 2 values (Model-Based agent learns values at the leaves)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 values are computed on-the-fly in policy_stage1, so no update needed here.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

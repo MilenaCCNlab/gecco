@@ -1,0 +1,139 @@
+### Cognitive Model 1: Counterfactual "Regret" Learning
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases counterfactual "regret" learning.
+    Anxious individuals may ruminate on "what could have been." This model hypothesizes 
+    that high anxiety leads participants to update the value of the *unchosen* option 
+    based on the inverse of the received outcome. If they chose A and got no reward, 
+    they assume B would have yielded a reward, and update B accordingly.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    regret_k: [0, 1]    # Scaling factor for counterfactual update strength
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.regret_k = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Counterfactual update for the unchosen Stage 1 action
+        # Logic: If I got Reward=0, I assume Unchosen would have given Reward=1 (and vice versa)
+        # The strength of this assumption is modulated by STAI and regret_k
+        unchosen_action = 1 - action_1
+        counterfactual_reward = 1.0 - reward
+        
+        # We use the current Q-value of the unchosen action as the baseline
+        # and update it towards the counterfactual reward.
+        # Note: We use the same alpha, but scaled by the regret factor.
+        regret_learning_rate = self.alpha * self.regret_k * self.stai
+        
+        # Ensure rate doesn't exceed 1 or go negative (though bounds prevent negative params)
+        regret_learning_rate = np.clip(regret_learning_rate, 0, 1)
+        
+        # Update unchosen Q-value directly towards the imagined outcome
+        # We approximate the Stage 2 value of the unchosen path as the counterfactual reward directly
+        delta_cf = counterfactual_reward - self.q_stage1[unchosen_action]
+        self.q_stage1[unchosen_action] += regret_learning_rate * delta_cf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Cognitive Model 2: Rare Transition Aversion
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety creates an aversion to "surprising" or rare transitions.
+    Anxious individuals often dislike uncertainty and lack of control. When a rare 
+    transition occurs (e.g., Spaceship A -> Planet Y), this model applies a penalty 
+    to the chosen spaceship's value, regardless of the reward outcome. This reflects 
+    a "surprise penalty" where the unreliability of the link is punishing.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    surprise_k: [0, 2]  # Magnitude of penalty for rare transitions
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.surprise_k = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Check for rare transition
+        # Common: Action 0 -> State 0, Action 1 -> State 1
+        # Rare: Action 0 -> State 1, Action 1 -> State 0
+        is_rare = (action_1 != state)
+        
+        if is_rare:
+            # Apply penalty modulated by anxiety
+            # The penalty reduces the value of the action that caused the surprise
+            penalty = self.surprise_k * self.stai
+            self.q_stage1[action_1] -= penalty
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Cognitive Model 3: Heuristic "Good Planet" Strategy
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes reliance on a simplified "Good Planet" heuristic.
+    Instead of full model-based planning, anxious participants may use a heuristic: 
+    "If I got a reward at Planet X, choose the spaceship that usually goes to Planet X."
+    This differs from simple perseveration (repeating the action) because it respects 
+    the transition structure, but in a simplified, reactive way.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate
+    beta: [0, 10]        # Inverse temperature
+    heuristic_k: [0, 2]  # Strength of the heuristic bias
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.heuristic_k = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_modified = self.q_stage1.copy()
+        
+        # Apply heuristic bias if the last trial was rewarded
+        if self.last_reward is not None and self.last_reward > 0:
+            # Identify the "common action" for the planet we just visited.
+            # Planet 0 (X) is commonly reached by Action 0 (A).
+            # Planet 1 (Y) is commonly reached by Action 1 (U).
+            # Therefore, the "best" action for the last state is simply the index of that state.
+            target_action = int(self.last_state)
+            
+            # Add bias to that action
+            bias = self.heuristic_k * self.stai
+            q_modified[target_action] += bias
+            
+        return self.softmax(q_modified, self.beta)
+
+    # Standard value update
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

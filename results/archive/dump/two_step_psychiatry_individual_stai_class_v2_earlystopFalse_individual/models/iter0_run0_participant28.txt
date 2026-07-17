@@ -1,0 +1,197 @@
+Here are three cognitive models that hypothesize different ways high anxiety (STAI) might influence decision-making in this task.
+
+### Model 1: Anxiety-Compromised Model-Based Control
+**Hypothesis:** This model tests the theory that high anxiety consumes cognitive resources (working memory), forcing the participant to rely more on "Model-Free" (habitual) learning rather than "Model-Based" (planning) strategies.
+*   **Mechanism:** The model calculates both Model-Free (TD learning) and Model-Based (transition-matrix based) values.
+*   **STAI Modulation:** The weighting parameter `w` (which balances MB vs MF) is constrained by STAI. Higher anxiety strictly reduces the maximum possible contribution of the Model-Based system.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety reduces Model-Based (MB) control due to cognitive load.
+    The participant uses a hybrid MB/MF strategy, but the weight of the MB system
+    is attenuated by their STAI score.
+    
+    Q_net = w_eff * Q_MB + (1 - w_eff) * Q_MF
+    w_eff = w_param * (1 - stai)  <-- High anxiety forces w_eff towards 0 (Model-Free)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]   (Inverse temperature)
+    w_param: [0, 1] (Base mixing weight, attenuated by anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_param = model_parameters
+
+    def init_model(self) -> None:
+        # We need separate storage for Model-Free values because q_stage1 
+        # in the base class will represent the *net* integrated value.
+        self.q_mf = np.zeros(self.n_choices)
+        
+        # Transition matrix learning (counting observed transitions)
+        # Initialize with weak prior to allow learning
+        self.transition_counts = np.array([[1.0, 1.0], [1.0, 1.0]]) 
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values
+        # Q_MB(a) = Sum_s' [ T(s'|a) * max_a' Q_stage2(s', a') ]
+        
+        # Normalize transition counts to get probabilities
+        row_sums = self.transition_counts.sum(axis=1, keepdims=True)
+        T = self.transition_counts / row_sums
+        
+        # Max value of next stage states
+        max_q2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        q_mb = np.zeros(self.n_choices)
+        # Map actions to likely transitions (Action 0 -> State 0 dominant, Action 1 -> State 1 dominant)
+        # Note: The task description says A->X (0->0) and U->Y (1->1) are common.
+        # However, we learn T dynamically below.
+        
+        # We assume action 0 leads to transition row 0, action 1 to row 1 logic 
+        # isn't strictly hardcoded in T, but T is indexed by action usually in these tasks.
+        # In the base class, T is (2,2). Let's assume row 0 is Action 0's outcomes, Row 1 is Action 1's.
+        q_mb[0] = np.dot(T[0], max_q2)
+        q_mb[1] = np.dot(T[1], max_q2)
+
+        # 2. Calculate Effective Weight
+        # If STAI is high (e.g., 0.66), (1-STAI) is small (0.34).
+        # Even if w_param is 1.0, w_eff is capped at 0.34.
+        w_eff = self.w_param * (1.0 - self.stai)
+
+        # 3. Integrate
+        self.q_stage1 = w_eff * q_mb + (1 - w_eff) * self.q_mf
+        
+        return self.softmax(self.q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 values (Standard TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Model-Free values (TD)
+        # Using Q_stage2 as the target (TD(0))
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+        
+        # Update Transition Model (Model-Based component)
+        # action_1 (0 or 1) led to state (0 or 1)
+        self.transition_counts[action_1, state] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Perseveration (Safety Seeking)
+**Hypothesis:** High anxiety leads to "safety behavior" or perseveration. Once a choice is made, anxious individuals are more likely to repeat it regardless of the outcome, to avoid the cognitive cost of switching or the uncertainty of exploration.
+*   **Mechanism:** A "stickiness" bonus is added to the Q-value of the previously chosen action.
+*   **STAI Modulation:** The magnitude of this stickiness is directly scaled by the STAI score. The higher the anxiety, the stickier the choices.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety drives perseveration (stickiness).
+    The participant adds a bonus to the previously chosen action, 
+    proportional to their anxiety level.
+    
+    Q(action) = Q_learned(action) + (STAI * phi * IsLastAction(action))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]   (Inverse temperature)
+    phi: [0, 5]     (Perseveration strength factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.phi = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Copy learned values so we don't corrupt the learning process
+        q_values_with_bias = self.q_stage1.copy()
+        
+        # Apply anxiety-driven stickiness
+        if self.last_action1 is not None:
+            # The bonus is the parameter phi scaled by the anxiety score
+            stickiness_bonus = self.phi * self.stai
+            q_values_with_bias[int(self.last_action1)] += stickiness_bonus
+            
+        return self.softmax(q_values_with_bias, self.beta)
+
+    # Standard TD learning for value updates (uses base class logic mostly)
+    # We override just to ensure we are using the standard TD update provided in base
+    # but we need to make sure we don't double-add the stickiness to the stored Q-values.
+    # The base class value_update modifies self.q_stage1 directly, which is correct
+    # because policy_stage1 adds the bias temporarily.
+    
+    # No override of value_update needed, base class TD learning is sufficient.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Enhanced Punishment Sensitivity
+**Hypothesis:** Anxious individuals are hyper-sensitive to negative outcomes (lack of reward). They learn more drastically from "failures" (0 coins) than from successes.
+*   **Mechanism:** The model uses two learning rates. The effective learning rate depends on the prediction error sign.
+*   **STAI Modulation:** The learning rate for negative prediction errors (disappointment) is amplified by the STAI score.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety amplifies learning from negative outcomes (0 coins).
+    
+    If Prediction Error < 0 (outcome worse than expected):
+        Learning Rate = alpha * (1 + STAI)
+    Else:
+        Learning Rate = alpha
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Base learning rate)
+    beta: [0, 10]   (Inverse temperature)
+    lambda_decay: [0, 1] (Eligibility trace decay for Stage 1 update)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_decay = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # --- Stage 2 Update ---
+        prediction_error_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine effective alpha based on anxiety and error sign
+        if prediction_error_2 < 0:
+            # Negative surprise: Anxiety boosts the learning rate
+            # (1 + stai) means high anxiety can nearly double the reaction to failure
+            eff_alpha = self.alpha * (1.0 + self.stai)
+            # Cap at 1.0 to maintain stability
+            eff_alpha = min(eff_alpha, 1.0)
+        else:
+            eff_alpha = self.alpha
+
+        self.q_stage2[state, action_2] += eff_alpha * prediction_error_2
+        
+        # --- Stage 1 Update (TD-Lambda style) ---
+        # We use the prediction error from stage 2 to update stage 1
+        # This links the final reward back to the first choice.
+        
+        # Current value of chosen stage 1 action
+        q1_val = self.q_stage1[action_1]
+        
+        # The target for Stage 1 is usually Q_stage2[state, action2] in simple TD
+        # But here we can use the PE from stage 2 scaled by lambda
+        # Update: Q1 += alpha * ( (Q2 - Q1) + lambda * PE2 )
+        
+        # 1. TD(0) error for stage 1 transition
+        pe_1 = self.q_stage2[state, action_2] - q1_val
+        
+        # 2. Combined error passed back
+        total_error = pe_1 + (self.lambda_decay * prediction_error_2)
+        
+        # Apply same anxiety logic to Stage 1 update? 
+        # Hypothesis: Anxiety affects reaction to the final outcome (reward), 
+        # so we use the alpha derived from the reward PE.
+        self.q_stage1[action_1] += eff_alpha * total_error
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

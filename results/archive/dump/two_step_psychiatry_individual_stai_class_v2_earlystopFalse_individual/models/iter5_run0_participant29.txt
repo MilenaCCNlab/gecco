@@ -1,0 +1,161 @@
+Here are three new cognitive models based on the participant's high anxiety (STAI = 0.575) and the task structure.
+
+### Model 1: Anxiety-Enhanced Negativity Bias
+This model hypothesizes that high anxiety creates a "negativity bias" in learning. The participant learns more aggressively from "disappointments" (negative prediction errors) than from positive surprises. This asymmetry is modulated by their STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Enhanced Negativity Bias (Asymmetric Learning Rates)
+    
+    This model hypothesizes that anxiety creates a bias where the participant 
+    learns more strongly from negative prediction errors (outcomes worse than expected) 
+    than from positive ones.
+    
+    The learning rate for negative errors is scaled up by the STAI score.
+    alpha_neg = alpha * (1 + neg_bias * stai)
+    alpha_pos = alpha
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Base learning rate for positive errors)
+    beta: [0, 10]       (Inverse temperature)
+    neg_bias: [0, 5]    (Scaling factor for negative learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_bias = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective learning rates
+        alpha_pos = self.alpha
+        alpha_neg = self.alpha * (1.0 + self.neg_bias * self.stai)
+        
+        # Ensure alpha_neg doesn't exceed 1 for stability
+        alpha_neg = min(alpha_neg, 1.0)
+
+        # Stage 2 Update
+        # Prediction error
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Apply asymmetric learning rate
+        if delta_2 < 0:
+            self.q_stage2[state, action_2] += alpha_neg * delta_2
+        else:
+            self.q_stage2[state, action_2] += alpha_pos * delta_2
+        
+        # Stage 1 Update
+        # Prediction error (TD(0))
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Apply asymmetric learning rate
+        if delta_1 < 0:
+            self.q_stage1[action_1] += alpha_neg * delta_1
+        else:
+            self.q_stage1[action_1] += alpha_pos * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Eligibility Trace
+This model hypothesizes that anxiety consumes cognitive resources (working memory), reducing the ability to link outcomes back to earlier choices. It implements a TD($\lambda$) mechanism where the eligibility trace parameter $\lambda$ is reduced by anxiety. A lower $\lambda$ means the Stage 1 choice is updated less by the final reward, making the participant more "myopic" (driven only by the immediate transition to the planet, rather than the final coin).
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Eligibility Trace (Reduced Credit Assignment)
+    
+    This model hypothesizes that anxiety impairs the maintenance of an "eligibility trace"
+    linking the Stage 1 choice to the Stage 2 reward. 
+    
+    The model uses a TD(lambda) update where lambda is reduced by anxiety.
+    lambda_val = lambda_max * (1 - stai)
+    
+    If lambda is high, the Stage 1 value is updated directly by the Stage 2 reward outcome.
+    If lambda is low (due to high anxiety), Stage 1 is only updated by the value of the 
+    Stage 2 state (TD(0)), making behavior more myopic or reliant on cached values.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]       (Inverse temperature)
+    lambda_max: [0, 1]  (Maximum eligibility trace value for low anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_max = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate anxiety-modulated lambda
+        # High anxiety -> Low lambda (myopic)
+        lambda_val = self.lambda_max * (1.0 - self.stai)
+        lambda_val = max(0.0, min(1.0, lambda_val))
+
+        # Standard Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update has two components in TD(lambda):
+        # 1. The immediate TD error (moving Q1 towards Q2)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # 2. The eligibility trace update (moving Q1 towards Reward)
+        # This passes the Stage 2 RPE back to Stage 1, scaled by lambda
+        self.q_stage1[action_1] += self.alpha * lambda_val * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Counterfactual Rumination
+This model hypothesizes that anxious individuals engage in "counterfactual rumination." When they observe an outcome, they also update the value of the *unchosen* spaceship, assuming it would have led to the *other* planet. The strength of this hypothetical update is driven by their anxiety level.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Counterfactual Rumination
+    
+    This model hypothesizes that anxious participants engage in counterfactual updating:
+    "If I had chosen the other spaceship, I would have gone to the other planet."
+    
+    They update the unchosen Stage 1 option based on the best value available 
+    in the unvisited state. The rate of this update is proportional to anxiety.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Direct learning rate)
+    beta: [0, 10]       (Inverse temperature)
+    cf_rate: [0, 1]     (Counterfactual learning rate scaling factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.cf_rate = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard updates for chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Counterfactual Update for the UNCHOSEN Stage 1 action
+        unchosen_action1 = 1 - action_1
+        
+        # Assume common transition structure: 
+        # If I am at state 0, the other spaceship likely leads to state 1, and vice versa.
+        # (This is a heuristic simplification of the transition matrix)
+        other_state = 1 - state
+        
+        # Estimate value of the other state (e.g., max Q-value there)
+        value_other_state = np.max(self.q_stage2[other_state])
+        
+        # Calculate counterfactual learning rate
+        alpha_cf = self.cf_rate * self.stai
+        
+        # Update unchosen action towards the value of the other state
+        delta_cf = value_other_state - self.q_stage1[unchosen_action1]
+        self.q_stage1[unchosen_action1] += alpha_cf * delta_cf
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

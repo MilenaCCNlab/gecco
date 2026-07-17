@@ -1,0 +1,236 @@
+Here are three new cognitive models that explore different mechanisms by which anxiety (STAI) might influence decision-making in the two-step task, specifically focusing on reward sensitivity, forgetting rates, and stage-specific temperature modulation.
+
+### Model 1: Anxiety-Modulated Reward Sensitivity
+This model hypothesizes that anxiety alters the subjective valuation of rewards. Highly anxious individuals might blunt the impact of positive outcomes (anhedonia-like) or hypersensitize to them. Here, we model a scaling factor on the reward term itself before it enters the prediction error calculation.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 1: Anxiety-Modulated Reward Sensitivity.
+    
+    This model proposes that anxiety (STAI) affects how strongly a participant 
+    values the reward received. The subjective reward is scaled by a parameter 
+    that varies linearly with STAI. 
+    
+    Subjective Reward = Reward * (reward_sens_base + reward_sens_stai * STAI)
+    
+    Parameters:
+    - learning_rate: [0, 1] Rate of updating Q-values.
+    - beta: [0, 10] Inverse temperature for softmax choice.
+    - w: [0, 1] Weighting between Model-Based (1) and Model-Free (0) systems.
+    - reward_sens_base: [0, 2] Baseline sensitivity to reward.
+    - reward_sens_stai: [-1, 1] Slope of STAI effect on reward sensitivity.
+    """
+    learning_rate, beta, w, reward_sens_base, reward_sens_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate subjective reward sensitivity based on STAI
+    # We clip to ensure the multiplier doesn't become negative or excessively large
+    # though the bounds on params help, explicit logic is safer.
+    sensitivity = reward_sens_base + (reward_sens_stai * stai_score)
+    if sensitivity < 0:
+        sensitivity = 0.0
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        # Note: Standard TD updates, but the reward is scaled.
+        # Stage 1 update (SARSA-like connection to stage 2 value)
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        # Stage 2 update
+        # Apply the anxiety-modulated sensitivity to the received reward
+        subjective_reward = reward[trial] * sensitivity
+        delta_stage2 = subjective_reward - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Induced Forgetting (Decay)
+This model posits that anxiety interferes with the maintenance of value representations over time. High anxiety might lead to faster decay of unchosen options (forgetting), pulling Q-values back to a neutral baseline (0.5 or 0) more rapidly than in low anxiety individuals.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 2: Anxiety-Induced Forgetting (Decay).
+    
+    This model introduces a decay parameter that pulls Q-values of unchosen
+    options towards zero on every trial. The rate of this decay is modulated 
+    by STAI. Anxious individuals may have "leakier" memory integration.
+    
+    Decay Rate = decay_base + decay_stai_slope * STAI
+    
+    Parameters:
+    - learning_rate: [0, 1] Learning rate for chosen options.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] MB/MF weight.
+    - decay_base: [0, 1] Baseline decay rate for unchosen options.
+    - decay_stai_slope: [0, 1] Effect of STAI on decay rate.
+    """
+    learning_rate, beta, w, decay_base, decay_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate decay rate
+    decay = decay_base + (decay_stai_slope * stai_score)
+    # Clamp decay between 0 and 1
+    if decay > 1.0: decay = 1.0
+    if decay < 0.0: decay = 0.0
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        # Update chosen Stage 1
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        # Decay unchosen Stage 1
+        unchosen_a1 = 1 - a1
+        q_stage1_mf[unchosen_a1] *= (1 - decay)
+
+        # Update chosen Stage 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # Decay unchosen Stage 2 (for the current state)
+        unchosen_a2 = 1 - a2
+        q_stage2_mf[state_idx, unchosen_a2] *= (1 - decay)
+        
+        # Decay Stage 2 values for the unvisited state? 
+        # Standard decay models often decay ALL unchosen values.
+        # Let's decay the values of the state NOT visited as well.
+        unvisited_state = 1 - state_idx
+        q_stage2_mf[unvisited_state, :] *= (1 - decay)
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Exploration (Stage 2 Temperature)
+This model tests the hypothesis that anxiety specifically dysregulates the exploration-exploitation trade-off at the second stage (the "alien" choice), where immediate reward is at stake. It allows the inverse temperature (beta) for Stage 2 to differ from Stage 1, with the Stage 2 beta being modulated by STAI. High anxiety might lead to more random (high entropy) choices at the terminal stage due to stress.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 3: Anxiety-Driven Exploration (Stage 2 Temperature).
+    
+    This model separates the inverse temperature (randomness) for Stage 1 
+    and Stage 2. It hypothesizes that STAI specifically affects the 
+    determinism of the second-stage choice (Stage 2 beta).
+    
+    Beta_Stage2 = beta_2_base + beta_2_stai * STAI
+    
+    Parameters:
+    - learning_rate: [0, 1] Learning rate.
+    - beta_1: [0, 10] Inverse temperature for Stage 1 (Spaceships).
+    - w: [0, 1] MB/MF weight.
+    - beta_2_base: [0, 10] Baseline inverse temperature for Stage 2.
+    - beta_2_stai: [-5, 5] Effect of STAI on Stage 2 temperature.
+    """
+    learning_rate, beta_1, w, beta_2_base, beta_2_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate Stage 2 beta
+    beta_2 = beta_2_base + (beta_2_stai * stai_score)
+    # Ensure beta_2 stays non-negative
+    if beta_2 < 0: beta_2 = 0.0
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy (Uses beta_1) ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta_1 * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 2 Policy (Uses anxiety-modulated beta_2) ---
+        # This reflects how anxiety might cause "panic" or random responding
+        # specifically when facing the direct reward source.
+        exp_q2 = np.exp(beta_2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

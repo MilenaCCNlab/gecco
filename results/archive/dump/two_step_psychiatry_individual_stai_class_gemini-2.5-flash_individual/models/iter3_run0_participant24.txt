@@ -1,0 +1,164 @@
+Here are three cognitive models, each proposing a distinct hypothesis for how the participant makes decisions in the two-step task, with anxiety (STAI score) modulating a specific aspect of their behavior.
+
+### Participant Data Summary and Anxiety Context
+The participant has a STAI score of 0.35, placing them in the **medium anxiety** category. Their choices show some initial perseveration on spaceship 0 and alien 0, followed by a switch to spaceship 1 and alien 0/1, and then back to spaceship 0. This pattern suggests a dynamic learning process, possibly influenced by recent outcomes and a balance between exploration and exploitation.
+
+---
+
+### Cognitive Model 1: Outcome-Specific Learning with Anxiety-Modulated Negative Learning Rate
+
+**Hypothesis:** This model proposes that participants learn differently from positive (rewarded) and negative (unrewarded) outcomes. Specifically, anxiety modulates the learning rate for negative outcomes: higher anxiety leads to a greater sensitivity to and faster learning from unrewarded trials. This could reflect an increased focus on avoiding losses or correcting errors when anxious, a common finding in anxiety research.
+
+**Mechanism:** The model maintains two distinct learning rates: `alpha_pos` for when a reward is received, and `alpha_neg` for when no reward is received. The `alpha_neg` is not static but dynamically adjusted based on the participant's STAI score. A positive `stai_neg_alpha_factor` would mean that higher anxiety leads to a higher `alpha_neg`, making the participant more sensitive to negative feedback.
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants learn differently from positive
+    (rewarded) and negative (unrewarded) outcomes. Specifically, anxiety modulates
+    the learning rate for negative outcomes: higher anxiety leads to a greater
+    sensitivity to and faster learning from unrewarded trials. This could reflect
+    an increased focus on avoiding losses or correcting errors when anxious.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive (rewarded) outcomes.
+    alpha_neg_base: [0, 1] - Base learning rate for negative (unrewarded) outcomes.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stai_neg_alpha_factor: [-1, 1] - Factor by which STAI score modulates the negative learning rate.
+                                     A positive value means higher anxiety increases alpha_neg.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta, self.stai_neg_alpha_factor = model_parameters
+        # Calculate the effective negative learning rate, clipped to [0, 1]
+        self.alpha_neg = np.clip(self.alpha_neg_base + self.stai_neg_alpha_factor * self.stai, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine which learning rate to use based on the reward
+        current_alpha = self.alpha_pos if reward == 1 else self.alpha_neg
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        # Stage 1 update
+        # The reward for stage 1's choice is effectively the Q-value of the chosen stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### Cognitive Model 2: Uncertainty-Based Exploration with Anxiety-Modulated Inverse Temperature
+
+**Hypothesis:** This model posits that participants engage in uncertainty-driven exploration, favoring options they have chosen less frequently. The degree of choice determinism (inverse temperature `beta`) is also modulated by anxiety. For a participant with medium anxiety, this could mean either more rigid choices (higher beta) to stick to known options, or more random choices (lower beta) due to heightened uncertainty or difficulty committing to a decision.
+
+**Mechanism:** The model includes a count-based exploration bonus, where options chosen less frequently receive a temporary boost to their Q-values, encouraging their selection. The inverse temperature `beta`, which controls the randomness of choices in the softmax function, is not fixed but is adjusted by the STAI score. A positive `stai_beta_factor` would imply that higher anxiety leads to more deterministic choices (higher `beta`), while a negative factor would lead to more random choices (lower `beta`).
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that participants engage in uncertainty-driven
+    exploration, favoring options they have chosen less frequently. The degree
+    of choice determinism (inverse temperature beta) is modulated by anxiety.
+    For a participant with medium anxiety, this could mean either more rigid
+    choices (higher beta) to stick to known options, or more random choices
+    (lower beta) due to heightened uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta_base: [0.1, 10] - Base inverse temperature for softmax choice (beta should not be zero).
+    stai_beta_factor: [-5, 5] - Factor by which STAI score modulates beta.
+                                 A positive value means higher anxiety increases beta (more deterministic).
+    exploration_bonus_strength: [0, 2] - Strength of the exploration bonus for less chosen options.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stai_beta_factor, self.exploration_bonus_strength = model_parameters
+        # Calculate the effective beta, clipped to a reasonable range (beta should not be zero)
+        self.beta_effective = np.clip(self.beta_base + self.stai_beta_factor * self.stai, 0.1, 10.0)
+
+    def init_model(self) -> None:
+        # Initialize choice counts for exploration bonus. Start with 1 to avoid division by zero.
+        self.choice_counts_stage1 = np.ones(self.n_choices)
+        self.choice_counts_stage2 = np.ones((self.n_states, self.n_choices))
+
+    def policy_stage1(self) -> np.ndarray:
+        # Add exploration bonus to Q-values for stage 1
+        # A common form is bonus / sqrt(N), where N is choice count
+        exploration_bonus = self.exploration_bonus_strength / np.sqrt(self.choice_counts_stage1)
+        q_values_with_bonus = self.q_stage1 + exploration_bonus
+        return self.softmax(q_values_with_bonus, self.beta_effective)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Add exploration bonus to Q-values for stage 2
+        exploration_bonus = self.exploration_bonus_strength / np.sqrt(self.choice_counts_stage2[state])
+        q_values_with_bonus = self.q_stage2[state] + exploration_bonus
+        return self.softmax(q_values_with_bonus, self.beta_effective)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward) # Call base method to store last actions/rewards
+        # Update choice counts
+        self.choice_counts_stage1[action_1] += 1
+        self.choice_counts_stage2[state, action_2] += 1
+
+    # The default value_update method is suitable, as alpha is standard.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Cognitive Model 3: Stage-Specific Learning Rates with Anxiety-Modulated First-Stage Learning
+
+**Hypothesis:** This model proposes that learning rates can differ between the two stages of the task. Furthermore, anxiety specifically modulates the learning rate for the first stage (spaceship choice), influencing how strongly participants update their initial choices based on the subsequent outcomes. For medium anxiety, this could lead to either more cautious (slower update) or more reactive (faster update) adjustments at stage 1, reflecting anxiety's impact on initial decision-making strategies.
+
+**Mechanism:** The model uses two distinct learning rates: `alpha_stage1` for updating Q-values at the first stage, and `alpha_stage2` for the second stage. `alpha_stage1` is modulated by the participant's STAI score. A positive `stai_stage1_alpha_factor` would mean that higher anxiety leads to a higher `alpha_stage1`, making first-stage choices more quickly updated based on outcomes.
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that learning rates can differ between the
+    two stages of the task. Furthermore, anxiety specifically modulates the
+    learning rate for the first stage (spaceship choice), influencing how
+    strongly participants update their initial choices based on the subsequent
+    outcomes. For medium anxiety, this could lead to either more cautious
+    (slower update) or more reactive (faster update) adjustments at stage 1.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1_base: [0, 1] - Base learning rate for stage 1 (spaceship choice).
+    alpha_stage2: [0, 1] - Learning rate for stage 2 (alien choice).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stai_stage1_alpha_factor: [-1, 1] - Factor by which STAI score modulates the stage 1 learning rate.
+                                        A positive value means higher anxiety increases alpha_stage1.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1_base, self.alpha_stage2, self.beta, self.stai_stage1_alpha_factor = model_parameters
+        # Calculate the effective stage 1 learning rate, clipped to [0, 1]
+        self.alpha_stage1 = np.clip(self.alpha_stage1_base + self.stai_stage1_alpha_factor * self.stai, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update using alpha_stage2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2 * delta_2
+        
+        # Stage 1 update using the anxiety-modulated alpha_stage1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+    # The default policy_stage1 and policy_stage2 methods are suitable.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

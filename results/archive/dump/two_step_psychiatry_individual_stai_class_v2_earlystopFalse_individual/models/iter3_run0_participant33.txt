@@ -1,0 +1,148 @@
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Impaired Credit Assignment (Stage 1 Disconnect).
+    
+    This model hypothesizes that high anxiety interferes with the cognitive process 
+    of back-propagating the value of the outcome (Stage 2) to the initial choice (Stage 1).
+    While the participant learns the value of the aliens (Stage 2) normally, the 
+    update to the spaceships (Stage 1) is dampened by anxiety. This reflects a 
+    failure to properly assign credit to the initial action due to cognitive load 
+    or distraction.
+    
+    Mechanism:
+    The learning rate for the Stage 1 update is scaled down by STAI.
+    alpha_stage1 = alpha * (1 - impairment * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Base learning rate
+    beta: [0, 10]       # Inverse temperature
+    impairment: [0, 1]  # Degree to which STAI reduces Stage 1 learning (0=none, 1=full block)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.impairment = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Aliens) - Normal learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Spaceships) - Impaired by anxiety
+        # We calculate the prediction error from Stage 2 value to Stage 1 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Calculate effective alpha for stage 1
+        # High anxiety reduces the effective alpha, disconnecting Stage 1 from outcomes
+        impairment_factor = np.clip(self.impairment * self.stai, 0, 1)
+        alpha_stage1 = self.alpha * (1.0 - impairment_factor)
+        
+        self.q_stage1[action_1] += alpha_stage1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Corrupted Model-Based Control (Transition Noise).
+    
+    This model hypothesizes that the participant relies on a Model-Based strategy 
+    (planning based on transition probabilities), but high anxiety introduces 
+    entropy ("noise") into their internal model of the environment. They perceive 
+    the spaceship transitions as more random than they truly are, reducing the 
+    effectiveness of planning and making choices less directed towards the 
+    currently better planet.
+    
+    Mechanism:
+    Stage 1 values are calculated using a Model-Based approach: Q = T * V_stage2.
+    The transition matrix T used for planning is a mixture of the true transitions 
+    and a uniform (random) distribution, weighted by STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for Stage 2 values
+    beta: [0, 10]       # Inverse temperature
+    noise_level: [0, 1] # How much STAI mixes in the uniform distribution (0=True T, 1=Random T)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.noise_level = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Estimate Value of Stage 2 states (Max Q per state)
+        # This represents the best expected reward from each planet
+        v_stage2 = np.max(self.q_stage2, axis=1)
+        
+        # 2. Define True Transition Matrix
+        # Derived from base class counts: [[0.7, 0.3], [0.3, 0.7]]
+        T_true = self.T 
+        
+        # 3. Define Noisy (Uniform) Transition Matrix
+        # Represents total uncertainty about where spaceships go
+        T_noise = np.array([[0.5, 0.5], [0.5, 0.5]])
+        
+        # 4. Mix based on Anxiety
+        # Higher anxiety -> Transition matrix becomes flatter
+        mix_weight = np.clip(self.noise_level * self.stai, 0, 1)
+        T_perceived = (1.0 - mix_weight) * T_true + mix_weight * T_noise
+        
+        # 5. Calculate Model-Based Q-values for Stage 1
+        # Q_MB = T_perceived * V_stage2
+        q_mb = np.dot(T_perceived, v_stage2)
+        
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Only update Stage 2 values (Aliens)
+        # Stage 1 values are computed on the fly in policy_stage1 using the MB formula
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Loss Aversion (Subjective Punishment).
+    
+    This model hypothesizes that anxiety alters the subjective valuation of outcomes.
+    Specifically, receiving 0 coins is not perceived as neutral but as a "loss" or 
+    punishment. The magnitude of this negative valuation scales with anxiety.
+    This leads to stronger avoidance of options that yield 0 coins compared to 
+    a standard agent.
+    
+    Mechanism:
+    The reward signal passed to the learning rule is modified.
+    If Reward == 0: Effective Reward = -1 * loss_aversion * STAI
+    If Reward == 1: Effective Reward = 1
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    loss_aversion: [0, 5] # Magnitude of negative valence for 0 outcome
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_aversion = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective reward
+        # Anxiety turns "no reward" into "punishment"
+        if reward == 0.0:
+            r_eff = -1.0 * self.loss_aversion * self.stai
+        else:
+            r_eff = reward
+            
+        # Standard TD update with effective reward
+        delta_2 = r_eff - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

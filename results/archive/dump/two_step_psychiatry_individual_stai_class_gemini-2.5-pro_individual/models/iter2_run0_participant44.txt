@@ -1,0 +1,161 @@
+As a cognitive scientist and Python programmer, I've analyzed this participant's data. The most striking feature is the complete lack of exploration at the first stage: the participant chose spaceship 0 on every single trial. This extreme perseveration, coupled with a high anxiety score (stai = 0.75), suggests that their decision-making is characterized by behavioral rigidity, potentially as a strategy to avoid uncertainty or negative outcomes.
+
+Here are three distinct cognitive models that formalize different hypotheses about how high anxiety could lead to this rigid choice pattern.
+
+### Model 1: Anxiety-Modulated Asymmetric Learning
+
+This model hypothesizes that high anxiety leads to a heightened sensitivity to negative outcomes. Individuals with high anxiety may learn more strongly from punishments (or lack of reward) than from rewards. This can lead to sticking with a "known" option to avoid the potentially large negative prediction error associated with trying something new and failing.
+
+This is implemented with two learning rates: one for positive prediction errors (`alpha`) and another, anxiety-enhanced rate for negative prediction errors (`alpha_neg`).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (`stai`) causes greater sensitivity to negative outcomes.
+    This model uses asymmetric learning rates, where the learning rate for negative
+    prediction errors is amplified by the individual's anxiety level. This makes
+    the agent learn more from punishments than rewards, promoting avoidance of
+    actions that lead to non-reward.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Base learning rate for positive prediction errors)
+    beta: [0, 10]      (Inverse temperature for softmax)
+    neg_bias: [0, 5]   (Factor scaling the impact of anxiety on negative learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_bias = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using separate learning rates for positive and negative
+        prediction errors, with the negative learning rate scaled by anxiety.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 < 0:
+            # Anxiety-scaled learning rate for negative prediction errors
+            alpha_neg_2 = self.alpha * (1 + self.neg_bias * self.stai)
+            self.q_stage2[state, action_2] += alpha_neg_2 * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Stage 1 update (using the updated stage 2 value)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 < 0:
+            # Anxiety-scaled learning rate for negative prediction errors
+            alpha_neg_1 = self.alpha * (1 + self.neg_bias * self.stai)
+            self.q_stage1[action_1] += alpha_neg_1 * delta_1
+        else:
+            self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Biased Arbitration between Model-Based and Model-Free Control
+
+This model proposes that decision-making arises from a mix of two systems: a goal-directed "model-based" system that uses knowledge of the task structure (i.e., transition probabilities) to plan, and a habitual "model-free" system that simply repeats previously rewarded actions. This model hypothesizes that high anxiety biases this arbitration process, causing a greater reliance on the simpler, less cognitively demanding model-free system. This leads to habitual, perseverative behavior that is insensitive to changes in outcomes.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (`stai`) promotes a shift from goal-directed (model-based)
+    to habitual (model-free) control. The overall value of a first-stage choice is a
+    weighted average of its model-free value and its model-based value. The weight
+    given to the model-based system is inversely proportional to the stai score,
+    capturing a retreat to simpler, habitual strategies under anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for value updates)
+    beta: [0, 10]      (Inverse temperature for softmax)
+    w_base: [0, 1]     (Base weighting of model-based control at zero anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 policy based on a hybrid of model-free and model-based values,
+        where anxiety reduces the weight of the model-based controller.
+        """
+        # Model-free values are the standard q_stage1 values
+        q_mf = self.q_stage1
+
+        # Model-based values are calculated by planning through the transition model
+        q_mb = np.zeros(self.n_choices)
+        # Expected value of being at each of the second-stage states
+        q_stage2_max = np.max(self.q_stage2, axis=1)
+        for a in range(self.n_choices):
+            q_mb[a] = self.T[a, 0] * q_stage2_max[0] + self.T[a, 1] * q_stage2_max[1]
+
+        # Anxiety modulates the weighting between systems
+        # As stai -> 1, w -> 0, making control purely model-free (habitual)
+        w = self.w_base * (1 - self.stai)
+        
+        q_hybrid = w * q_mb + (1 - w) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD-learning, but with an eligibility trace parameter (lambda)
+        that allows credit assignment to be modulated by the MB/MF weighting.
+        Here we use a simplified update where only the model-free value is updated
+        with a TD error, consistent with many hybrid model formulations.
+        """
+        # Standard value update for stage 2 options
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update only the model-free value for stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Reduction in Directed Exploration
+
+This model tests the hypothesis that anxiety reduces exploration by making the choice policy more deterministic and sensitive to small, early differences in learned values. Instead of promoting randomness, high anxiety might cause a "freezing" response, where the individual latches onto the first seemingly viable option and exploits it exclusively.
+
+This is modeled by having the anxiety score (`stai`) directly amplify the softmax `beta` parameter. A higher effective `beta` makes the choice policy more "winner-take-all," thus reducing exploration and cementing early preferences. A `bias` parameter is included to capture a potential initial preference for one option over the other.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (`stai`) leads to a reduction in exploration by making
+    the choice policy more deterministic. Anxiety amplifies the inverse temperature
+    parameter (`beta`), causing the individual to more greedily exploit the option
+    with the current highest value. Combined with a small intrinsic bias, this can
+    cause the agent to "lock in" to a single choice early on and never explore the
+    alternative.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]      (Base inverse temperature)
+    bias: [-2, 2]      (Intrinsic preference for spaceship 0 vs 1)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.bias = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 policy where anxiety amplifies choice determinism.
+        """
+        q_values_biased = self.q_stage1.copy()
+        q_values_biased[0] += self.bias
+
+        # As stai -> 1, the denominator -> 0, making effective_beta very large.
+        # This leads to highly deterministic choices (less exploration).
+        # An epsilon is added for numerical stability if stai is exactly 1.
+        effective_beta = self.beta / (1 - self.stai + 1e-6)
+        
+        return self.softmax(q_values_biased, effective_beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

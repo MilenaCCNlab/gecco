@@ -1,0 +1,162 @@
+To explain the participant's behavior, specifically the high anxiety (STAI = 0.75) and the observed "stickiness" or perseveration in choices (long streaks of choosing the same spaceship), I propose three cognitive models. These models hypothesize different mechanisms for how anxiety alters decision-making: through hyper-vigilance to structure, selective paralysis of high-level choices, or working memory deficits.
+
+### Model 1: Anxiety-Modulated Dynamic Transition Learning
+This model hypothesizes that anxious individuals are **hyper-vigilant to changes in environmental structure**. While a standard learner might assume the spaceship-planet transition probabilities are stable (e.g., 70/30), this participant constantly updates their internal model of these transitions. High anxiety accelerates this update rate, causing the participant to over-react to "rare" transitions (e.g., treating a rare transition as a signal that the environment has changed), which feeds into a Model-Based planning process.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Dynamic Transition Learning.
+    
+    This model hypothesizes that high anxiety leads to "structural instability" or 
+    hyper-vigilance. The participant uses a Hybrid (Model-Based + Model-Free) strategy, 
+    but their internal model of the transition matrix (Spaceship -> Planet) is not fixed. 
+    Instead, they update it after every trial.
+    
+    The rate at which they update this transition matrix is scaled by their anxiety (STAI). 
+    High anxiety leads to faster updating, meaning a single "rare" transition can 
+    significantly warp their belief about which spaceship leads to which planet, 
+    potentially causing switching or sticking behavior based on the perceived structure 
+    rather than just reward history.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Reward learning rate (for Q-values)
+    beta: [0, 10]           # Inverse temperature
+    trans_lr_scale: [0, 1]  # Scaling factor for transition learning rate (lr = scale * STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.trans_lr_scale = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition counts with the prior (70/30 structure)
+        # We use a float array to allow for fractional updates
+        self.internal_counts = np.array([[0.7, 0.3], [0.3, 0.7]]) * 10.0 
+        self.T = self.internal_counts / self.internal_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values
+        # Q_MB(a) = Sum_s [ T(s|a) * max_a' Q_stage2(s, a') ]
+        max_q_stage2 = np.max(self.q_stage2, axis=1) # Max value for each state (planet)
+        q_mb = self.T @ max_q_stage2
+        
+        # Hybrid Model: Mix Model-Free (q_stage1) and Model-Based (q_mb)
+        # We assume a fixed 50/50 mix to focus the hypothesis on the Transition Learning
+        q_net = 0.5 * self.q_stage1 + 0.5 * q_mb
+        
+        return self.softmax(q_net, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update internal transition model
+        # Learning rate depends on STAI
+        lr_trans = self.trans_lr_scale * self.stai
+        
+        # We update the row corresponding to the chosen spaceship
+        # This is a simple delta rule on probabilities (approximated by updating counts or direct vector)
+        # Here we implement a direct probability update for simplicity and stability
+        # T_new = T_old + lr * (Outcome - T_old)
+        
+        outcome_vector = np.zeros(self.n_states)
+        outcome_vector[state] = 1.0
+        
+        self.T[action_1] += lr_trans * (outcome_vector - self.T[action_1])
+        
+        # Ensure valid probabilities
+        self.T[action_1] = np.clip(self.T[action_1], 0.001, 0.999)
+        self.T[action_1] /= np.sum(self.T[action_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Stage 1 Learning Paralysis
+This model hypothesizes that anxiety causes a specific impairment in updating high-level choices (Stage 1), while leaving immediate reward learning (Stage 2) intact. This "paralysis" means the participant learns about the aliens correctly but fails to propagate this information back to the spaceship choice effectively. This results in the observed stickiness: they keep choosing the same spaceship because the Q-value for that spaceship is updated too slowly to reflect negative outcomes.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Stage 1 Learning Paralysis.
+    
+    This model hypothesizes that high anxiety selectively impairs the learning mechanism 
+    at the decision stage (Stage 1), acting as a "freeze" response. While the participant 
+    correctly learns the value of aliens (Stage 2) from rewards, their ability to update 
+    the value of the spaceships (Stage 1) is dampened by their anxiety.
+    
+    This leads to a dissociation: they might know an alien is bad, but they fail to 
+    update the spaceship preference to avoid it. This results in high perseveration 
+    (stickiness) at Stage 1, as the Q-values change very slowly.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Base learning rate (used for Stage 2)
+    beta: [0, 10]           # Inverse temperature
+    paralysis: [0, 1]       # Impairment factor for Stage 1 learning (scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.paralysis = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (Standard)
+        # The participant learns about aliens normally
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (Impaired by Anxiety)
+        # The learning rate for Stage 1 is reduced by anxiety
+        # alpha_1 = alpha * (1 - paralysis * STAI)
+        impairment = np.clip(self.paralysis * self.stai, 0, 1)
+        alpha_stage1 = self.alpha * (1.0 - impairment)
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_stage1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Working Memory Decay (Stage 2)
+This model hypothesizes that anxiety consumes cognitive resources (working memory), leading to the rapid decay of specific outcome values (Stage 2 / Aliens). Unlike the "Attentional Narrowing" model which decayed unchosen *options*, this model decays *all* Stage 2 values towards ignorance (0.5). This forces the participant to rely on whatever residual value remains or simple habits, often leading to poor performance and repetitive behavior because the detailed "map" of which alien is currently good keeps fading.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Working Memory Decay (Stage 2).
+    
+    This model hypothesizes that high anxiety acts as a cognitive load that degrades 
+    working memory. Specifically, the participant struggles to retain the precise 
+    values of the specific aliens (Stage 2 states) over time.
+    
+    On every trial, all Stage 2 Q-values decay towards a neutral prior (0.5). 
+    The rate of this decay is proportional to the STAI score. This constant loss of 
+    detailed information forces the participant to rely on older, potentially 
+    outdated Stage 1 preferences, or prevents them from effectively exploiting 
+    learned rewards, leading to suboptimal and repetitive choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Learning rate
+    beta: [0, 10]           # Inverse temperature
+    decay_scale: [0, 1]     # Scaling factor for memory decay (rate = scale * STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_scale = model_parameters
+
+    def pre_trial(self) -> None:
+        # Decay all Stage 2 values towards 0.5 (ignorance/neutrality)
+        # Rate depends on anxiety
+        decay_rate = np.clip(self.decay_scale * self.stai, 0, 1)
+        
+        # Apply decay: Q_new = Q_old + decay * (Target - Q_old)
+        # Target is 0.5
+        self.q_stage2 += decay_rate * (0.5 - self.q_stage2)
+
+    # Standard value update is used (TD learning), but it operates on the decayed values
+    # No override of value_update needed beyond the base class, 
+    # but we must ensure the base class is used.
+    # The base class implementation is sufficient.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

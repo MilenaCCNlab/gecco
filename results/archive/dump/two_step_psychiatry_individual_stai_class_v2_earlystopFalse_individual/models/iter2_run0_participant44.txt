@@ -1,0 +1,122 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) influences decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Loss Perseveration.
+    High anxiety triggers a "freezing" response to negative outcomes. 
+    Instead of the adaptive "Win-Stay, Lose-Shift" strategy, high anxiety participants 
+    exhibit a bias to repeat the previous action specifically after a loss (0 coins), 
+    overriding standard value-based switching.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    loss_stick_slope: [0, 5] (Scales the perseveration bias after a loss based on STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_stick_slope = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_values = self.q_stage1.copy()
+        
+        # Apply anxiety-driven perseveration bonus only if the last trial was a loss
+        if self.last_action1 is not None and self.last_reward == 0.0:
+            # The bias strength increases with anxiety
+            perseveration_bias = self.loss_stick_slope * self.stai
+            q_values[int(self.last_action1)] += perseveration_bias
+            
+        return self.softmax(q_values, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Induced Model-Based Deficit.
+    Anxiety acts as a cognitive load that impairs computationally expensive 
+    Model-Based (planning) strategies. This model implements a hybrid RL agent 
+    where the weight 'w' (mixing parameter between Model-Based and Model-Free values) 
+    is inversely proportional to the participant's STAI score.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_max: [0, 1] (Maximum model-based weight possible for a low-anxiety person)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values (Planning)
+        # Q_MB(a) = Sum(P(s'|a) * V(s'))
+        # V(s') = max(Q_stage2(s', :))
+        q_mb = np.zeros(self.n_choices)
+        for action in range(self.n_choices):
+            expected_val = 0
+            for next_state in range(self.n_states):
+                # Transition prob * max value of next state
+                prob = self.T[action, next_state]
+                val = np.max(self.q_stage2[next_state])
+                expected_val += prob * val
+            q_mb[action] = expected_val
+
+        # 2. Calculate Mixing Weight 'w' modulated by Anxiety
+        # Higher anxiety -> Lower w -> More reliance on Model-Free (Habit)
+        # We clip to ensure w stays non-negative
+        w = np.clip(self.w_max * (1.0 - self.stai), 0.0, 1.0)
+
+        # 3. Combine Model-Based and Model-Free values
+        q_net = w * q_mb + (1 - w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Blunted Negative Learning.
+    Anxiety creates an asymmetry in how prediction errors are processed. 
+    High anxiety individuals may exhibit blunted learning from negative outcomes 
+    (ignoring failures) to avoid the psychological impact of loss or to maintain 
+    a sense of safety. This is modeled by scaling down the learning rate for 
+    negative prediction errors as a function of STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Base learning rate)
+    beta: [0, 10]
+    neg_damp_slope: [0, 5] (Determines how much anxiety dampens negative learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_damp_slope = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (Standard)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (Anxiety Modulated)
+        # We use the stage 2 value as the target for stage 1 (TD-0)
+        target = self.q_stage2[state, action_2]
+        delta_1 = target - self.q_stage1[action_1]
+        
+        # Determine effective learning rate
+        if delta_1 < 0:
+            # Negative PE: Dampen learning based on anxiety
+            # Using exponential decay to keep alpha positive but small
+            effective_alpha = self.alpha * np.exp(-self.neg_damp_slope * self.stai)
+        else:
+            # Positive PE: Standard learning
+            effective_alpha = self.alpha
+            
+        self.q_stage1[action_1] += effective_alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,211 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant's high anxiety (STAI score 0.725) might influence their decision-making in the two-step task.
+
+---
+
+### Model 1: Anxiety-Induced Model-Based Transition Probability Bias
+
+This model posits that high anxiety leads to a biased perception of transition probabilities, making the participant overestimate the likelihood of common transitions and underestimate rare ones. This results in a more predictable, less exploratory, and potentially suboptimal model-based planning strategy. The degree of this bias is directly scaled by the STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a biased perception of transition probabilities,
+    specifically exaggerating the likelihood of common transitions and downplaying rare ones.
+    This makes the agent more predictable and less willing to engage with uncertainty
+    in model-based planning. The degree of this bias is scaled by the STAI score.
+    The model combines model-free and this anxiety-biased model-based value.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    w_mb: [0, 1] - Weight for the model-based component in stage 1 value calculation.
+    anxiety_T_bias_amplification: [0, 1] - Factor by which STAI amplifies the bias
+                                           in transition probabilities.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb, self.anxiety_T_bias_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Ensure parameters are within valid bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.beta = np.clip(self.beta, 0.0, 10.0)
+        self.w_mb = np.clip(self.w_mb, 0.0, 1.0)
+        self.anxiety_T_bias_amplification = np.clip(self.anxiety_T_bias_amplification, 0.0, 1.0)
+
+        # Initialize the biased transition matrix
+        self.T_biased = np.copy(self.T)
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, calculate the anxiety-biased transition matrix
+         and update the model-based component of q_stage1.
+        """
+        # Calculate bias strength based on STAI
+        # Ensure bias_strength is clipped to avoid probabilities > 1 or < 0
+        bias_strength = np.clip(self.stai * self.anxiety_T_bias_amplification, 0.0, 1.0)
+
+        # Apply bias to transition probabilities
+        # Spaceship 0 (A) commonly goes to Planet 0 (X)
+        # Spaceship 1 (U) commonly goes to Planet 1 (Y)
+        
+        # Bias for spaceship 0 (A)
+        self.T_biased[0, 0] = np.clip(self.T[0, 0] + bias_strength * (1 - self.T[0, 0]), 0.0, 1.0)
+        self.T_biased[0, 1] = np.clip(self.T[0, 1] - bias_strength * self.T[0, 1], 0.0, 1.0)
+        # Ensure row sums to 1 after clipping
+        self.T_biased[0, :] = self.T_biased[0, :] / np.sum(self.T_biased[0, :])
+
+        # Bias for spaceship 1 (U)
+        self.T_biased[1, 1] = np.clip(self.T[1, 1] + bias_strength * (1 - self.T[1, 1]), 0.0, 1.0)
+        self.T_biased[1, 0] = np.clip(self.T[1, 0] - bias_strength * self.T[1, 0], 0.0, 1.0)
+        # Ensure row sums to 1 after clipping
+        self.T_biased[1, :] = self.T_biased[1, :] / np.sum(self.T_biased[1, :])
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, blending model-free and anxiety-biased model-based components for stage 1.
+        """
+        # Stage 2 update (model-free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Model-free stage 1 value (what was just experienced)
+        q1_mf = self.q_stage2[state, action_2]
+
+        # Anxiety-biased model-based stage 1 value
+        q1_mb_biased = np.zeros(self.n_choices)
+        for a1_idx in range(self.n_choices):
+            # Expected value of next states (planets) given action a1_idx, using biased T
+            # Max over Q_stage2 for each potential next state (planet)
+            expected_val_planet0 = np.max(self.q_stage2[0, :])
+            expected_val_planet1 = np.max(self.q_stage2[1, :])
+            q1_mb_biased[a1_idx] = (self.T_biased[a1_idx, 0] * expected_val_planet0 +
+                                    self.T_biased[a1_idx, 1] * expected_val_planet1)
+        
+        # Combine model-free and model-based values for the chosen action_1
+        # This replaces the standard delta_1 update for q_stage1
+        # The base class's self.q_stage1 is treated as the model-free value for this update.
+        # We need to update the chosen action's Q1 based on the blended value.
+        
+        # Calculate the blended target for q_stage1
+        blended_target_q1 = self.w_mb * q1_mb_biased[action_1] + (1 - self.w_mb) * q1_mf
+        
+        # Update q_stage1
+        delta_1 = blended_target_q1 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Model 2: Anxiety-Modulated Learning Rate Volatility (after Punishment)
+
+This model proposes that high anxiety leads to a more volatile learning rate, particularly by boosting the learning rate (`alpha`) after a negative reward (0 coins). This suggests that anxious individuals rapidly adjust their learning in response to negative feedback, potentially overreacting to losses.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety makes learning rates more volatile, specifically
+    boosting the learning rate (alpha) after a negative reward (0 coins). This
+    suggests anxious individuals rapidly adjust their learning in response to
+    negative feedback, potentially overreacting to losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Baseline learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    anxiety_alpha_boost_after_punishment: [0, 1] - Factor by which STAI amplifies
+                                                    alpha after a negative reward.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.anxiety_alpha_boost_after_punishment = model_parameters
+
+    def init_model(self) -> None:
+        # Ensure parameters are within valid bounds
+        self.alpha_base = np.clip(self.alpha_base, 0.0, 1.0)
+        self.beta = np.clip(self.beta, 0.0, 10.0)
+        self.anxiety_alpha_boost_after_punishment = np.clip(self.anxiety_alpha_boost_after_punishment, 0.0, 1.0)
+        self.effective_alpha = self.alpha_base # Initialize effective alpha
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, adjust the effective learning rate based on the
+        last observed reward and the participant's anxiety level.
+        """
+        if self.trial > 0 and self.last_reward == 0: # If last trial resulted in 0 coins
+            # Boost alpha for anxious individuals after a punishment
+            boost_amount = self.stai * self.anxiety_alpha_boost_after_punishment
+            self.effective_alpha = np.clip(self.alpha_base + boost_amount, 0.0, 1.0)
+        else:
+            self.effective_alpha = self.alpha_base # Revert to base alpha if no punishment or first trial
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using the anxiety-modulated effective learning rate.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.effective_alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.effective_alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```
+
+---
+
+### Model 3: Anxiety-Modulated Future Discounting
+
+This model proposes that high anxiety leads to increased temporal discounting of future rewards. In the two-step task, this means that the value propagated back from the second stage (planet and alien choice) to the first stage (spaceship choice) is discounted more aggressively by anxious individuals. This makes immediate, certain rewards more salient than potential future gains.
+
+```python
+class ParticipantModel4(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to increased temporal discounting of future rewards.
+    This implies that the value propagated back from the second stage (planet/alien)
+    to the first stage (spaceship) is discounted more aggressively by anxious individuals.
+    This makes immediate rewards more salient and future rewards less impactful.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    gamma_base: [0, 1] - Baseline discount factor for propagating stage 2 value to stage 1.
+                         (Typically close to 1 in two-step tasks without explicit delays).
+    anxiety_gamma_reduction: [0, 1] - Factor by which STAI reduces the effective gamma.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gamma_base, self.anxiety_gamma_reduction = model_parameters
+
+    def init_model(self) -> None:
+        # Ensure parameters are within valid bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.beta = np.clip(self.beta, 0.0, 10.0)
+        self.gamma_base = np.clip(self.gamma_base, 0.0, 1.0)
+        self.anxiety_gamma_reduction = np.clip(self.anxiety_gamma_reduction, 0.0, 1.0)
+
+        # Calculate the anxiety-modulated effective gamma
+        # Gamma should always be between 0 and 1
+        self.effective_gamma = np.clip(self.gamma_base - self.stai * self.anxiety_gamma_reduction, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, applying the anxiety-modulated discount factor to stage 1 value propagation.
+        """
+        # Stage 2 update (standard TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update: The value propagated back from stage 2 is discounted by effective_gamma
+        # delta_1 = (gamma * V_next) - V_current
+        delta_1 = (self.effective_gamma * self.q_stage2[state, action_2]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model4 = make_cognitive_model(ParticipantModel4)
+```

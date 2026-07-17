@@ -1,0 +1,182 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how high anxiety (STAI score 0.5375) might influence decision-making in this two-step task.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety modulates a "Win-Stay, Lose-Shift" (WSLS) heuristic at Stage 1,
+    with a differential impact based on the type of state transition. Specifically,
+    after a loss, anxiety amplifies the tendency to switch the first-stage choice if
+    the transition was common (participant blames the initial choice). However, if the transition
+    was rare, anxiety might reduce the switch tendency (or even increase staying),
+    attributing the poor outcome to bad luck rather than the initial choice, leading to perseveration
+    on the original path despite a loss.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    wsls_shift_magnitude: [0, 2] - Base magnitude of the 'shift' bonus applied to the alternative
+                                   first-stage option after a loss. A higher value means a stronger
+                                   push to switch. This value is added to the alternative option's Q-value.
+    stai_common_loss_impact: [-2, 2] - How STAI score modulates the shift magnitude for losses
+                                       following a common transition. Positive values increase shifting,
+                                       negative values decrease it.
+    stai_rare_loss_impact: [-2, 2] - How STAI score modulates the shift magnitude for losses
+                                     following a rare transition. Positive values increase shifting,
+                                     negative values decrease it.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.wsls_shift_magnitude, self.stai_common_loss_impact, self.stai_rare_loss_impact = model_parameters
+        
+        # Define a threshold to distinguish common vs. rare transitions
+        self.common_trans_prob_threshold = 0.7 
+        self.wsls_bonus = np.zeros(self.n_choices) # Initialize temporary bonus
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, calculate and apply the WSLS modulation to Q-values based on the
+        previous trial's outcome, if it was a loss. This bonus is temporary for the current choice.
+        """
+        self.wsls_bonus = np.zeros(self.n_choices) # Reset bonus for the current trial
+
+        if self.trial > 0 and self.last_reward == 0.0 and self.last_action1 is not None:
+            # Determine if the last transition (action_1 -> state) was common or rare
+            # self.T[action_1, state] gives the transition probability
+            is_common_transition = (self.T[int(self.last_action1), int(self.last_state)] > self.common_trans_prob_threshold)
+
+            # Calculate the effective shift bonus based on STAI and transition type
+            effective_shift_magnitude = self.wsls_shift_magnitude
+            if is_common_transition:
+                effective_shift_magnitude += self.stai * self.stai_common_loss_impact
+            else: # Rare transition
+                effective_shift_magnitude += self.stai * self.stai_rare_loss_impact
+            
+            # Clip the effective shift magnitude to a reasonable range
+            effective_shift_magnitude = np.clip(effective_shift_magnitude, -2.0, 2.0)
+
+            # Apply bonus to the alternative action's Q-value for the *upcoming* choice
+            alternative_action = 1 - int(self.last_action1)
+            self.wsls_bonus[alternative_action] = effective_shift_magnitude
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, adding the temporary WSLS bonus.
+        """
+        # Add the temporary bonus calculated in pre_trial to the Q-values
+        q_biased = self.q_stage1 + self.wsls_bonus
+        return self.softmax(q_biased, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to "catastrophizing" about future outcomes, specifically
+    manifesting as a suppression of second-stage Q-values when updating first-stage values,
+    but *only* if the transition to the second stage was rare. This makes the first-stage
+    option that led to a rare transition seem less appealing due to a pessimistic
+    re-evaluation of the subsequent options, especially for highly anxious individuals.
+    This differs from simple rare transition discounting by affecting the *value update* process
+    for the first stage based on the perceived quality of the second stage following an unexpected event.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    catastrophe_suppression_base: [0, 1] - Base factor (0=full suppression, 1=no suppression)
+                                          by which the second-stage Q-value is multiplied
+                                          when updating stage-1 values, if a rare transition occurred.
+                                          A value < 1 means suppression.
+    stai_catastrophe_impact: [-1, 1] - How STAI score modulates this suppression factor.
+                                       Positive values make the suppression stronger (factor smaller),
+                                       negative values make it weaker (factor larger).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.catastrophe_suppression_base, self.stai_catastrophe_impact = model_parameters
+        self.common_trans_prob_threshold = 0.7 # Threshold to distinguish common/rare transitions
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, applying anxiety-driven catastrophe suppression to stage-2 Q-values
+        when used for stage-1 learning, if the transition was rare.
+        """
+        # Standard Q-value update for stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Prepare the stage-2 value to be used for stage-1 update
+        q2_for_stage1_update = self.q_stage2[state, action_2]
+
+        # Determine if the transition from stage 1 (action_1) to stage 2 (state) was rare
+        is_rare_transition = (self.T[action_1, state] <= self.common_trans_prob_threshold)
+
+        if is_rare_transition:
+            # Calculate the effective suppression factor.
+            # A higher STAI (with positive stai_catastrophe_impact) means more suppression (smaller factor).
+            # Clip to ensure the factor stays within a valid range [0, 1].
+            suppression_factor = np.clip(self.catastrophe_suppression_base - self.stai * self.stai_catastrophe_impact, 0.0, 1.0)
+            q2_for_stage1_update *= suppression_factor
+            
+        # Update stage 1 Q-value using the potentially suppressed stage-2 value
+        delta_1 = q2_for_stage1_update - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety drives a specific form of directed exploration. After receiving
+    a zero reward (a 'loss'), the participant experiences increased pressure to explore
+    the *alternative* first-stage option on the subsequent trial. This is a temporary,
+    outcome-dependent bias towards switching, amplified by anxiety, rather than general
+    stochasticity or simple perseveration. This represents a "risk-averse" exploration strategy
+    to avoid repeating a recently experienced negative outcome.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    directed_exploration_bonus_base: [0, 2] - Base bonus added to the Q-value of the alternative
+                                             first-stage option for the next trial, specifically after a loss.
+    stai_directed_exploration_impact: [0, 2] - How much STAI score amplifies this directed
+                                              exploration bonus after a loss.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.directed_exploration_bonus_base, self.stai_directed_exploration_impact = model_parameters
+        self.exploration_bonus = np.zeros(self.n_choices) # Initialize to no bonus
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, calculate and apply the directed exploration bonus
+        based on the previous trial's outcome. This bonus is temporary for the current choice.
+        """
+        self.exploration_bonus = np.zeros(self.n_choices) # Reset bonus for the current trial
+
+        if self.trial > 0 and self.last_reward == 0.0 and self.last_action1 is not None:
+            # Calculate the effective exploration bonus, amplified by STAI
+            effective_bonus = self.directed_exploration_bonus_base + self.stai * self.stai_directed_exploration_impact
+            
+            # Clip the bonus to ensure it's positive and within a reasonable range
+            effective_bonus = np.clip(effective_bonus, 0.0, 5.0)
+
+            # Apply bonus to the Q-value of the *alternative* first-stage action
+            # to encourage exploration of the other path.
+            alternative_action = 1 - int(self.last_action1)
+            self.exploration_bonus[alternative_action] = effective_bonus
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, adding the temporary directed exploration bonus.
+        """
+        # Add the temporary bonus calculated in pre_trial to the Q-values
+        q_biased = self.q_stage1 + self.exploration_bonus
+        return self.softmax(q_biased, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

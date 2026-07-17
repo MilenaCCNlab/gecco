@@ -1,0 +1,257 @@
+Here are three new cognitive models that explore mechanisms not yet covered in the previous feedback (specifically: eligibility traces, dynamic transition learning, and memory decay).
+
+### Model 1: Anxiety-Modulated Eligibility Trace
+This model hypothesizes that anxiety affects how "far back" the reward signal propagates immediately. A high eligibility trace ($\lambda$) means the Stage 1 choice is updated strongly by the final reward (Model-Free TD(1)), effectively ignoring the two-step structure. A low $\lambda$ relies more on the step-by-step TD(0) chain. Anxiety might drive a more reactive, "direct" association between choice and outcome (higher $\lambda$).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Eligibility Trace Model.
+    
+    Hypothesis: Anxiety modulates the eligibility trace parameter (lambda). 
+    High anxiety might lead to 'model-free' credit assignment where the 
+    participant connects the final reward directly to the first stage choice, 
+    bypassing the state-value estimation of the middle step.
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate for Q-values.
+    - beta: [0, 10] Inverse temperature for softmax.
+    - w: [0, 1] Weight for Model-Based vs Model-Free control.
+    - lambda_base: [0, 1] Baseline eligibility trace.
+    - lambda_anxiety: [0, 1] Scaling factor for STAI on lambda.
+    
+    Bounds:
+    learning_rate: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    lambda_base: [0, 1]
+    lambda_anxiety: [0, 1]
+    """
+    learning_rate, beta, w, lambda_base, lambda_anxiety = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective lambda based on anxiety
+    # We clip to ensure it stays within valid bounds [0, 1]
+    eff_lambda = lambda_base + (stai_score * lambda_anxiety)
+    if eff_lambda > 1.0: eff_lambda = 1.0
+    if eff_lambda < 0.0: eff_lambda = 0.0
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        # Stage 2 RPE
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Stage 1 Update with Eligibility Trace
+        # The update is a mix of the Stage 1 RPE (based on Stage 2 value)
+        # and the Stage 2 RPE (based on the final reward), controlled by lambda.
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        
+        # Q(s1, a1) += alpha * (delta_1 + lambda * delta_2)
+        q_stage1_mf[action_1[trial]] += learning_rate * (delta_stage1 + eff_lambda * delta_stage2)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Transition Learning
+Standard models assume participants know the transition matrix (0.7/0.3) is fixed. This model assumes participants *learn* the transition matrix over time, and anxiety modulates how volatile they believe the world is (learning rate for transitions). High anxiety might lead to "hyper-updating" of the world model, making the Model-Based component unstable.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Transition Learning Model.
+    
+    Hypothesis: Instead of a fixed transition matrix, the participant learns 
+    transition probabilities dynamically. Anxiety modulates the learning rate 
+    of these transitions (lr_transition). High anxiety results in rapid 
+    updating of the internal model (hyper-vigilance to state changes).
+    
+    Parameters:
+    - lr_reward: [0, 1] Standard learning rate for Q-values (reward learning).
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for Model-Based vs Model-Free control.
+    - lr_trans_base: [0, 1] Baseline learning rate for the transition matrix.
+    - lr_trans_anxiety: [0, 1] Scaling factor for STAI on transition learning.
+    
+    Bounds:
+    lr_reward: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    lr_trans_base: [0, 1]
+    lr_trans_anxiety: [0, 1]
+    """
+    lr_reward, beta, w, lr_trans_base, lr_trans_anxiety = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective transition learning rate
+    lr_trans = lr_trans_base + (stai_score * lr_trans_anxiety)
+    if lr_trans > 1.0: lr_trans = 1.0
+    if lr_trans < 0.0: lr_trans = 0.0
+
+    # Initialize internal model of transitions (start with uniform uncertainty)
+    # Rows: Action 1 (A or U), Cols: State (Planet X or Y)
+    internal_trans_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # MB calculation uses the DYNAMIC internal matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = internal_trans_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial] # 0 for X, 1 for Y
+        chosen_a1 = action_1[trial]
+
+        # --- Update Transition Matrix ---
+        # State estimation update: Move probability toward the observed state
+        # Create a one-hot vector for the observed state
+        observed_trans = np.zeros(2)
+        observed_trans[state_idx] = 1.0
+        
+        # Update the row corresponding to the chosen action
+        # T(a, :) = T(a, :) + lr_trans * (Observed_State - T(a, :))
+        internal_trans_matrix[chosen_a1] += lr_trans * (observed_trans - internal_trans_matrix[chosen_a1])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Reward Updates ---
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += lr_reward * delta_stage2
+        
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += lr_reward * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Memory Decay
+This model posits that anxiety consumes working memory resources, leading to faster forgetting of learned values. While the chosen option is updated via learning, the *unchosen* options decay back to a neutral value (0).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Memory Decay Model.
+    
+    Hypothesis: Anxiety interferes with working memory maintenance. 
+    While chosen actions are updated via reinforcement, unchosen actions 
+    decay toward zero. The rate of this decay is modulated by STAI.
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate for chosen options.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for Model-Based vs Model-Free control.
+    - decay_base: [0, 1] Baseline decay rate for unchosen options.
+    - decay_anxiety: [0, 1] Scaling factor for STAI on decay.
+    
+    Bounds:
+    learning_rate: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    decay_base: [0, 1]
+    decay_anxiety: [0, 1]
+    """
+    learning_rate, beta, w, decay_base, decay_anxiety = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective decay rate
+    decay_rate = decay_base + (stai_score * decay_anxiety)
+    if decay_rate > 1.0: decay_rate = 1.0
+    if decay_rate < 0.0: decay_rate = 0.0
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        
+        # 1. Decay UNCHOSEN options first
+        # Stage 1 unchosen
+        unchosen_a1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_a1] *= (1 - decay_rate)
+        
+        # Stage 2 unchosen (in the current state)
+        unchosen_a2 = 1 - action_2[trial]
+        q_stage2_mf[state_idx, unchosen_a2] *= (1 - decay_rate)
+        
+        # Note: We could also decay the values of the state NOT visited, 
+        # but standard decay models usually focus on the current opportunity set.
+        
+        # 2. Update CHOSEN options via RL
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

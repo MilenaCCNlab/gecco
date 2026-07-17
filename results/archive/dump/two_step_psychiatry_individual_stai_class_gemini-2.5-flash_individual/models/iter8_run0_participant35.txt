@@ -1,0 +1,221 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant, with their high anxiety score (0.725), makes decisions in the two-step task.
+
+### Model 1: Anxiety-Modulated Learning from Rare vs. Common Transitions
+
+**Hypothesis:** This model proposes that high anxiety leads to an altered learning process, where the impact of rewards (or non-rewards) following *rare* transitions is differently weighted compared to common transitions. Specifically, anxiety might amplify the learning rate when experiencing an outcome after a rare transition, reflecting heightened attention or sensitivity to unexpected events. This means the participant might over-adjust their values after an unexpected (rare) outcome, especially if they are anxious.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety leads to an altered learning process,
+    where the impact of rewards (or non-rewards) following *rare* transitions is
+    differently weighted compared to common transitions. Specifically, anxiety might
+    amplify the learning rate when experiencing an outcome after a rare transition,
+    reflecting heightened attention or sensitivity to unexpected events.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Base learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    rare_alpha_multiplier_base: [0, 5] - Baseline multiplier for the learning rate after a rare transition.
+    anxiety_rare_alpha_amplification: [0, 1] - Factor by which STAI score amplifies the rare transition learning rate multiplier.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.rare_alpha_multiplier_base, \
+        self.anxiety_rare_alpha_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective rare alpha multiplier, amplified by anxiety
+        self.effective_rare_alpha_multiplier = np.clip(
+            self.rare_alpha_multiplier_base + self.stai * self.anxiety_rare_alpha_amplification,
+            0.0, 5.0 # Clip to a reasonable maximum amplification
+        )
+        # Ensure alpha_base is within bounds
+        self.alpha_base = np.clip(self.alpha_base, 0.0, 1.0)
+
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with learning rate for stage 1 modulated by transition type
+        (common vs. rare) and anxiety.
+        """
+        # Determine if the transition was rare based on the task description:
+        # Spaceship 0 (A) commonly travels to Planet X (0). Rare is Planet Y (1).
+        # Spaceship 1 (U) commonly travels to Planet Y (1). Rare is Planet X (0).
+        is_rare_transition = (action_1 == 0 and state == 1) or \
+                             (action_1 == 1 and state == 0)
+
+        # Determine the effective learning rate for stage 1
+        current_alpha_stage1 = self.alpha_base
+        if is_rare_transition:
+            current_alpha_stage1 = self.alpha_base * self.effective_rare_alpha_multiplier
+            # Clip the amplified alpha to ensure it doesn't exceed 1.0
+            current_alpha_stage1 = np.clip(current_alpha_stage1, 0.0, 1.0)
+
+        # Stage 2 update (uses base alpha)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_base * delta_2
+
+        # Stage 1 update (uses modulated alpha)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha_stage1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Model-Based Weight and Aversion to Unrewarding States
+
+**Hypothesis:** This model proposes that high anxiety reduces the influence of model-based (planning) control, shifting decisions towards more habitual (model-free) control. Additionally, anxiety makes participants more averse to states (planets) that have recently yielded low rewards, leading them to actively avoid actions that typically lead to such states. This captures a less flexible, more avoidance-driven strategy under anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety reduces the influence of
+    model-based (planning) control, shifting decisions towards more habitual
+    (model-free) control. Additionally, anxiety makes participants more averse
+    to states (planets) that have recently yielded low rewards, leading them
+    to actively avoid actions that typically lead to such states.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (both MF and MB components use this).
+    beta: [0, 10] - Softmax inverse temperature.
+    w_mb_base: [0, 1] - Baseline weight for model-based control (1-w_mb_base for model-free).
+    anxiety_mb_impairment_factor: [0, 1] - Factor by which STAI score reduces the model-based weight.
+    state_aversion_learning_rate: [0, 1] - Learning rate for state aversion.
+    anxiety_state_aversion_impact: [0, 1] - Factor by which STAI score amplifies the impact of state aversion on choice.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb_base, self.anxiety_mb_impairment_factor, \
+        self.state_aversion_learning_rate, self.anxiety_state_aversion_impact = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize state aversion for each planet (state)
+        self.state_aversion = np.zeros(self.n_states) # Aversion for Planet X (0) and Planet Y (1)
+        
+        # Calculate effective model-based weight, reduced by anxiety
+        self.effective_w_mb = np.clip(self.w_mb_base - self.stai * self.anxiety_mb_impairment_factor, 0.0, 1.0)
+        
+        # Ensure alpha and state_aversion_learning_rate are within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.state_aversion_learning_rate = np.clip(self.state_aversion_learning_rate, 0.0, 1.0)
+        self.anxiety_state_aversion_impact = np.clip(self.anxiety_state_aversion_impact, 0.0, 1.0)
+
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a hybrid MB/MF approach,
+        with state aversion influencing the MB component.
+        """
+        q_hybrid = np.zeros(self.n_choices)
+        
+        for a1 in range(self.n_choices):
+            # Model-free value (Q_MF) is the direct value learned for this action
+            q_mf = self.q_stage1[a1]
+            
+            # Model-based value (Q_MB)
+            q_mb = 0.0
+            # Iterate over possible next states (planets)
+            for s_prime in range(self.n_states):
+                # Transition probability from current action a1 to next state s_prime
+                trans_prob = self.T[a1, s_prime]
+                
+                # Expected future reward from s_prime (max Q-value in stage 2)
+                # Apply state aversion to the value coming from s_prime, amplified by anxiety
+                future_value = np.max(self.q_stage2[s_prime]) - \
+                               (self.anxiety_state_aversion_impact * self.stai * self.state_aversion[s_prime])
+                q_mb += trans_prob * future_value
+            
+            # Combine MB and MF values using the anxiety-modulated weight
+            q_hybrid[a1] = self.effective_w_mb * q_mb + (1 - self.effective_w_mb) * q_mf
+            
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using standard TD learning and update state aversion.
+        """
+        # Standard Q-value updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Update state aversion: if reward is 0, increase aversion for the current state
+        if reward == 0:
+            self.state_aversion[state] += self.state_aversion_learning_rate * (1 - self.state_aversion[state])
+        else:
+            # If reward is 1, decrease aversion (or let it decay slowly)
+            self.state_aversion[state] *= (1 - self.state_aversion_learning_rate) # Simple decay
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Outcome-Dependent Switching/Perseveration (Loss Aversion in Switching)
+
+**Hypothesis:** This model proposes that high anxiety makes participants particularly sensitive to non-rewards (0 coins), leading to a stronger tendency to switch away from an option that was just unrewarded ("lose-shift"). Conversely, the tendency to stick with a rewarding option ("win-stay") might have a baseline strength. This captures an anxious avoidance of negative outcomes by rapidly abandoning options that recently led to no reward.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety makes participants
+    particularly sensitive to non-rewards (0 coins), leading to a stronger
+    tendency to switch away from an option that was just unrewarded (lose-shift).
+    Conversely, the tendency to stick with a rewarding option (win-stay) might
+    be less affected or have a baseline strength. This captures an anxious
+    avoidance of negative outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    perseveration_bonus_base: [0, 1] - Baseline bonus applied to Q-value of a chosen action if it was rewarding.
+    switch_penalty_base: [0, 1] - Baseline penalty applied to Q-value of a chosen action if it was unrewarding.
+    anxiety_switch_amplification: [0, 1] - Factor by which STAI score amplifies the switch penalty after a non-reward.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.perseveration_bonus_base, \
+        self.switch_penalty_base, self.anxiety_switch_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Ensure parameters are within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.perseveration_bonus_base = np.clip(self.perseveration_bonus_base, 0.0, 1.0)
+        self.switch_penalty_base = np.clip(self.switch_penalty_base, 0.0, 1.0)
+        self.anxiety_switch_amplification = np.clip(self.anxiety_switch_amplification, 0.0, 1.0)
+
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying outcome-dependent
+        perseveration or switching biases, amplified by anxiety for switching.
+        """
+        biased_q_stage1 = np.copy(self.q_stage1)
+        
+        # Apply bias only from the second trial onwards, after last_action1 and last_reward are set
+        if self.trial > 0 and self.last_action1 is not None and self.last_reward is not None:
+            
+            # Calculate effective switch penalty, amplified by anxiety
+            # The (1 + ...) ensures that anxiety always increases the penalty, not decreases it.
+            effective_switch_penalty = self.switch_penalty_base * (1 + self.stai * self.anxiety_switch_amplification)
+            
+            if self.last_reward == 1: # Win-stay
+                # Boost the Q-value of the action that was just rewarding
+                biased_q_stage1[self.last_action1] += self.perseveration_bonus_base
+            else: # Lose-shift
+                # Penalize the Q-value of the action that just led to 0 reward
+                biased_q_stage1[self.last_action1] -= effective_switch_penalty
+                # For a two-choice task, penalizing one option implicitly makes the other more attractive.
+                # An explicit boost to the alternative option could also be added here if desired.
+
+        return self.softmax(biased_q_stage1, self.beta)
+
+    # value_update uses default TD learning.
+    # post_trial uses default to track last_action1 and last_reward.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

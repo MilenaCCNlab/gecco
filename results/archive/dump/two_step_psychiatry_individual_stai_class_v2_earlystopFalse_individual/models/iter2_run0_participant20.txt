@@ -1,0 +1,154 @@
+### Cognitive Model 1: Anxiety-Modulated Risk Aversion
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Risk Aversion (Mean-Variance Tradeoff).
+    
+    This model hypothesizes that high anxiety leads to an intolerance of uncertainty.
+    The participant tracks not just the expected value (Q) of each spaceship, but also 
+    the variance (uncertainty) of the rewards received from it.
+    
+    The decision is based on a risk-adjusted value:
+    Q_net(a) = Q_learned(a) - (risk_sensitivity * STAI * sqrt(Variance(a)))
+    
+    Anxious participants will penalize options that have highly variable outcomes, 
+    preferring consistency even if the expected value is slightly lower.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]            (Learning rate for both Mean and Variance)
+    beta: [0, 10]            (Inverse temperature)
+    risk_sensitivity: [0, 5] (Scaling factor for variance penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.risk_sensitivity = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance of Q-values. 
+        # Initial variance is set to 0.25 (max variance for a Bernoulli variable [0,1])
+        self.q_var_stage1 = 0.25 * np.ones(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate risk-adjusted values
+        # We use standard deviation (sqrt of variance) as the measure of risk
+        risk_penalty = self.risk_sensitivity * self.stai * np.sqrt(self.q_var_stage1)
+        q_risk_adjusted = self.q_stage1 - risk_penalty
+        
+        return self.softmax(q_risk_adjusted, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Mean
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update Stage 1 Variance
+        # Var_new = Var_old + alpha * ((Reward - Q_old)^2 - Var_old)
+        # We use the prediction error squared as the instantaneous variance estimate
+        sq_error = delta_1 ** 2
+        self.q_var_stage1[action_1] += self.alpha * (sq_error - self.q_var_stage1[action_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Cognitive Model 2: Anxiety-Modulated Win-Stay Bias
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven "Win-Stay" Amplification.
+    
+    This model hypothesizes that anxiety specifically amplifies the urge to cling to 
+    sources of safety (rewards). While general stickiness repeats any action, 
+    this model posits that anxious participants are hyper-sensitive to "success" 
+    and will perseverate on a choice specifically if it was just rewarded.
+    
+    A bonus is added to the previously chosen action ONLY if the last trial was rewarded.
+    
+    Q_net(a) = Q_learned(a) + (win_stickiness * STAI * IsLastAction(a) * WasRewarded)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          (Learning rate)
+    beta: [0, 10]          (Inverse temperature)
+    win_stickiness: [0, 5] (Magnitude of bias after a win)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.win_stickiness = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_biased = self.q_stage1.copy()
+        
+        # Apply bonus only if the previous trial existed, was the same action, AND was rewarded
+        if self.last_action1 is not None and self.last_reward is not None:
+            if self.last_reward > 0: # If last trial was a "Win"
+                bonus = self.win_stickiness * self.stai
+                q_biased[int(self.last_action1)] += bonus
+                
+        return self.softmax(q_biased, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Cognitive Model 3: Anxiety-Modulated Rare Transition Avoidance
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Structural Aversion (Rare Transition Penalty).
+    
+    This model hypothesizes that anxious participants are averse to "loss of control" 
+    represented by rare transitions. Even if a rare transition leads to a reward, 
+    the unexpected nature of the transition is aversive.
+    
+    If the previous trial involved a Rare transition (e.g., Spaceship A -> Planet Y),
+    the participant applies a penalty to that spaceship in the next trial, regardless of the outcome.
+    
+    Q_net(a) = Q_learned(a) - (rare_penalty * STAI * IsLastAction(a) * WasRareTransition)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate)
+    beta: [0, 10]        (Inverse temperature)
+    rare_penalty: [0, 5] (Magnitude of penalty after a rare transition)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_penalty = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_biased = self.q_stage1.copy()
+        
+        if self.last_action1 is not None and self.last_state is not None:
+            # Determine if the last transition was Rare
+            # Common: 0->0, 1->1. Rare: 0->1, 1->0.
+            # We can check this by seeing if action != state (assuming 0->0 and 1->1 mapping)
+            is_rare = (int(self.last_action1) != int(self.last_state))
+            
+            if is_rare:
+                penalty = self.rare_penalty * self.stai
+                q_biased[int(self.last_action1)] -= penalty
+                
+        return self.softmax(q_biased, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

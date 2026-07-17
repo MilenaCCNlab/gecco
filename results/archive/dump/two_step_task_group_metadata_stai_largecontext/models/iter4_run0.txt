@@ -1,0 +1,253 @@
+Here are three new cognitive models implemented as Python functions, based on the hypotheses of degraded structural knowledge, asymmetric learning from failure, and intermittent resource failure.
+
+### Model 1: The "Stress-Shielding" Hypothesis (Anxiety Degrades Transition Knowledge)
+This model posits that anxiety doesn't just reduce the *weight* of model-based control, but degrades the *accuracy* of the internal model itself. High anxiety participants perceive the world as more chaotic, effectively "flattening" their internal transition matrix toward randomness (0.5/0.5) rather than the true structure (0.7/0.3).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety degrades the accuracy of the Model-Based transition matrix.
+    High anxiety blurs the distinction between common and rare transitions, making
+    the MB system less effective even if it is used.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - inverse_temperature: [0, 10] Softmax beta.
+    - mb_weight: [0, 1] Mixing weight for Model-Based vs Model-Free.
+    - transition_blur: [0, 1] How much STAI blurs the transition matrix. 
+      0 = Perfect knowledge (0.7/0.3), 1 = Max blur based on STAI.
+    
+    Bounds:
+    learning_rate: [0, 1]
+    inverse_temperature: [0, 10]
+    mb_weight: [0, 1]
+    transition_blur: [0, 1]
+    """
+    learning_rate, inverse_temperature, mb_weight, transition_blur = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+    
+    # Initialize Q-values
+    # Stage 1: 2 actions (Spaceships A, U)
+    q_stage1_mf = np.zeros(2) 
+    # Stage 2: 2 states (Planets X, Y) x 2 actions (Aliens)
+    q_stage2 = np.zeros((2, 2)) 
+    
+    # True transition probabilities
+    true_common_prob = 0.7
+    
+    # Calculate the subjective transition matrix based on STAI
+    # If transition_blur is high and STAI is high, prob moves from 0.7 towards 0.5
+    # subjective_p = 0.7 - (0.2 * STAI * blur_param)
+    # Max distortion (STAI=1, blur=1) results in 0.5 (randomness)
+    distortion = 0.2 * stai * transition_blur
+    subjective_common = true_common_prob - distortion
+    subjective_rare = 1.0 - subjective_common
+    
+    # Matrix: Row 0 (Spaceship A) -> [Prob X, Prob Y]
+    # Matrix: Row 1 (Spaceship U) -> [Prob X, Prob Y]
+    # A usually goes to X (idx 0), U usually goes to Y (idx 1)
+    transition_matrix = np.array([
+        [subjective_common, subjective_rare], 
+        [subjective_rare, subjective_common]
+    ])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        
+        # Model-Based Value Calculation
+        # V(State) = max(Q_stage2(State, action))
+        max_q_stage2 = np.max(q_stage2, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Integrated Q-value
+        q_net = (mb_weight * q_stage1_mb) + ((1 - mb_weight) * q_stage1_mf)
+        
+        # Softmax Choice 1
+        exp_q1 = np.exp(inverse_temperature * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        current_state = state[trial] # 0 for X, 1 for Y
+        
+        # Standard Q-learning for Stage 2
+        exp_q2 = np.exp(inverse_temperature * q_stage2[current_state])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        
+        # Prediction Errors
+        # Stage 2 PE (Reward - Q_stage2)
+        pe_2 = reward[trial] - q_stage2[current_state, action_2[trial]]
+        
+        # Stage 1 PE (Q_stage2 - Q_stage1_MF)
+        # Note: We use the value of the state actually reached
+        value_state_reached = np.max(q_stage2[current_state])
+        pe_1 = value_state_reached - q_stage1_mf[action_1[trial]]
+        
+        # Update Q-values
+        q_stage2[current_state, action_2[trial]] += learning_rate * pe_2
+        q_stage1_mf[action_1[trial]] += learning_rate * pe_1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: The "Safety-Seeking" Hypothesis (Anxiety Amplifies Negative Learning)
+This model tests the idea that anxiety creates a specific hypersensitivity to "loss" (receiving 0 coins). Instead of a single learning rate, the model splits learning into positive ($\alpha_{pos}$) and negative ($\alpha_{neg}$) components. The STAI score specifically modulates the magnitude of the negative learning rate, making anxious individuals update their beliefs more drastically after failure.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety amplifies learning from negative outcomes (Safety Seeking).
+    STAI modulates the ratio between learning from reward (1.0) and non-reward (0.0).
+    
+    Parameters:
+    - base_lr: [0, 1] Base learning rate for positive outcomes.
+    - anxiety_loss_amp: [0, 5] Multiplier for STAI to boost negative learning rate.
+      alpha_neg = base_lr * (1 + anxiety_loss_amp * STAI)
+    - inverse_temperature: [0, 10] Softmax beta.
+    - mb_weight: [0, 1] Mixing weight for Model-Based vs Model-Free.
+    
+    Bounds:
+    base_lr: [0, 1]
+    anxiety_loss_amp: [0, 5]
+    inverse_temperature: [0, 10]
+    mb_weight: [0, 1]
+    """
+    base_lr, anxiety_loss_amp, inverse_temperature, mb_weight = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+    
+    # Define learning rates
+    alpha_pos = base_lr
+    # Negative learning rate is boosted by anxiety. 
+    # We clip at 1.0 to ensure stability.
+    alpha_neg = min(1.0, base_lr * (1.0 + (anxiety_loss_amp * stai)))
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2 = np.zeros((2, 2))
+    
+    # Standard transition matrix
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        max_q_stage2 = np.max(q_stage2, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = (mb_weight * q_stage1_mb) + ((1 - mb_weight) * q_stage1_mf)
+        
+        exp_q1 = np.exp(inverse_temperature * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        current_state = state[trial]
+        exp_q2 = np.exp(inverse_temperature * q_stage2[current_state])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        # Determine which learning rate to use based on outcome
+        # In this task, reward is 0 or 1. 
+        current_lr = alpha_pos if reward[trial] > 0 else alpha_neg
+        
+        # Stage 2 Update
+        pe_2 = reward[trial] - q_stage2[current_state, action_2[trial]]
+        q_stage2[current_state, action_2[trial]] += current_lr * pe_2
+        
+        # Stage 1 Update
+        # We apply the specific learning rate to the MF update as well
+        value_state_reached = np.max(q_stage2[current_state])
+        pe_1 = value_state_reached - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_lr * pe_1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: The "Tunnel Vision" Hypothesis (Anxiety Causes MB Lapses)
+This model treats anxiety as a resource constraint. Instead of a continuous weighting parameter $w$, the agent attempts to use Model-Based control but suffers "lapses" proportional to their anxiety. During a lapse, the agent reverts to a pure Model-Free strategy (or random guessing, though here we model it as falling back to habit/MF) because the cognitive load of the tree search is too high.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety causes intermittent failure of the Model-Based system (Tunnel Vision).
+    Instead of a constant weight, anxiety defines the probability of a 'lapse' where
+    w becomes 0 for that trial.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - inverse_temperature: [0, 10] Softmax beta.
+    - base_w: [0, 1] The participant's ideal Model-Based weight when not anxious.
+    - lapse_sensitivity: [0, 1] How strongly STAI induces MB failure.
+      Effective w = base_w * (1 - (lapse_sensitivity * STAI))
+    
+    Bounds:
+    learning_rate: [0, 1]
+    inverse_temperature: [0, 10]
+    base_w: [0, 1]
+    lapse_sensitivity: [0, 1]
+    """
+    learning_rate, inverse_temperature, base_w, lapse_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2 = np.zeros((2, 2))
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    # Calculate the effective weight for this participant
+    # High anxiety reduces the effective weight by increasing the probability
+    # that the MB system is disengaged.
+    # If lapse_sensitivity is 0, anxiety has no effect.
+    # If lapse_sensitivity is 1 and STAI is 1, effective_w becomes 0 (Pure MF).
+    effective_w = base_w * (1.0 - (lapse_sensitivity * stai))
+    
+    # Ensure bounds
+    effective_w = max(0.0, min(1.0, effective_w))
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        max_q_stage2 = np.max(q_stage2, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # We use the effective_w which has been discounted by anxiety
+        q_net = (effective_w * q_stage1_mb) + ((1 - effective_w) * q_stage1_mf)
+        
+        exp_q1 = np.exp(inverse_temperature * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        current_state = state[trial]
+        exp_q2 = np.exp(inverse_temperature * q_stage2[current_state])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        pe_2 = reward[trial] - q_stage2[current_state, action_2[trial]]
+        q_stage2[current_state, action_2[trial]] += learning_rate * pe_2
+        
+        value_state_reached = np.max(q_stage2[current_state])
+        pe_1 = value_state_reached - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * pe_1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

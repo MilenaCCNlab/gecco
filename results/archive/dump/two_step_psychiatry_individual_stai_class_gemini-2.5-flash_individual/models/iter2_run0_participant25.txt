@@ -1,0 +1,210 @@
+Here are three new cognitive models, each proposing a different cognitive strategy modulated by the participant's medium anxiety (STAI score of 0.325).
+
+### ParticipantModel1: Anxiety-Modulated Choice Bias
+
+```python
+import numpy as np # Ensure numpy is available for array operations
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Choice Bias.
+    This model proposes that the participant has a strong, action-specific bias towards
+    choosing spaceship 1.0 and alien 0.0, independent of their learned values. This bias is
+    modulated by anxiety, such that medium anxiety (stai score) enhances the strength of
+    this pre-existing bias. This leads to more rigid choices for these preferred options
+    and potentially reduced exploration of alternatives, consistent with a pattern of
+    sticking to familiar actions under uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for updating Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice, controlling exploration vs. exploitation.
+    base_choice_bias: [0, 5] - Base strength of the bias added to Q-values for spaceship 1.0 and alien 0.0.
+                               This allows for strong initial preferences.
+    stai_choice_bias_factor: [0, 2] - Factor by which STAI score linearly increases the choice bias.
+                                        A value of 0 means no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.base_choice_bias, self.stai_choice_bias_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective choice bias based on the base rate and STAI score.
+        # Medium anxiety (stai=0.325) will increase the bias if stai_choice_bias_factor > 0.
+        self.effective_choice_bias = self.base_choice_bias + self.stai_choice_bias_factor * self.stai
+        # Clamp to ensure it's within a reasonable, positive range.
+        self.effective_choice_bias = np.clip(self.effective_choice_bias, 0, 10)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities with a specific choice bias."""
+        biased_q_stage1 = np.copy(self.q_stage1)
+        # Add bias to spaceship 1.0 (index 1)
+        biased_q_stage1[1] += self.effective_choice_bias 
+        return self.softmax(biased_q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities with a specific choice bias."""
+        biased_q_stage2 = np.copy(self.q_stage2[state])
+        # Add bias to alien 0.0 (index 0)
+        biased_q_stage2[0] += self.effective_choice_bias
+        return self.softmax(biased_q_stage2, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values after observing outcome using standard TD learning.
+        The bias is applied only during action selection (policy), not value learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # The value of the chosen stage 1 action is updated towards the *updated* Q-value of the chosen stage 2 action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### ParticipantModel2: Anxiety-Modulated Transition Learning
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Transition Learning.
+    This model proposes that the participant learns the transition probabilities between
+    spaceships and planets. Medium anxiety (stai score) is hypothesized to increase the
+    learning rate for these transition probabilities, especially when unexpected transitions
+    occur. This makes the participant more reactive to environmental changes and potentially
+    leads to an overestimation of rare transition probabilities, impacting model-based planning.
+    The participant blends model-free and model-based control, using these anxiety-modulated
+    transition beliefs for the model-based component.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Reward learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    omega: [0, 1] - Blending parameter for model-based (omega=1) vs. model-free (omega=0) control.
+    trans_alpha_base: [0, 1] - Base learning rate for updating internal transition probabilities.
+    stai_trans_mod_factor: [0, 1] - Factor by which STAI score linearly increases the transition learning rate.
+                                    A value of 0 means no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega, self.trans_alpha_base, self.stai_trans_mod_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize perceived transition probabilities (participant's internal model)
+        # Start with the true probabilities or a flat prior. Here, using self.T as initial belief.
+        self.learned_T = self.T.copy()
+        # Calculate the effective transition learning rate based on base rate and STAI score.
+        self.effective_trans_alpha = self.trans_alpha_base + self.stai_trans_mod_factor * self.stai
+        self.effective_trans_alpha = np.clip(self.effective_trans_alpha, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values and transition probabilities.
+        """
+        # --- Stage 2 Q-value update (Model-Free) ---
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # --- Update Transition Probabilities ---
+        # Update the observed transition for the chosen action_1.
+        # The participant's belief about P(next_state | action_1) moves towards the observed outcome.
+        observed_state_vec = np.zeros(self.n_states)
+        observed_state_vec[state] = 1
+
+        self.learned_T[action_1, :] += self.effective_trans_alpha * (observed_state_vec - self.learned_T[action_1, :])
+        # Renormalize to ensure probabilities sum to 1.
+        self.learned_T[action_1, :] = self.learned_T[action_1, :] / np.sum(self.learned_T[action_1, :])
+        # Clip to prevent extreme values that could cause issues with log-likelihood or division by zero.
+        self.learned_T = np.clip(self.learned_T, 1e-6, 1 - 1e-6)
+
+        # --- Stage 1 Q-value update (Model-Free) ---
+        # self.q_stage1 stores model-free values, blending occurs in policy_stage1.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using blended model-free and model-based values.
+        The model-based component uses the anxiety-modulated learned transition probabilities.
+        """
+        # Model-free values are self.q_stage1
+        
+        # Model-based values: Calculate the expected value of each stage 1 action
+        # by planning through the learned transitions and the current stage 2 Q-values.
+        V_stage2 = np.max(self.q_stage2, axis=1) # Value of the optimal action at stage 2 for each planet
+        q_mb_1 = np.array([np.sum(self.learned_T[a] * V_stage2) for a in range(self.n_choices)])
+        
+        # Blended Q-values for stage 1 choices
+        blended_q_stage1 = (1 - self.omega) * self.q_stage1 + self.omega * q_mb_1
+        
+        return self.softmax(blended_q_stage1, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### ParticipantModel3: Anxiety-Modulated Reward Memory Decay
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Reward Memory Decay.
+    This model proposes that the participant's memory for past rewards, specifically for
+    unchosen options, decays over time. Medium anxiety (stai score) is hypothesized to
+    increase this decay rate, leading to a stronger reliance on recent outcomes and potentially
+    more volatile value estimates. This makes the participant more reactive to immediate
+    feedback and less influenced by older experiences for options not recently chosen.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for chosen actions.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    decay_base: [0, 1] - Base rate at which unchosen Q-values decay towards a neutral value (0.5).
+    stai_decay_factor: [0, 1] - Factor by which STAI score linearly increases the decay rate.
+                                A value of 0 means no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_base, self.stai_decay_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective decay rate based on base rate and STAI score.
+        self.effective_decay_rate = self.decay_base + self.stai_decay_factor * self.stai
+        self.effective_decay_rate = np.clip(self.effective_decay_rate, 0, 1)
+        # Neutral value for decay, typically 0.5 for binary rewards (0 or 1).
+        self.neutral_value = 0.5
+
+    def pre_trial(self) -> None:
+        """
+        Called before each trial. Decay the Q-values of all options.
+        The value_update method will then update the chosen options, effectively
+        making this decay apply only to the unchosen options.
+        """
+        # Decay stage 1 Q-values towards the neutral value
+        self.q_stage1 = (1 - self.effective_decay_rate) * self.q_stage1 + self.effective_decay_rate * self.neutral_value
+        
+        # Decay stage 2 Q-values towards the neutral value
+        self.q_stage2 = (1 - self.effective_decay_rate) * self.q_stage2 + self.effective_decay_rate * self.neutral_value
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome using standard TD learning for chosen actions.
+        Decay for unchosen actions is handled in the pre_trial hook.
+        """
+        # Stage 2 update for the chosen action
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update for the chosen action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

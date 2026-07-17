@@ -1,0 +1,169 @@
+As a cognitive scientist and Python programmer, I will now propose three distinct cognitive models to explain this participant's decision-making process. Given the participant's high score on the State-Trait Anxiety Inventory (STAI), each model will incorporate a specific hypothesis about how anxiety influences learning and choice in this two-step task.
+
+### Model 1: Anxiety-Amplified Policy Noise and Surprise-Driven Learning
+
+This model hypothesizes that anxiety has two primary effects: it increases the randomness of choices and heightens sensitivity to surprising outcomes. Anxious individuals may exhibit more volatile behavior (modeled as a lower softmax temperature) and over-adjust their beliefs after an unexpected reward or lack thereof (modeled as a prediction-error-sensitive learning rate).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases behavioral stochasticity and enhances learning from surprising outcomes.
+    The model posits that the participant's anxiety (STAI score) makes their choices more random by reducing the decision temperature (beta).
+    Furthermore, anxiety amplifies the learning rate in response to large prediction errors (surprises), causing more drastic value updates when outcomes violate expectations.
+
+    Parameter Bounds:
+    -----------------
+    base_alpha: [0, 1]     (Baseline learning rate)
+    base_beta: [0, 10]     (Baseline inverse temperature for softmax)
+    surprise_gain: [0, 5]  (Sensitivity to prediction error magnitude for learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.base_alpha, self.base_beta, self.surprise_gain = model_parameters
+        
+    def init_model(self) -> None:
+        # Effective beta is scaled down by anxiety, leading to more random choices.
+        # Adding a small epsilon to prevent beta from becoming zero.
+        self.effective_beta = self.base_beta * (1.0 - self.stai + 1e-6)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes stage-1 action probabilities using anxiety-modulated beta."""
+        return self.softmax(self.q_stage1, self.effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Computes stage-2 action probabilities using anxiety-modulated beta."""
+        return self.softmax(self.q_stage2[state], self.effective_beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values using a learning rate that is boosted by surprising outcomes,
+        an effect that is amplified by anxiety.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Anxiety amplifies the effect of surprise on the learning rate
+        surprise_boost = (self.surprise_gain * self.stai) * np.abs(delta_2)
+        alpha_effective = np.clip(self.base_alpha + surprise_boost, 0, 1)
+        
+        self.q_stage2[state, action_2] += alpha_effective * delta_2
+        
+        # Stage 1 update (using the base learning rate for stability)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.base_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Aversion to Transition Uncertainty
+
+This model proposes that anxiety biases the participant's planning process. Specifically, it suggests that highly anxious individuals are averse to uncertainty in the task's transition structure. They will penalize choices (spaceships) that lead to less predictable outcomes (planets), preferring a spaceship with a more reliable transition, even if the expected value is slightly lower. This aversion is directly proportional to their anxiety level.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety biases model-based planning by creating an aversion to transition uncertainty.
+    This model implements a hybrid of model-based and model-free control. The key feature is that the
+    model-based valuation is penalized by the uncertainty (entropy) of the spaceship-to-planet transitions.
+    The strength of this penalty is scaled by the participant's STAI score, reflecting a strategic avoidance
+    of ambiguity under anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                 (Learning rate for value updates)
+    beta: [0, 10]                (Inverse temperature for softmax)
+    w: [0, 1]                    (Weighting of model-based vs. model-free control)
+    uncertainty_aversion: [0, 5] (Base sensitivity to transition entropy)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w, self.uncertainty_aversion = model_parameters
+
+    def init_model(self) -> None:
+        """Pre-calculates the entropy of the transition matrix."""
+        # Add a small epsilon to prevent log(0)
+        T_stable = self.T + 1e-12
+        self.transition_entropies = -np.sum(T_stable * np.log2(T_stable), axis=1)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a hybrid value signal that
+        penalizes choices with high transition uncertainty.
+        """
+        # Model-Based Value: Expected value of stage 1 actions
+        q_mb = self.T @ np.max(self.q_stage2, axis=1)
+        
+        # Model-Free Value: Stored temporal-difference value
+        q_mf = self.q_stage1
+        
+        # Anxiety-driven penalty for transition uncertainty
+        penalty = self.uncertainty_aversion * self.stai * self.transition_entropies
+        
+        # Combine MF and penalized MB values
+        q_hybrid = self.w * (q_mb - penalty) + (1.0 - self.w) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+    
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates both model-free (stage 1) and model-based (stage 2) values
+        using a standard TD-learning rule. This is a hybrid SARSA-like update.
+        """
+        # Update stage 2 Q-value
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update stage 1 Q-value using the updated stage 2 value as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Perseveration Following Non-Reward
+
+This model tests the hypothesis that anxiety induces cognitive inflexibility, specifically after negative feedback. According to this model, when the participant receives no reward (0 coins), their anxiety makes them more likely to perseverate—that is, to repeat their initial spaceship choice on the very next trial. This represents a simple, maladaptive heuristic where a negative outcome triggers choice repetition rather than strategic adjustment.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes perseverative behavior following negative feedback.
+    This model suggests that after a non-rewarded trial (receiving 0 coins), the participant
+    develops a temporary bias to repeat their previous stage-1 choice. This captures
+    anxiety-induced cognitive inflexibility. The strength of this perseverative bias is
+    directly scaled by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                  (Learning rate)
+    beta: [0, 10]                 (Inverse temperature for softmax)
+    perseveration_strength: [0, 5] (Base magnitude of the perseverative bias)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.perseveration_strength = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize last reward to a non-zero value to prevent perseveration on trial 0."""
+        self.last_reward = 1.0
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 action probabilities. If the last trial was not rewarded,
+        a bonus is added to the value of the previously chosen action.
+        """
+        q_effective = self.q_stage1.copy()
+        
+        # Check if the last trial resulted in no reward and it's not the first trial
+        if self.trial > 0 and self.last_reward == 0.0:
+            # Anxiety scales the strength of the perseverative bias
+            perseveration_bonus = self.perseveration_strength * self.stai
+            q_effective[self.last_action1] += perseveration_bonus
+            
+        return self.softmax(q_effective, self.beta)
+
+    # This model uses the default value_update and post_trial methods from the base class,
+    # as the core hypothesis is implemented entirely within the stage-1 policy.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

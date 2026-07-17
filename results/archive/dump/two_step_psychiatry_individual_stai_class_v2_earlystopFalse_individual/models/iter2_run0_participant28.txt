@@ -1,0 +1,126 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety accelerates "forgetting" or value decay.
+    High anxiety participants have difficulty maintaining value representations 
+    for options they didn't choose, causing those values to decay rapidly 
+    back to a neutral prior (0.5). This reflects attentional narrowing or 
+    working memory interference associated with anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    decay_coef: [0, 1] (Scales the decay rate by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_coef = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for the chosen path
+        super().value_update(action_1, state, action_2, reward)
+
+        # Calculate decay rate based on anxiety
+        # High STAI -> High decay
+        decay_rate = self.decay_coef * self.stai
+        decay_rate = np.clip(decay_rate, 0.0, 1.0)
+
+        # Decay unchosen Stage 1 option towards 0.5
+        unchosen_a1 = 1 - action_1
+        self.q_stage1[unchosen_a1] = (1 - decay_rate) * self.q_stage1[unchosen_a1] + (decay_rate * 0.5)
+
+        # Decay unchosen Stage 2 option (in the current state) towards 0.5
+        unchosen_a2 = 1 - action_2
+        self.q_stage2[state, unchosen_a2] = (1 - decay_rate) * self.q_stage2[state, unchosen_a2] + (decay_rate * 0.5)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety impairs Model-Based (planning) control.
+    This model is a hybrid Model-Based / Model-Free learner.
+    The weight `w` given to the Model-Based component is negatively modulated by anxiety.
+    High anxiety participants rely more on the Model-Free (habitual) system.
+
+    w = w_max * (1 - STAI)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_max: [0, 1] (Maximum model-based weight for a low-anxiety person)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Values (from standard Q-learning in q_stage1)
+        q_mf = self.q_stage1
+
+        # 2. Model-Based Values (Planning)
+        # Q_MB(a) = Sum_s' [ T(s'|a) * max_a' Q_stage2(s', a') ]
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            expected_val = 0
+            for s_next in range(self.n_states):
+                # Transition probability T[action, next_state]
+                prob = self.T[a, s_next]
+                # Value of best action in next state
+                max_q2 = np.max(self.q_stage2[s_next])
+                expected_val += prob * max_q2
+            q_mb[a] = expected_val
+
+        # 3. Calculate Mixing Weight based on Anxiety
+        # Higher anxiety -> Lower w -> More Model-Free
+        w = self.w_max * (1.0 - self.stai)
+        w = np.clip(w, 0.0, 1.0)
+
+        # 4. Combined Value
+        q_net = w * q_mb + (1 - w) * q_mf
+
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces "Subjective Loss" for neutral outcomes.
+    Anxious participants perceive the absence of a reward (0 coins) not as neutral,
+    but as a painful loss. This model transforms the reward signal.
+    
+    If Reward = 0: Effective Reward = -1 * pain_param * STAI
+    If Reward = 1: Effective Reward = 1
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    pain_param: [0, 5] (Magnitude of subjective loss scaling)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pain_param = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Transform reward based on anxiety
+        if reward == 0:
+            # Anxious participants treat 0 as a negative value
+            effective_reward = -1.0 * self.pain_param * self.stai
+        else:
+            effective_reward = reward
+
+        # --- Stage 2 Update ---
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # --- Stage 1 Update ---
+        # We use the updated Stage 2 value as the target for Stage 1 (TD-0)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

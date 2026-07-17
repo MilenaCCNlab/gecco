@@ -1,0 +1,238 @@
+Here are 3 new cognitive models based on the two-step task, incorporating STAI scores into distinct mechanisms not previously listed in the feedback.
+
+### Model 1: Anxiety-Driven Heuristic Mixture
+This model hypothesizes that anxiety reduces the cognitive resources available for complex reinforcement learning (both Model-Based and Model-Free). Instead, anxious participants rely partially on a simple, low-effort "Win-Stay, Lose-Shift" (WSLS) heuristic. The final choice probability is a mixture of the standard RL policy and the WSLS rule, with the mixture weight determined by the STAI score.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Heuristic Mixture Model.
+    
+    Hypothesis: High anxiety leads to a reliance on simple heuristics due to 
+    cognitive load. The model mixes a standard Hybrid RL policy with a 
+    "Win-Stay, Lose-Shift" (WSLS) heuristic. The weight of the WSLS strategy 
+    increases with anxiety.
+    
+    Parameters:
+    - learning_rate: [0, 1] Q-learning rate.
+    - beta: [0, 10] Inverse temperature for the RL component.
+    - w: [0, 1] Weight between MB and MF control (0=MF, 1=MB).
+    - heuristic_weight: [0, 1] Max weight of the WSLS heuristic, scaled by STAI.
+    """
+    learning_rate, beta, w, heuristic_weight = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate the mixing parameter based on anxiety
+    # If STAI is high, rho is high -> more reliance on WSLS
+    rho = heuristic_weight * stai_score
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+
+        # --- RL Policy Calculation ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_rl = exp_q1 / np.sum(exp_q1)
+        
+        # --- Heuristic Policy Calculation (Win-Stay, Lose-Shift) ---
+        probs_wsls = np.array([0.5, 0.5]) # Default for first trial
+        if last_action_1 != -1:
+            probs_wsls = np.zeros(2)
+            if last_reward == 1:
+                # Win-Stay: 100% prob to repeat last action
+                probs_wsls[last_action_1] = 1.0
+            else:
+                # Lose-Shift: 100% prob to switch
+                probs_wsls[1 - last_action_1] = 1.0
+        
+        # --- Mixture ---
+        # Final probability is weighted average of RL policy and Heuristic policy
+        probs_final = (1 - rho) * probs_rl + rho * probs_wsls
+        
+        p_choice_1[trial] = probs_final[action_1[trial]]
+        
+        # Record for next trial heuristic
+        last_action_1 = action_1[trial]
+        state_idx = state[trial]
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Record reward for next trial heuristic
+        last_reward = reward[trial]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Linked Rare Transition Penalty
+This model posits that anxious individuals have a specific "Intolerance of Uncertainty." When a rare transition occurs (e.g., Spaceship A goes to Planet Y), they perceive this as a violation of their internal model or a negative "surprise." Consequently, they penalize the Model-Free value of the chosen action, regardless of whether they eventually got a coin or not.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Linked Rare Transition Penalty Model.
+    
+    Hypothesis: Anxious individuals exhibit Intolerance of Uncertainty. 
+    When a 'rare' transition occurs (probability 0.3), they apply a specific 
+    penalty to the Model-Free Q-value of the chosen action, discouraging 
+    future selection of that spaceship, independent of reward outcome.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - penalty_mag: [0, 2] Magnitude of the penalty applied upon rare transitions, scaled by STAI.
+    """
+    learning_rate, beta, w, penalty_mag = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # The penalty is proportional to anxiety
+    surprise_penalty = penalty_mag * stai_score
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # Policy Stage 1
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        chosen_action = action_1[trial]
+
+        # Policy Stage 2
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[chosen_action]
+        q_stage1_mf[chosen_action] += learning_rate * delta_stage1
+        
+        # --- Anxiety Mechanism: Rare Transition Penalty ---
+        # Check if transition was rare (prob < 0.5)
+        # Matrix: Row 0 is Action A, Row 1 is Action U. Col 0 is X, Col 1 is Y.
+        transition_prob = transition_matrix[chosen_action, state_idx]
+        
+        if transition_prob < 0.5:
+            # Apply penalty for the "surprise" / uncertainty
+            q_stage1_mf[chosen_action] -= surprise_penalty
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven State Familiarity Bias
+Unlike standard perseveration (repeating the same motor action), this model suggests anxious participants seek *environmental familiarity*. They are biased towards choosing the spaceship that is most likely to return them to the *planet* (state) they visited on the previous trial. This is a "safety seeking" behavior directed at the environment rather than the action itself.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven State Familiarity Bias Model.
+    
+    Hypothesis: Anxiety drives a preference for familiar environments (Planets). 
+    Participants receive a value bonus for the action that is most likely 
+    to lead to the *previous trial's planet*, regardless of which action 
+    was actually taken previously.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - state_stickiness: [0, 5] Bias towards the previous planet, scaled by STAI.
+    """
+    learning_rate, beta, w, state_stickiness = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    familiarity_bias = state_stickiness * stai_score
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_state_idx = -1
+
+    for trial in range(n_trials):
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # --- Anxiety Mechanism: State Familiarity Bonus ---
+        if last_state_idx != -1:
+            # Calculate probability of reaching the LAST state for each action
+            # Action 0 (A) -> prob of reaching last_state
+            prob_reach_last_A = transition_matrix[0, last_state_idx]
+            # Action 1 (U) -> prob of reaching last_state
+            prob_reach_last_U = transition_matrix[1, last_state_idx]
+            
+            # Add bonus proportional to how likely the action is to take us back
+            q_net[0] += familiarity_bias * prob_reach_last_A
+            q_net[1] += familiarity_bias * prob_reach_last_U
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        last_state_idx = state_idx # Update for next trial
+
+        # Policy Stage 2
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

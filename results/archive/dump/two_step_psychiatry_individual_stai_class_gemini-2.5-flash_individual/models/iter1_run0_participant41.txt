@@ -1,0 +1,146 @@
+Here are 3 cognitive models proposing different mechanisms for how the participant's high anxiety (STAI score 0.675) might influence their decision-making in the two-step task.
+
+### Model 1: Anxiety-Modulated Asymmetric Learning Rates
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Asymmetric Learning Rates
+    This model proposes that high anxiety leads to asymmetric learning from positive
+    and negative prediction errors. Specifically, anxious individuals might learn
+    more aggressively from negative outcomes (i.e., when they receive 0 coins),
+    making them more sensitive to perceived threats or failures. This is implemented
+    by having separate learning rates for positive (alpha_pos) and negative (alpha_neg)
+    prediction errors, where alpha_neg is increased based on the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] (Learning rate for positive prediction errors)
+    alpha_neg_base: [0, 1] (Base learning rate for negative prediction errors)
+    stai_neg_alpha_effect: [0, 1] (Multiplier for STAI score's effect on alpha_neg)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_neg_alpha_effect, self.beta = model_parameters
+        # Calculate the effective negative learning rate, clamped at 1.0
+        self.alpha_neg = min(1.0, self.alpha_neg_base + self.stai_neg_alpha_effect * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values using asymmetric learning rates."""
+        
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.alpha_neg * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += self.alpha_neg * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Goal-Directed vs. Habitual Control (MB/MF Mixing)
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Goal-Directed vs. Habitual Control (MB/MF Mixing)
+    This model proposes that high anxiety shifts the balance between goal-directed
+    (model-based, MB) and habitual (model-free, MF) control. Anxious individuals
+    might rely less on the cognitively demanding model-based system and more on
+    the simpler model-free system, perhaps due to increased cognitive load or a
+    desire for simpler decision rules. This is implemented by modulating the mixing
+    weight 'w' (weight for model-based component) based on the STAI score,
+    where higher anxiety leads to a reduction in 'w', thus increasing model-free influence.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for value updates)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    w_base: [0, 1] (Base mixing weight for model-based control, 0=MF, 1=MB)
+    stai_w_reduction: [0, 1] (Factor by which STAI reduces the model-based weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_w_reduction = model_parameters
+        # Calculate effective mixing weight for model-based control
+        # Higher STAI reduces w, pushing towards model-free control
+        self.w = max(0.0, min(1.0, self.w_base - self.stai_w_reduction * self.stai))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values using a hybrid model-based/model-free approach."""
+        
+        # Stage 2 update (remains model-free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-free (MF) prediction error for Stage 1
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Model-based (MB) prediction error for Stage 1
+        # This considers the expected value of all possible next states from action_1
+        # and the best action in those states.
+        q_mb_target = np.sum(self.T[action_1, s_prime] * np.max(self.q_stage2[s_prime, :])
+                             for s_prime in range(self.n_states))
+        delta_1_mb = q_mb_target - self.q_stage1[action_1]
+        
+        # Hybrid update for Stage 1
+        # self.w controls the balance between MF (w=0) and MB (w=1)
+        self.q_stage1[action_1] += self.alpha * ((1 - self.w) * delta_1_mf + self.w * delta_1_mb)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Punishment of First-Stage Choices on Zero Reward
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Punishment of First-Stage Choices on Zero Reward
+    This model proposes that high anxiety makes participants disproportionately
+    punish their initial first-stage choice when they receive no reward (a "zero reward").
+    This reflects a heightened aversiveness to failure or a stronger tendency to
+    attribute negative outcomes to their initial decision. This is implemented
+    by applying an additional negative update (a punishment) to the first-stage
+    Q-value when the observed reward is 0, with the magnitude of this punishment
+    being modulated by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for value updates)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    punish_base: [0, 1] (Base punishment magnitude when reward is 0)
+    stai_punish_multiplier: [0, 1] (Multiplier for STAI score's effect on punishment)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.punish_base, self.stai_punish_multiplier = model_parameters
+        # Calculate the effective punishment magnitude
+        self.punishment_magnitude = self.punish_base + self.stai_punish_multiplier * self.stai
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values and apply anxiety-modulated punishment on zero reward."""
+        
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Apply additional punishment to Stage 1 Q-value if reward was 0
+        if reward == 0:
+            self.q_stage1[action_1] -= self.punishment_magnitude
+            # Ensure Q-values don't become excessively negative, or clamp if preferred
+            # self.q_stage1[action_1] = max(-10.0, self.q_stage1[action_1]) # Example clamping
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

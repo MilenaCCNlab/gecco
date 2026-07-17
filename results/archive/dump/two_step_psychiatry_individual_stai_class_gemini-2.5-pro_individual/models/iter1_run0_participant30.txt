@@ -1,0 +1,142 @@
+Here are three new cognitive models to explain the participant's decision-making process.
+
+### Model 1
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety leads to a negativity bias in learning. The participant is more sensitive to negative outcomes (prediction errors) than to positive ones. The learning rate is asymmetrically increased for negative prediction errors, and the magnitude of this increase is scaled by the participant's STAI score. This would cause options that lead to disappointment to be devalued more quickly, a potential mechanism for anxious avoidance.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]              (Base learning rate)
+    beta: [0, 10]             (Inverse temperature for softmax)
+    neg_alpha_factor: [0, 5]  (Anxiety-driven amplification of learning from negative feedback)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_alpha_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Override value_update to implement asymmetric learning rates modulated by anxiety.
+        """
+        # Stage 2 update (learning about the alien)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        alpha_2 = self.alpha
+        if delta_2 < 0:
+            # If prediction error is negative, increase learning rate based on anxiety
+            alpha_2 = self.alpha * (1 + self.neg_alpha_factor * self.stai)
+            alpha_2 = min(alpha_2, 1.0) # Cap learning rate at 1.0
+        
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update (learning about the spaceship)
+        # The TD target for stage 1 is the updated value of the resulting state
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        alpha_1 = self.alpha
+        if delta_1 < 0:
+            # Apply the same asymmetric learning to the stage 1 update
+            alpha_1 = self.alpha * (1 + self.neg_alpha_factor * self.stai)
+            alpha_1 = min(alpha_1, 1.0) # Cap learning rate at 1.0
+
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that anxiety impairs goal-directed, model-based planning, causing a shift towards simpler, habitual model-free learning. The participant's choice is a hybrid of a model-based strategy (planning using the transition structure) and a model-free strategy (repeating previously rewarded actions). The STAI score directly determines the balance: higher anxiety reduces the weight given to the computationally demanding model-based system, promoting reliance on habits.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate for both systems)
+    beta: [0, 10]    (Inverse temperature for softmax)
+    base_w: [0, 1]   (Base weighting of the model-based system)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.base_w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes choice probabilities based on a weighted average of model-free and model-based values.
+        """
+        # 1. Model-Based Value Calculation
+        # Find the maximum expected reward from each planet
+        max_q_s2 = np.max(self.q_stage2, axis=1)
+        # Use the transition matrix to calculate the expected value of choosing each spaceship
+        q_mb = self.T @ max_q_s2
+        
+        # 2. Model-Free Value
+        # This is the standard temporal-difference value stored in q_stage1
+        q_mf = self.q_stage1
+        
+        # 3. Anxiety-Modulated Hybridization
+        # The weight 'w' for the model-based system is inversely proportional to anxiety
+        w = self.base_w * (1.0 - self.stai)
+        
+        # Combine the values
+        q_hybrid = w * q_mb + (1.0 - w) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that anxiety fosters an aversion to environmental uncertainty. The participant dislikes unpredictable transitions between the spaceships and planets. They not only learn the rewards of the aliens (model-based value) but also track the predictability of each spaceship's destination. Choices are penalized based on the entropy (unpredictability) of their transition outcomes. The STAI score scales this penalty, meaning a highly anxious individual will more strongly sacrifice potential rewards to choose a more predictable option.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                  (Learning rate for alien values)
+    beta: [0, 10]                 (Inverse temperature for softmax)
+    uncertainty_penalty: [0, 10]  (Base magnitude of the penalty for transition entropy)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.uncertainty_penalty = model_parameters
+
+    def init_model(self) -> None:
+        # Agent's internal model of transition probabilities, initialized with a weak prior
+        self.learned_trans_counts = np.ones((self.n_choices, self.n_states))
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # First, call the base class method for its functionality
+        super().post_trial(action_1, state, action_2, reward)
+        # Update transition counts based on the observed outcome
+        self.learned_trans_counts[action_1, state] += 1
+        
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes choice probabilities based on model-based values penalized by transition entropy.
+        """
+        # Estimate the transition matrix from experienced counts
+        learned_T = self.learned_trans_counts / self.learned_trans_counts.sum(axis=1, keepdims=True)
+        
+        # Calculate the entropy for each spaceship's transition distribution
+        # Entropy measures unpredictability. Add epsilon for numerical stability.
+        entropy = -np.sum(learned_T * np.log(learned_T + 1e-12), axis=1)
+        
+        # Calculate standard model-based value using the *learned* transition matrix
+        max_q_s2 = np.max(self.q_stage2, axis=1)
+        q_mb = learned_T @ max_q_s2
+        
+        # Apply the uncertainty penalty, scaled by anxiety
+        penalty = self.uncertainty_penalty * self.stai * entropy
+        q_effective = q_mb - penalty
+        
+        return self.softmax(q_effective, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,192 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, with particular attention to how their low anxiety (STAI score of 0.2875) might modulate their behavior.
+
+### Model 1: Model-Based Reinforcement Learning with STAI-modulated MB Weight
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants integrate both model-free
+    (habitual, stimulus-response) and model-based (goal-directed, planning) control.
+    The weighting between these two systems is influenced by anxiety (STAI score).
+    Specifically, lower anxiety (lower STAI) is hypothesized to increase the reliance
+    on the more flexible and planning-oriented model-based system, allowing the
+    participant to better anticipate future rewards by considering transition
+    probabilities and second-stage values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w_mb_base: [0, 1] - Base weight for the model-based component.
+    stai_mb_sensitivity: [0, 1] - How strongly low STAI increases the model-based weight.
+                                  A value of 0 means STAI has no effect on this modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb_base, self.stai_mb_sensitivity = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, combining model-free and model-based values.
+        """
+        # Calculate model-based value (V_MB) for each stage-1 action
+        # V_MB(action_1) = sum_{state_next} P(state_next | action_1) * max_{action_2} Q(state_next, action_2)
+        v_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_future_value = 0
+            for s_prime in range(self.n_states): # s_prime is the next state (planet)
+                # Max Q-value at stage 2 for state s_prime
+                max_q_stage2_s_prime = np.max(self.q_stage2[s_prime, :])
+                expected_future_value += self.T[a1, s_prime] * max_q_stage2_s_prime
+            v_mb[a1] = expected_future_value
+
+        # Modulate model-based weight by STAI score
+        # Lower STAI (closer to 0) means higher (1 - self.stai), thus a higher w_mb
+        # The sensitivity parameter determines the strength of this boost.
+        w_mb = self.w_mb_base + (1 - self.stai) * self.stai_mb_sensitivity
+        w_mb = np.clip(w_mb, 0, 1) # Ensure w_mb stays within [0, 1]
+
+        # Combine model-free and model-based values
+        q_combined_stage1 = (1 - w_mb) * self.q_stage1 + w_mb * v_mb
+
+        return self.softmax(q_combined_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (model-free update)
+        # The target for stage 1 is the updated Q-value of the chosen stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Asymmetric Learning Rates with STAI-modulated Negative Learning
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that participants learn differently from
+    positive (reward received) and negative (no reward received) prediction errors.
+    Low anxiety (lower STAI score) is hypothesized to increase sensitivity to
+    negative outcomes, leading to a higher learning rate for negative prediction errors
+    and thus more rapid adaptation away from unrewarding options. This reflects
+    an adaptive strategy where low-anxious individuals quickly adjust when things go wrong.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors (outcome > Q-value).
+    alpha_neg_base: [0, 1] - Base learning rate for negative prediction errors (outcome < Q-value).
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    stai_neg_boost: [0, 1] - How much low STAI boosts the negative learning rate.
+                             A value of 0 means STAI has no effect on this modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta, self.stai_neg_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using asymmetric learning rates, with negative learning modulated by STAI.
+        """
+        # Calculate effective alpha_neg based on STAI
+        # Lower STAI (closer to 0) means higher (1 - self.stai), thus a higher alpha_neg
+        alpha_neg_effective = self.alpha_neg_base + (1 - self.stai) * self.stai_neg_boost
+        alpha_neg_effective = np.clip(alpha_neg_effective, 0, 1) # Ensure alpha_neg stays within [0, 1]
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0: # Use alpha_pos for positive or zero prediction errors
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else: # Use alpha_neg_effective for negative prediction errors
+            self.q_stage2[state, action_2] += alpha_neg_effective * delta_2
+        
+        # Stage 1 update
+        # The target for stage 1 is the updated Q-value of the chosen stage 2 action
+        target_q1 = self.q_stage2[state, action_2] 
+        delta_1 = target_q1 - self.q_stage1[action_1]
+        
+        if delta_1 >= 0: # Use alpha_pos for positive or zero prediction errors
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else: # Use alpha_neg_effective for negative prediction errors
+            self.q_stage1[action_1] += alpha_neg_effective * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Outcome-Sensitive Perseveration with STAI-Modulated Adaptiveness
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants exhibit a tendency to
+    perseverate on their previous first-stage choice (a 'stay' bias). However,
+    this perseveration is sensitive to the outcome of the previous trial.
+    Specifically, low anxiety (lower STAI) is hypothesized to make individuals
+    more adaptive: they are less likely to perseverate on a choice that led
+    to a zero reward (negative outcome) on the previous trial, allowing them
+    to switch away from unrewarding options more readily. This suggests low
+    anxiety facilitates flexible switching when performance is poor.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    perseveration_base: [0, 1] - Base strength of the perseveration bias,
+                                 applied when the previous outcome was rewarding.
+    stai_adaptiveness: [0, 1] - How much low STAI reduces perseveration
+                                after a zero reward. A value of 0 means
+                                STAI has no effect on this reduction.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.perseveration_base, self.stai_adaptiveness = model_parameters
+
+    def init_model(self) -> None:
+        # last_action1 and last_reward are initialized to None in CognitiveModelBase.
+        # They will be used from the second trial onwards.
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, incorporating an outcome-sensitive
+        and STAI-modulated perseveration bias.
+        """
+        q_biased_stage1 = np.copy(self.q_stage1)
+
+        if self.last_action1 is not None and self.last_reward is not None:
+            current_perseveration_strength = self.perseveration_base
+
+            if self.last_reward == 0:
+                # If the last reward was 0, reduce the perseveration strength.
+                # Lower STAI (e.g., 0.2875) means a higher (1 - self.stai),
+                # which leads to a stronger reduction in perseveration, scaled by stai_adaptiveness.
+                reduction_factor = (1 - (1 - self.stai) * self.stai_adaptiveness)
+                # Ensure the reduction factor does not make perseveration negative
+                reduction_factor = np.clip(reduction_factor, 0, 1)
+                current_perseveration_strength *= reduction_factor
+            
+            q_biased_stage1[self.last_action1] += current_perseveration_strength
+
+        return self.softmax(q_biased_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

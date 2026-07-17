@@ -1,0 +1,166 @@
+As a cognitive scientist and programmer, I will propose three distinct models to explain this participant's decision-making process. Given their high score on the anxiety questionnaire (stai = 0.725), each model will formalize a specific hypothesis about how anxiety influences learning and choice, particularly within the complex structure of the two-step task.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+
+This model tests the hypothesis that trait anxiety disrupts the balance between goal-directed (model-based) and habitual (model-free) decision-making systems. Computationally, a model-based system uses an internal model of the task's transition structure to plan, while a model-free system learns simple action-value associations. The core idea here is that higher anxiety impairs the cognitively demanding model-based system, causing the participant to rely more on less flexible, model-free habits. The participant's STAI score will directly control the weighting between these two systems.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Trait anxiety disrupts goal-directed planning, causing a
+    shift towards habitual, model-free control. The model is a hybrid of
+    a model-based and a model-free reinforcement learner. The weighting
+    between these two systems is determined by a baseline parameter and
+    is reduced by the participant's trait anxiety (stai), such that higher
+    anxiety leads to more model-free behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]      (Softmax inverse temperature)
+    w_base: [-5, 5]     (Baseline logit for model-based weight)
+    w_anxiety: [0, 10]  (Factor by which anxiety reduces model-based weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_anxiety = model_parameters
+
+    def init_model(self) -> None:
+        # q_stage1 will represent the model-free values
+        # Model-based values will be computed on the fly
+        self.w = 0.5 # Initialize weight
+
+    def pre_trial(self) -> None:
+        """Calculate the model-based weight before making a choice."""
+        # The weight 'w' for the model-based system is a logistic function
+        # of a baseline parameter and the anxiety score.
+        logit_w = self.w_base - self.w_anxiety * self.stai
+        self.w = 1 / (1 + np.exp(-logit_w))
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes choice probabilities based on a weighted average of MB and MF values."""
+        # 1. Compute model-based values
+        q_mb = np.zeros(self.n_choices)
+        # q_mb(a) = sum_s T(s|a) * max_a' Q(s,a')
+        q_mb[0] = self.T[0, 0] * np.max(self.q_stage2[0]) + self.T[0, 1] * np.max(self.q_stage2[1])
+        q_mb[1] = self.T[1, 0] * np.max(self.q_stage2[0]) + self.T[1, 1] * np.max(self.q_stage2[1])
+
+        # 2. q_stage1 represents the model-free values (q_mf)
+        
+        # 3. Combine MB and MF values
+        q_hybrid = self.w * q_mb + (1 - self.w) * self.q_stage1
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Updates both stage-2 values and the model-free stage-1 values."""
+        # Standard TD update for stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD(0) update for the model-free q_stage1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Perseveration
+
+This model proposes that anxiety promotes behavioral rigidity. Instead of flexibly adapting to outcomes, the anxious participant tends to repeat recent actions, a phenomenon known as perseveration. This could be a maladaptive strategy to reduce the cognitive load of decision-making under uncertainty. The strength of this "stickiness" or bias to repeat the previous first-stage choice is directly proportional to the participant's STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes behavioral rigidity and perseveration.
+    This model assumes that the participant has a bias to repeat the
+    previous first-stage choice. The strength of this perseverative bias
+    is scaled by the participant's trait anxiety (stai), reflecting a
+    tendency to "stick" with known actions under uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]     (Softmax inverse temperature)
+    kappa: [0, 5]      (Scaling factor for anxiety's effect on perseveration)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities from Q-values plus an
+        anxiety-driven perseveration bonus for the last chosen action.
+        """
+        q_effective = self.q_stage1.copy()
+        
+        if self.last_action1 is not None:
+            # Add a bonus to the value of the action chosen on the last trial
+            perseveration_bonus = self.kappa * self.stai
+            q_effective[self.last_action1] += perseveration_bonus
+            
+        return self.softmax(q_effective, self.beta)
+
+    # The standard value_update from the base class is sufficient, as it
+    # correctly updates the underlying q_stage1 values. The policy is
+    # the only part affected by the perseveration bias.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Pessimism on Rare Transitions
+
+This model explores how anxiety affects credit assignment, specifically how outcomes are attributed to choices. The hypothesis is that anxious individuals are pessimistic and distrustful of uncertain events. When a reward is obtained via a rare (unexpected) transition, they fail to fully credit the initial choice for that positive outcome. This is implemented by modulating an eligibility trace (`lambda`), which controls how much the second-stage outcome updates the first-stage action value. For rare transitions, this learning signal is dampened as a function of the participant's STAI score.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety induces a pessimistic learning bias, causing the
+    participant to discount rewards that occur via unexpected (rare) pathways.
+    This model uses an eligibility trace (lambda) to propagate second-stage
+    outcomes to first-stage choices. The strength of this trace is reduced
+    after a rare transition, and the magnitude of this reduction is scaled
+    by the participant's trait anxiety (stai).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          (Learning rate)
+    beta: [0, 10]         (Softmax inverse temperature)
+    lambda_base: [0, 1]     (Baseline eligibility trace)
+    lambda_anxiety: [0, 1]  (Anxiety's scaling factor for lambda reduction)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base, self.lambda_anxiety = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values using a TD(lambda) rule where lambda is modulated
+        by anxiety and transition rarity.
+        """
+        # Calculate stage-2 prediction error (delta_2)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Update stage-2 Q-value
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Determine if the transition was common or rare
+        is_common_transition = self.T[action_1, state] > 0.5
+        
+        # Anxiety reduces the eligibility trace for rare transitions
+        if is_common_transition:
+            effective_lambda = self.lambda_base
+        else:
+            # Reduction is proportional to both baseline lambda, anxiety, and sensitivity
+            reduction = self.lambda_anxiety * self.stai
+            effective_lambda = self.lambda_base * (1 - reduction)
+
+        # Update stage-1 Q-value using both a one-step backup and the
+        # anxiety-modulated eligibility trace.
+        # Note: We use max(Q) for the one-step backup, which is standard.
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * (delta_1 + effective_lambda * delta_2)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

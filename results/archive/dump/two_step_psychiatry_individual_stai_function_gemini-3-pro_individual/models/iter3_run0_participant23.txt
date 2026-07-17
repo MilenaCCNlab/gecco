@@ -1,0 +1,249 @@
+Here are 3 new cognitive models that incorporate STAI scores into the two-step task decision process.
+
+### Model 1: Anxiety-Induced Negative Prediction Error Amplification
+**Hypothesis:** Anxious individuals demonstrate a "negativity bias." They learn more intensely from outcomes that are worse than expected (negative prediction errors) compared to outcomes that meet or exceed expectations. STAI scales the learning rate specifically when the prediction error is negative.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    RL Model with Asymmetric Learning Rates modulated by STAI.
+    
+    Hypothesis: Higher anxiety (STAI) amplifies the learning rate specifically 
+    for negative prediction errors (when outcomes are worse than expected), 
+    reflecting a negativity bias.
+
+    Parameters:
+    learning_rate: [0, 1] - Base learning rate for positive/neutral updates.
+    beta: [0, 10] - Inverse temperature for softmax.
+    w: [0, 1] - Weight for model-based control.
+    neg_bias_slope: [0, 5] - How much STAI scales the learning rate during negative PEs.
+    """
+    learning_rate, beta, w, neg_bias_slope = model_parameters
+    n_trials = len(action_1)
+    current_stai = stai[0]
+    
+    # Transition matrix (fixed structure of the task)
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values initialization
+    q_stage1_mf = np.zeros(2)      # Model-free values for Stage 1 (Spaceships)
+    q_stage2_mf = np.zeros((2, 2)) # Model-free values for Stage 2 (Aliens)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # Model-Based Value: Expected value of next stage weighted by transition probs
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Integrated Value (Hybrid MB/MF)
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Softmax choice 1
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        act1 = int(action_1[trial])
+
+        # --- Stage 2 Policy ---
+        # Standard Model-Free Softmax
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        act2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Learning / Updates ---
+        
+        # Stage 2 RPE (Outcome - Expectation)
+        delta_stage2 = r - q_stage2_mf[state_idx, act2]
+        
+        # Determine effective learning rate for Stage 2
+        lr_eff_2 = learning_rate
+        if delta_stage2 < 0:
+            # Anxiety amplifies learning from disappointment
+            lr_eff_2 = learning_rate * (1.0 + neg_bias_slope * current_stai)
+            # Clip to ensure stability
+            if lr_eff_2 > 1.0: lr_eff_2 = 1.0
+            
+        # Update Stage 2 Q-values
+        q_stage2_mf[state_idx, act2] += lr_eff_2 * delta_stage2
+        
+        # Stage 1 RPE (Value of State 2 - Value of Choice 1)
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        
+        # Determine effective learning rate for Stage 1
+        lr_eff_1 = learning_rate
+        if delta_stage1 < 0:
+            lr_eff_1 = learning_rate * (1.0 + neg_bias_slope * current_stai)
+            if lr_eff_1 > 1.0: lr_eff_1 = 1.0
+
+        # Update Stage 1 Q-values
+        q_stage1_mf[act1] += lr_eff_1 * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Rigidity (Beta Modulation)
+**Hypothesis:** Anxiety is linked to intolerance of uncertainty. High anxiety participants may exhibit "safety behaviors" by sticking rigidly to perceived best options rather than exploring. This model hypothesizes that STAI increases the inverse temperature (`beta`), making the softmax function sharper (more deterministic) and reducing exploratory noise.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    RL Model where STAI modulates the Inverse Temperature (Beta).
+    
+    Hypothesis: High anxiety leads to cognitive rigidity and reduced exploration.
+    STAI linearly increases the beta parameter, making choices more deterministic
+    (exploiting current values) rather than random (exploring).
+
+    Parameters:
+    learning_rate: [0, 1] - Q-value update rate.
+    beta_base: [0, 10] - Baseline inverse temperature.
+    w: [0, 1] - Weight for model-based control.
+    stai_rigidity: [0, 5] - Slope scaling STAI's effect on increasing Beta.
+    """
+    learning_rate, beta_base, w, stai_rigidity = model_parameters
+    n_trials = len(action_1)
+    current_stai = stai[0]
+    
+    # Calculate effective Beta based on anxiety
+    # Higher STAI -> Higher Beta -> Less randomness/exploration
+    beta_eff = beta_base + (current_stai * stai_rigidity)
+    # Cap beta to prevent overflow
+    if beta_eff > 20: beta_eff = 20
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Use beta_eff here
+        exp_q1 = np.exp(beta_eff * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        act1 = int(action_1[trial])
+
+        # --- Stage 2 Policy ---
+        # Use beta_eff here
+        exp_q2 = np.exp(beta_eff * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+
+        act2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        q_stage1_mf[act1] += learning_rate * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[state_idx, act2]
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Subjective Transition Distortion
+**Hypothesis:** Anxious individuals may have distorted internal models of the world. Specifically, high anxiety might lead to "hyper-determinism" where the agent ignores the possibility of rare transitions (tunnel vision), believing the "Common" transition is nearly guaranteed. This distorts the Model-Based calculation.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    RL Model where STAI distorts the Model-Based Transition Matrix.
+    
+    Hypothesis: Anxiety causes 'tunnel vision' or an over-estimation of 
+    predictability. High STAI inflates the perceived probability of the 
+    common transition (moving it from 0.7 towards 1.0) in the internal model,
+    making the Model-Based component under-weigh the risk of rare transitions.
+
+    Parameters:
+    learning_rate: [0, 1] - Q-value update rate.
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - Weight for model-based control.
+    distortion_factor: [0, 1] - How much STAI pushes perceived probability toward 1.0.
+    """
+    learning_rate, beta, w, distortion_factor = model_parameters
+    n_trials = len(action_1)
+    current_stai = stai[0]
+    
+    # Standard task probability
+    base_prob = 0.7
+    
+    # Distort the internal model based on STAI
+    # If distortion_factor is high, perceived prob approaches 1.0 for high STAI
+    perceived_prob = base_prob + (1.0 - base_prob) * distortion_factor * current_stai
+    
+    # Construct the subjective transition matrix used for planning (MB)
+    # Note: We do not change the actual state transitions, only the agent's map
+    subjective_transition_matrix = np.array([
+        [perceived_prob, 1.0 - perceived_prob], 
+        [1.0 - perceived_prob, perceived_prob]
+    ])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # KEY DIFFERENCE: Use subjective_transition_matrix for MB calculation
+        q_stage1_mb = subjective_transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        state_idx = int(state[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+
+        act1 = int(action_1[trial])
+        act2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        q_stage1_mf[act1] += learning_rate * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[state_idx, act2]
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

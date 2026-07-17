@@ -1,0 +1,158 @@
+Here are three cognitive models proposing different hypotheses about how this high-anxiety participant makes decisions, each modulating behavior based on their STAI score.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Outcome-Contingent Stage 1 Learning Rate with Anxiety-Amplified Non-Reward Impact.
+    This model proposes that the learning rate for stage 1 Q-values is not constant but
+    is dynamically adjusted based on the final outcome (reward or non-reward).
+    Specifically, participants might learn more effectively from rewards and non-rewards
+    at stage 1. High anxiety (STAI score) is hypothesized to specifically amplify the
+    impact of non-rewards, leading to a significantly increased learning rate for stage 1
+    when no gold coins are received, making the participant more sensitive to negative feedback.
+
+    Parameter Bounds:
+    -----------------
+    alpha_s1_base: [0, 1] - Base learning rate for stage 1 Q-values.
+    alpha_s1_reward_mod_base: [0, 1] - Base factor added to alpha_s1 on receiving a reward (reward=1).
+    alpha_s1_nonreward_mod_base: [0, 1] - Base factor added to alpha_s1 on receiving no reward (reward=0).
+    alpha_s1_nonreward_mod_stai: [0, 1] - Modulatory parameter for STAI on the non-reward learning bonus.
+                                            A positive value means higher anxiety *increases* this bonus.
+    alpha_s2: [0, 1] - Learning rate for stage 2 Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_s1_base, self.alpha_s1_reward_mod_base, self.alpha_s1_nonreward_mod_base, \
+        self.alpha_s1_nonreward_mod_stai, self.alpha_s2, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective non-reward learning modifier for stage 1, modulated by STAI
+        self.alpha_s1_nonreward_effective = np.clip(self.alpha_s1_nonreward_mod_base + self.alpha_s1_nonreward_mod_stai * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with stage 1 learning rate contingent on final reward and anxiety.
+        """
+        # Stage 2 update (uses fixed alpha_s2)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_s2 * delta_2
+        
+        # Determine the effective stage 1 learning rate based on the final reward
+        alpha_s1 = self.alpha_s1_base
+        if reward == 1:
+            alpha_s1 = np.clip(self.alpha_s1_base + self.alpha_s1_reward_mod_base, 0, 1)
+        else: # reward == 0
+            alpha_s1 = np.clip(self.alpha_s1_base + self.alpha_s1_nonreward_effective, 0, 1)
+
+        # Stage 1 update (uses potentially modified alpha_s1)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_s1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: State-Dependent Learning Rates with Anxiety-Modulated Learning in "Uncertain" State.
+    This model proposes that participants adjust their learning rate for stage-2 outcomes based on
+    the planet they land on. Specifically, Planet Y (state 1) might be perceived as more uncertain
+    or "risky" than Planet X (state 0). High anxiety (STAI score) is hypothesized to impair learning
+    in this more uncertain state (Planet Y), leading to a reduced learning rate when on Planet Y.
+    Stage 1 learning rate remains constant.
+
+    Parameter Bounds:
+    -----------------
+    alpha_s1: [0, 1] - Learning rate for stage 1 Q-values.
+    alpha_s2_state0_base: [0, 1] - Base learning rate for stage 2 when on Planet X (state 0).
+    alpha_s2_state1_base: [0, 1] - Base learning rate for stage 2 when on Planet Y (state 1).
+    alpha_s2_state1_stai_mod: [0, 1] - Modulatory parameter for STAI on alpha_s2_state1.
+                                        A positive value means higher anxiety *decreases* alpha_s2_state1.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_s1, self.alpha_s2_state0_base, self.alpha_s2_state1_base, self.alpha_s2_state1_stai_mod, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective learning rate for stage 2, state 1, modulated by STAI
+        # Higher STAI decreases the learning rate in state 1
+        self.alpha_s2_state1_effective = np.clip(self.alpha_s2_state1_base - self.alpha_s2_state1_stai_mod * self.stai, 0, 1)
+        
+        # Store the state 0 learning rate
+        self.alpha_s2_state0_effective = self.alpha_s2_state0_base
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using state-dependent learning rates for stage 2, and a fixed rate for stage 1.
+        """
+        # Determine the stage 2 learning rate based on the current state
+        if state == 0: # Planet X
+            alpha_s2 = self.alpha_s2_state0_effective
+        else: # Planet Y (state 1)
+            alpha_s2 = self.alpha_s2_state1_effective
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_s2 * delta_2
+        
+        # Stage 1 update uses its own learning rate (alpha_s1)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_s1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Amplified Learning from Surprising (Rare) Transitions for Stage 1.
+    This model suggests that participants adjust their learning rate for stage-1 Q-values
+    dynamically. When a rare transition (e.g., choosing spaceship A and landing on planet Y)
+    occurs, the learning rate for the chosen stage-1 action is temporarily increased.
+    High anxiety (STAI score) is hypothesized to amplify this effect, making participants
+    learn even more aggressively from these unexpected events at the first stage.
+
+    Parameter Bounds:
+    -----------------
+    alpha_s1_base: [0, 1] - Base learning rate for stage 1 Q-values.
+    alpha_s2: [0, 1] - Learning rate for stage 2 Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    surprise_alpha_mod_base: [0, 1] - Base factor added to alpha_s1 on a rare transition.
+    surprise_alpha_mod_stai: [0, 1] - Modulatory parameter for STAI on the surprise factor.
+                                        A positive value means higher anxiety *increases* this bonus.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_s1_base, self.alpha_s2, self.beta, self.surprise_alpha_mod_base, self.surprise_alpha_mod_stai = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective surprise learning modifier, modulated by STAI
+        self.surprise_alpha_mod_effective = np.clip(self.surprise_alpha_mod_base + self.surprise_alpha_mod_stai * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with stage 1 learning rate modulated by transition surprise and anxiety.
+        """
+        # Determine if the transition was "rare"
+        # Spaceship A (0) commonly to Planet X (0)
+        # Spaceship U (1) commonly to Planet Y (1)
+        is_rare_transition = (action_1 == 0 and state == 1) or \
+                             (action_1 == 1 and state == 0)
+
+        # Determine the effective stage 1 learning rate
+        alpha_s1 = self.alpha_s1_base
+        if is_rare_transition:
+            alpha_s1 = np.clip(self.alpha_s1_base + self.surprise_alpha_mod_effective, 0, 1)
+
+        # Stage 2 update (uses fixed alpha_s2)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_s2 * delta_2
+        
+        # Stage 1 update (uses potentially modified alpha_s1)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_s1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

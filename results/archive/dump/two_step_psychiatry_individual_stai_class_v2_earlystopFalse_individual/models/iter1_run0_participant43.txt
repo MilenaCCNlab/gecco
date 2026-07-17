@@ -1,0 +1,129 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Impaired Model-Based Control
+    
+    This model assumes a hybrid architecture combining Model-Based (MB) planning 
+    and Model-Free (MF) learning. It hypothesizes that anxiety (STAI) acts as a 
+    cognitive load that impairs working memory, thereby reducing the influence 
+    of the Model-Based system.
+    
+    The weight of the Model-Based component (w_MB) is negatively modulated by STAI.
+    w_MB = w_max * (1.0 - stai)
+    
+    The final stage-1 Q-value is a weighted mixture:
+    Q_net = w_MB * Q_MB + (1 - w_MB) * Q_MF
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_max: [0, 1] (Maximum MB weight for a theoretical participant with 0 anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # --- Model-Based Calculation ---
+        # Value of each state is the max Q-value available in that state (from stage 2)
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Q_MB = Transition_Matrix * V_stage2
+        # self.T is (2, 2) where row=action, col=next_state
+        q_mb = self.T @ v_stage2
+        
+        # --- Anxiety Modulation ---
+        # Calculate Mixing Weight: Higher STAI reduces Model-Based weight
+        w_mb = self.w_max * (1.0 - self.stai)
+        w_mb = np.clip(w_mb, 0.0, 1.0)
+        
+        # --- Mixture ---
+        q_net = w_mb * q_mb + (1.0 - w_mb) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Decision Noise
+    
+    This model hypothesizes that anxiety acts as a source of internal noise or 
+    distraction, reducing the precision of decision-making. While the participant 
+    learns values correctly (Model-Free), their ability to consistently choose 
+    the best option is degraded by their anxiety level.
+    
+    This is implemented by scaling the inverse temperature (beta) by STAI.
+    beta_effective = beta_base / (1 + noise_factor * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    noise_factor: [0, 10] (Scaling factor: how strongly anxiety increases noise)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.noise_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta based on anxiety
+        # Higher anxiety -> Lower beta -> More random choices
+        beta_eff = self.beta_base / (1.0 + self.noise_factor * self.stai)
+        return self.softmax(self.q_stage1, beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Apply the same noise degradation to stage 2 choices
+        beta_eff = self.beta_base / (1.0 + self.noise_factor * self.stai)
+        return self.softmax(self.q_stage2[state], beta_eff)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Accelerated Forgetting
+    
+    This model hypothesizes that anxiety interferes with the maintenance of 
+    value representations over time. Specifically, anxious individuals may 
+    "forget" or discount the value of options they did not choose more rapidly 
+    than non-anxious individuals, perhaps due to attentional narrowing.
+    
+    The model implements a decay on unchosen options proportional to STAI.
+    decay_rate = decay_scale * stai
+    Q_unchosen = Q_unchosen * (1 - decay_rate)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    decay_scale: [0, 1] (Controls the magnitude of anxiety-driven decay)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Standard TD Update for chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # 2. Anxiety-Driven Decay for UNCHOSEN options
+        decay_rate = self.decay_scale * self.stai
+        decay_rate = np.clip(decay_rate, 0.0, 1.0)
+        
+        # Decay unchosen stage 1 action
+        unchosen_a1 = 1 - action_1
+        self.q_stage1[unchosen_a1] *= (1.0 - decay_rate)
+        
+        # Decay unchosen stage 2 action (in the current state)
+        unchosen_a2 = 1 - action_2
+        self.q_stage2[state, unchosen_a2] *= (1.0 - decay_rate)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,214 @@
+Here are the three proposed cognitive models.
+
+### Model 1: Anxiety-Distorted Transition Belief
+This model hypothesizes that anxiety affects the Model-Based (MB) system's accuracy. Specifically, high anxiety introduces "noise" or uncertainty into the participant's internal model of the spaceship-planet transition probabilities. While the true transition probability is 0.7, an anxious participant might perceive the world as more unpredictable (closer to 0.5), thereby weakening the directedness of the Model-Based control without changing the explicit weighting parameter `w`.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid MB/MF model where Anxiety distorts the MB transition matrix.
+    
+    Hypothesis: High anxiety causes the participant's internal model of the 
+    transition structure (Stage 1 -> Stage 2) to become flatter (closer to 50/50).
+    This reduces the effectiveness of the model-based planning component.
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate for Q-values.
+    - beta: [0, 10] Inverse temperature for softmax.
+    - w: [0, 1] Weight for Model-Based control (1=MB, 0=MF).
+    - belief_distortion_stai: [0, 0.4] Amount STAI reduces the perceived transition probability 
+      from the objective 0.7. If distortion is high, belief approaches 0.5 (random).
+    """
+    learning_rate, beta, w, belief_distortion_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    # Calculate the effective transition belief modulated by anxiety
+    # Objective probability is 0.7. Anxiety reduces this towards 0.5.
+    # We clip to ensure it doesn't flip the relationship (go below 0.5).
+    p_common = max(0.5, 0.7 - (belief_distortion_stai * stai_score))
+    transition_matrix = np.array([[p_common, 1-p_common], [1-p_common, p_common]])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        act1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        act2 = int(action_2[trial])
+
+        # Policy for the first choice
+        # MB value calculation uses the anxiety-distorted matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[act1]
+
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[act2]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        q_stage1_mf[act1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, act2]
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Direct Reinforcement
+This model hypothesizes that anxiety promotes "reactive" or simple habit learning that bypasses the two-step structure entirely. In addition to the standard Temporal Difference (TD) update (where Stage 1 is updated by Stage 2's value), this model includes a "Direct Reinforcement" pathway where the final reward directly updates the Stage 1 choice. The strength of this primitive, model-free heuristic is scaled by the participant's STAI score.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid MB/MF model with Anxiety-modulated Direct Reinforcement.
+    
+    Hypothesis: High anxiety increases reliance on a 'direct' heuristic where
+    the Stage 1 choice is reinforced directly by the final Reward, ignoring 
+    the intermediate Stage 2 state (bypassing the standard TD chain).
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard TD learning rate.
+    - beta: [0, 10] Inverse temperature for softmax.
+    - w: [0, 1] Weight for Model-Based control.
+    - direct_lr_stai: [0, 1] Learning rate for the direct Reward->Stage1 update,
+      scaled by STAI score.
+    """
+    learning_rate, beta, w, direct_lr_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        act1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        act2 = int(action_2[trial])
+
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[act1]
+
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[act2]
+
+        # Action value updating
+        # 1. Standard TD update (Stage 1 value moves toward Stage 2 value)
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        q_stage1_mf[act1] += learning_rate * delta_stage1
+        
+        # 2. Direct Reinforcement (Stage 1 value moves toward Reward), scaled by Anxiety
+        # This represents a "dumb" habit system reinforced directly by outcome.
+        direct_update = (reward[trial] - q_stage1_mf[act1])
+        q_stage1_mf[act1] += (direct_lr_stai * stai_score) * direct_update
+
+        # Stage 2 update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, act2]
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Value Decay
+This model hypothesizes that anxiety consumes cognitive resources (e.g., working memory), leading to faster forgetting of learned values for options that are not currently being chosen. While standard Q-learning assumes values stay constant until visited again, this model introduces a decay parameter for unchosen options that is proportional to the participant's STAI score.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid MB/MF model with Anxiety-modulated Value Decay (Forgetting).
+    
+    Hypothesis: High anxiety accelerates the decay (forgetting) of Q-values 
+    for unchosen options, possibly due to reduced working memory capacity 
+    or cognitive load.
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate for chosen options.
+    - beta: [0, 10] Inverse temperature for softmax.
+    - w: [0, 1] Weight for Model-Based control.
+    - decay_stai: [0, 1] Decay rate for unchosen options, scaled by STAI.
+    """
+    learning_rate, beta, w, decay_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate effective decay rate based on anxiety
+    decay_rate = decay_stai * stai_score
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        act1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        act2 = int(action_2[trial])
+
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[act1]
+
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[act2]
+
+        # Action value updating for CHOSEN options
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        q_stage1_mf[act1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, act2]
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+        
+        # Value Decay for UNCHOSEN options
+        # Stage 1 unchosen
+        unchosen_1 = 1 - act1
+        q_stage1_mf[unchosen_1] *= (1 - decay_rate)
+        
+        # Stage 2 unchosen (only in the visited state)
+        unchosen_2 = 1 - act2
+        q_stage2_mf[state_idx, unchosen_2] *= (1 - decay_rate)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

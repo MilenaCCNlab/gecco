@@ -1,0 +1,164 @@
+Here are three new cognitive models exploring different mechanisms for how anxiety (STAI) might influence decision-making in this task.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model hypothesizes that anxiety affects the balance between model-based (planning) and model-free (habitual) control. High anxiety might impair cognitive resources required for model-based planning, leading to a greater reliance on model-free strategies. Alternatively, medium anxiety might heighten vigilance and increase model-based control.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model implements a hybrid Model-Based / Model-Free reinforcement learning agent.
+    The weighting parameter 'w' determines the balance between these two systems.
+    We hypothesize that anxiety (STAI) modulates this balance. Specifically, higher anxiety might 
+    reduce the 'w' parameter (shifting towards model-free habits) due to cognitive load, 
+    or increase it (shifting towards planning) due to hyper-vigilance.
+    
+    The model calculates a net Q-value for Stage 1: Q_net = w * Q_MB + (1-w) * Q_MF.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Base model-based weight
+    w_stai_factor: [-1, 1] # How STAI shifts the weight (linear modulation)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_stai_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition matrix (fixed for this simple version, or could be learned)
+        # The base class has self.trans_counts and self.T. 
+        # We will use the fixed transition probabilities provided in the task description logic
+        # (0.7 common, 0.3 rare) for the MB calculation to keep it standard.
+        # A = 0 -> X (0.7), Y (0.3)
+        # U = 1 -> Y (0.7), X (0.3)
+        self.T_fixed = np.array([[0.7, 0.3], [0.3, 0.7]]) 
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Value (Q_MF) is just self.q_stage1 (updated via TD)
+        q_mf = self.q_stage1
+        
+        # 2. Model-Based Value (Q_MB)
+        # Q_MB(a1) = sum(P(s2|a1) * max(Q_stage2(s2, :)))
+        # We use the max Q-value of the second stage as the estimated value of that state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,) for 2 states
+        q_mb = self.T_fixed @ v_stage2
+        
+        # 3. Calculate Weight w
+        # Sigmoid or clipping to keep w in [0, 1] is safer, but linear with clipping is standard for simple models
+        raw_w = self.w_base + (self.w_stai_factor * self.stai)
+        w = np.clip(raw_w, 0.0, 1.0)
+        
+        # 4. Combine
+        q_net = w * q_mb + (1 - w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    # policy_stage2 uses default softmax on q_stage2
+    # value_update uses default TD learning
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Loss Aversion
+This model hypothesizes that anxiety modulates how participants process negative outcomes (0 coins) versus positive outcomes (1 coin). Specifically, anxious individuals might be more sensitive to the "loss" (or lack of gain) of a coin, effectively treating a 0 outcome as a punishment rather than just a neutral event.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases 'loss aversion' or sensitivity to negative prediction errors.
+    In this task, receiving 0 coins is the negative outcome.
+    This model introduces a 'punishment_sensitivity' parameter modulated by STAI.
+    When the reward is 0, the effective reward signal used for updating Q-values is 
+    not 0, but a negative value (R_eff = -1 * sensitivity).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    loss_sens_base: [0, 2] # Base sensitivity to 0-reward outcomes
+    loss_sens_stai: [0, 2] # How STAI scales this sensitivity
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_sens_base, self.loss_sens_stai = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective reward
+        # If reward is 1, it's 1.
+        # If reward is 0, it is treated as -1 * (base + stai_mod * stai)
+        
+        effective_loss_sensitivity = self.loss_sens_base + (self.loss_sens_stai * self.stai)
+        # Ensure sensitivity is non-negative
+        effective_loss_sensitivity = max(0.0, effective_loss_sensitivity)
+        
+        if reward == 0:
+            eff_reward = -1.0 * effective_loss_sensitivity
+        else:
+            eff_reward = reward
+
+        # Standard TD update with effective reward
+        # Update Stage 2
+        delta_2 = eff_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1
+        # Note: We use the updated Q2 value for the TD error of stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Learning Rate Asymmetry
+This model suggests that anxiety affects how quickly people learn from positive versus negative prediction errors. Anxious individuals might update their beliefs more rapidly in response to "bad news" (negative prediction errors) than "good news", or vice versa.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the asymmetry between learning from positive prediction errors (PPE)
+    and negative prediction errors (NPE).
+    We define a base learning rate 'alpha'.
+    We define a 'bias' parameter modulated by STAI.
+    If bias > 0.5, the agent learns more from PPE. If bias < 0.5, the agent learns more from NPE.
+    
+    alpha_pos = alpha * (2 * bias)
+    alpha_neg = alpha * (2 * (1 - bias))
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Base learning rate magnitude
+    beta: [0, 10]       # Inverse temperature
+    bias_base: [0, 1]   # Base bias (0.5 = symmetric)
+    bias_stai: [-1, 1]  # Effect of STAI on bias
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.bias_base, self.bias_stai = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate bias
+        raw_bias = self.bias_base + (self.bias_stai * self.stai)
+        bias = np.clip(raw_bias, 0.01, 0.99) # Avoid 0 or 1 to keep math stable
+        
+        # Derive dual learning rates
+        # We scale them so that if bias=0.5, both are equal to self.alpha
+        alpha_pos = self.alpha * (2 * bias)
+        alpha_neg = self.alpha * (2 * (1 - bias))
+        
+        # Clip alphas to [0, 1]
+        alpha_pos = np.clip(alpha_pos, 0, 1)
+        alpha_neg = np.clip(alpha_neg, 0, 1)
+
+        # Stage 2 Update
+        pe2 = reward - self.q_stage2[state, action_2]
+        lr2 = alpha_pos if pe2 > 0 else alpha_neg
+        self.q_stage2[state, action_2] += lr2 * pe2
+        
+        # Stage 1 Update
+        pe1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        lr1 = alpha_pos if pe1 > 0 else alpha_neg
+        self.q_stage1[action_1] += lr1 * pe1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

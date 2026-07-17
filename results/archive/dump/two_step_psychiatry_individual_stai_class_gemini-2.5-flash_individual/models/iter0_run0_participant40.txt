@@ -1,0 +1,166 @@
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant uses a standard Q-learning algorithm.
+    Their low anxiety level (STAI score) influences their exploration-exploitation trade-off,
+    leading to a higher degree of exploration (lower effective inverse temperature, beta)
+    compared to a highly anxious individual. Specifically, lower STAI scores lead to a lower effective beta.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       - Learning rate
+    beta_base: [0, 10]  - Base inverse temperature for softmax
+    stai_mod_factor: [0, 1] - Factor determining how strongly STAI modulates beta.
+                              A value of 0 means no modulation, 1 means full modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stai_mod_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective beta based on STAI score.
+        # Lower STAI (low anxiety) means a smaller reduction from 1, resulting in a lower effective beta.
+        # Example: if stai_mod_factor=1, stai=0.26, beta_eff = beta_base * (1 - 0.26) = beta_base * 0.74.
+        # A lower beta implies more exploration in the softmax function.
+        self.beta_effective = self.beta_base * (1 - self.stai * self.stai_mod_factor)
+        # Ensure beta_effective is not too small (to avoid numerical issues in softmax)
+        self.beta_effective = max(0.01, self.beta_effective) 
+        
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the STAI-modulated beta."""
+        return self.softmax(self.q_stage1, self.beta_effective)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using the STAI-modulated beta."""
+        return self.softmax(self.q_stage2[state], self.beta_effective)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes a hybrid reinforcement learning strategy, blending
+    model-free (MF) and model-based (MB) control. The participant's low anxiety (STAI score)
+    is hypothesized to increase their reliance on the model-based system, leading to more
+    planning and foresight.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       - Learning rate for Q-values
+    beta: [0, 10]       - Inverse temperature for softmax
+    w_base: [0, 1]      - Base weight for model-based control (0=pure MF, 1=pure MB)
+    w_stai_mod: [0, 1]  - Factor by which low STAI increases model-based weight.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize the blended Q-values for stage 1, which will be computed in pre_trial.
+        self.q_stage1_blended = np.zeros(self.n_choices) 
+
+    def pre_trial(self) -> None:
+        """
+        Compute blended Q-values for stage 1 choices *before* the policy_stage1 is called
+        for the current trial. This ensures the policy uses the most up-to-date blended values.
+        """
+        # Calculate Q_MB (model-based Q-values) for stage 1
+        q_stage1_mb = np.zeros(self.n_choices)
+        for a1_idx in range(self.n_choices): # For each spaceship
+            expected_value_next_state = 0
+            for s_idx in range(self.n_states): # For each possible planet
+                prob_transition = self.T[a1_idx, s_idx]
+                # Max Q-value for stage 2 at that planet, representing optimal choice at stage 2
+                max_q2_at_s = np.max(self.q_stage2[s_idx, :])
+                expected_value_next_state += prob_transition * max_q2_at_s
+            q_stage1_mb[a1_idx] = expected_value_next_state # Assuming no immediate reward for stage 1 choice
+
+        # STAI modulation: Lower STAI (low anxiety) means higher effective 'w'
+        # Example: if w_stai_mod=1, stai=0.26, w_effective = w_base + (1 - 0.26) = w_base + 0.74.
+        # This increases the weight on model-based control for low-anxiety individuals.
+        w_effective = np.clip(self.w_base + (1 - self.stai) * self.w_stai_mod, 0, 1)
+
+        # Blend Q_MF (self.q_stage1 from base class) and Q_MB (q_stage1_mb)
+        self.q_stage1_blended = w_effective * q_stage1_mb + \
+                                (1 - w_effective) * self.q_stage1
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the blended Q-values."""
+        return self.softmax(self.q_stage1_blended, self.beta)
+            
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update model-free Q-values (self.q_stage1, self.q_stage2) and transition probabilities (self.T).
+        The blended Q-values for the *next* trial will be computed in pre_trial.
+        """
+        # 1. Update Q_MF (model-free Q-values) for stage 2 and stage 1
+        delta_2_mf = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2_mf
+        
+        # This update for Q1 is purely model-free, based on the observed Q2 value.
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1_mf
+        
+        # 2. Update transition probabilities (model learning)
+        # Using a simple count-based update for observed transitions
+        self.trans_counts[action_1, state] += 1
+        # Re-normalize transition probabilities
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant exhibits reward sensitivity,
+    specifically loss aversion, where negative outcomes are weighted more heavily.
+    Their low anxiety (STAI score) is hypothesized to reduce their degree of loss aversion,
+    meaning negative rewards are perceived less harshly compared to individuals with high anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       - Learning rate
+    beta: [0, 10]       - Inverse temperature for softmax
+    lambda_base: [1, 5] - Base loss aversion parameter (1 = no loss aversion, >1 = loss aversion)
+    stai_loss_mod_factor: [0, 1] - Factor determining how strongly STAI modulates loss aversion.
+                                   A value of 0 means no modulation, 1 means full modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base, self.stai_loss_mod_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective lambda based on STAI score.
+        # Lower STAI (low anxiety) means a smaller reduction from 1, resulting in a lower effective lambda.
+        # Example: if stai_loss_mod_factor=1, stai=0.26, lambda_eff = lambda_base * (1 - 0.26) = lambda_base * 0.74.
+        # This means less loss aversion for low-anxiety individuals.
+        self.lambda_effective = self.lambda_base * (1 - self.stai * self.stai_loss_mod_factor)
+        # Ensure lambda_effective is at least 1 (no less than no loss aversion)
+        self.lambda_effective = max(1.0, self.lambda_effective)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome, applying STAI-modulated loss aversion
+        to negative rewards before computing prediction errors.
+        """
+        # Apply loss aversion to the reward if it's negative
+        processed_reward = reward
+        if reward < 0:
+            processed_reward = reward * self.lambda_effective
+        
+        # Standard TD learning updates, but using the processed reward
+        delta_2 = processed_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # The stage 1 update uses the updated Q_stage2 value, which implicitly incorporates
+        # the processed reward's effect.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    # Policy methods remain default, using the 'beta' parameter unpacked in init.
+    # The STAI effect is on value processing (loss aversion), not directly on choice temperature.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,242 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Lateral Inhibition.
+    
+    This model hypothesizes that high anxiety leads to a "winner-take-all" dynamic 
+    in value updates. When the participant chooses an option and updates its value, 
+    they actively suppress (inhibit) the value of the unchosen option. This creates 
+    a contrast enhancement effect, making them more likely to stick with a chosen 
+    path and less likely to switch, driven by anxiety.
+    
+    Mechanism:
+    When updating Q(chosen), Q(unchosen) is decreased by (inhibition * STAI).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    inhibition: [0, 1] (Magnitude of suppression scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.inhibition = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update for chosen action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Lateral Inhibition: Suppress the unchosen action
+        unchosen_action = 1 - action_1
+        suppression = self.inhibition * self.stai
+        self.q_stage1[unchosen_action] -= suppression
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Fixed-Model Bias.
+    
+    This model hypothesizes that anxious individuals rely more heavily on the 
+    explicit instructions (the "Fixed Model") rather than learning the transition 
+    structure dynamically or relying purely on model-free caching. They trust the 
+    rule "A goes to X, B goes to Y" regardless of the actual observed transitions 
+    (rare or common).
+    
+    Mechanism:
+    The Stage 1 Q-values are a weighted mixture of the Model-Free Q-values and 
+    Q-values derived from a fixed transition matrix (70/30). The weight of the 
+    Fixed Model is determined by STAI.
+    
+    Q_net = (1 - w_fixed) * Q_MF + w_fixed * Q_FixedModel
+    w_fixed = fixed_weight * STAI
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    fixed_weight: [0, 1] (Max weight of the fixed model component)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.fixed_weight = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Q-values based on the Fixed Model (Instructions)
+        # A (0) -> X (0) is 0.7, Y (1) is 0.3
+        # B (1) -> X (0) is 0.3, Y (1) is 0.7
+        q_fixed = np.zeros(2)
+        max_q2_x = np.max(self.q_stage2[0])
+        max_q2_y = np.max(self.q_stage2[1])
+        
+        q_fixed[0] = 0.7 * max_q2_x + 0.3 * max_q2_y
+        q_fixed[1] = 0.3 * max_q2_x + 0.7 * max_q2_y
+        
+        # Mix MF and Fixed Model based on anxiety
+        w = np.clip(self.fixed_weight * self.stai, 0, 1)
+        q_hybrid = (1 - w) * self.q_stage1 + w * q_fixed
+        
+        return self.softmax(q_hybrid, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Direct Reinforcement (Stage-Skipping).
+    
+    This model hypothesizes that high anxiety causes "cognitive tunneling" where 
+    the participant ignores the intermediate structure of the task (Stage 2 states) 
+    and reinforces Stage 1 choices directly based on the final outcome. This is 
+    a form of pure Model-Free learning that bypasses the Bellman equation's 
+    chaining of values (Q1 <- Q2).
+    
+    Mechanism:
+    In addition to the standard TD update (Q1 updates towards Q2), there is a 
+    direct update where Q1 updates towards the Reward. The learning rate for this 
+    direct path is scaled by STAI.
+    
+    Q1[a1] += alpha_direct * (Reward - Q1[a1])
+    alpha_direct = direct_scale * STAI
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    direct_scale: [0, 1] (Scaling factor for direct reinforcement learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.direct_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD update for Stage 1 (Q1 <- Q2)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Direct Reinforcement (Stage-Skipping): Q1 <- Reward
+        # This bypasses the state representation of Stage 2
+        alpha_direct = np.clip(self.direct_scale * self.stai, 0, 1)
+        delta_direct = reward - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_direct * delta_direct
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

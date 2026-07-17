@@ -1,0 +1,140 @@
+Here are 3 new cognitive models exploring different mechanisms for how high anxiety (STAI = 0.6625) might influence decision-making in this task.
+
+### Model 1: Anxiety-Driven Model-Based Suppression
+This model hypothesizes that high anxiety consumes cognitive resources required for complex model-based planning (calculating expected values based on transition probabilities). Instead of a simple mix, anxiety actively *suppresses* the model-based contribution, forcing reliance on simpler model-free (habitual) learning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety consumes cognitive resources, actively suppressing 
+    model-based planning capabilities. The weight given to model-based values (w) 
+    is inversely proportional to the STAI score.
+    
+    Mechanism:
+    The final Q-value for Stage 1 is a weighted mix of Model-Free (MF) and Model-Based (MB) values.
+    w = w_max * (1 - STAI)
+    Q_net = w * Q_MB + (1 - w) * Q_MF
+    
+    This implies that highly anxious participants are structurally incapable of 
+    relying heavily on model-based planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_max: [0, 1]       # Maximum possible model-based weight (for STAI=0)
+    """
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the fixed weight based on STAI once
+        # If STAI is 1.0, w becomes 0 (pure model-free).
+        # If STAI is 0.0, w becomes w_max.
+        self.w = self.w_max * (1.0 - self.stai)
+        self.w = np.clip(self.w, 0, 1)
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Value: self.q_stage1 (standard TD)
+        
+        # 2. Model-Based Value: Bellman equation using transition matrix T and Stage 2 values
+        # Q_MB(a1) = sum(P(s|a1) * max(Q_stage2(s, :)))
+        # We use max(Q_stage2) as a proxy for the value of the state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Value of each state (2,)
+        q_mb = self.T @ v_stage2 # (2,2) @ (2,) -> (2,)
+        
+        # 3. Integrated Value
+        q_net = self.w * q_mb + (1 - self.w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Win-Stay/Lose-Shift Amplification
+This model hypothesizes that anxiety increases sensitivity to immediate outcomes, manifesting as a heuristic "Win-Stay, Lose-Shift" (WSLS) strategy that overrides learned values. High anxiety participants may react reflexively to the most recent reward rather than integrating history.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety amplifies a primitive "Win-Stay, Lose-Shift" (WSLS) heuristic 
+    at the expense of value-based learning.
+    
+    Mechanism:
+    A WSLS bonus is added to the Q-values of the previously chosen action at Stage 1.
+    If the last trial was rewarded, the previous action gets a bonus.
+    If the last trial was unrewarded, the previous action gets a penalty (or other actions get a bonus).
+    The magnitude of this WSLS effect is scaled by STAI.
+    
+    Q_net(a) = Q_learned(a) + (STAI * wsls_strength * Indicator(WSLS))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    wsls_strength: [0, 5] # Magnitude of the heuristic bias
+    """
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.wsls_strength = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_net = self.q_stage1.copy()
+        
+        # Apply WSLS heuristic if we have a previous trial
+        if self.last_action1 is not None and self.last_reward is not None:
+            bias = self.wsls_strength * self.stai
+            
+            if self.last_reward > 0:
+                # Win-Stay: Boost the last chosen action
+                q_net[self.last_action1] += bias
+            else:
+                # Lose-Shift: Boost the unchosen action (equivalent to penalizing chosen)
+                unchosen = 1 - self.last_action1
+                q_net[unchosen] += bias
+                
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Perseveration (Stickiness)
+This model hypothesizes that anxiety leads to behavioral rigidity or "freezing," resulting in a tendency to repeat the previous choice regardless of the outcome (perseveration). This is distinct from learning; it is a motor or cognitive inertia scaled by anxiety.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety causes behavioral rigidity (perseveration). 
+    High anxiety participants are more likely to simply repeat their last Stage 1 
+    choice, regardless of reward history or model-based inference.
+    
+    Mechanism:
+    A 'stickiness' bonus is added to the previously chosen action.
+    The magnitude of this stickiness is determined by a base parameter plus 
+    an anxiety-dependent component.
+    
+    Stickiness = stick_base + (stick_anxiety_slope * STAI)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    stick_base: [-2, 2]       # Base tendency to repeat (or switch if negative)
+    stick_anxiety_slope: [0, 5] # Additional stickiness due to anxiety
+    """
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stick_base, self.stick_anxiety_slope = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_net = self.q_stage1.copy()
+        
+        if self.last_action1 is not None:
+            # Calculate total stickiness
+            total_stickiness = self.stick_base + (self.stick_anxiety_slope * self.stai)
+            
+            # Add to the value of the previously chosen action
+            q_net[self.last_action1] += total_stickiness
+            
+        return self.softmax(q_net, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

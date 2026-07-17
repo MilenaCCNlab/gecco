@@ -1,0 +1,192 @@
+Here are three cognitive models designed to capture different aspects of the participant's behavior, particularly focusing on their low anxiety (STAI = 0.2875) and the observed pattern of choices.
+
+### Model 1: Model-Based/Model-Free Hybrid with Anxiety-Modulated Mixing
+This model hypothesizes that the participant uses a mixture of Model-Based (planning using transition probabilities) and Model-Free (habitual TD learning) strategies. Given the low anxiety score, the model tests the hypothesis that lower anxiety leads to a stronger reliance on Model-Based planning (goal-directed behavior) rather than Model-Free habits. The mixing weight `w` is modulated by the STAI score.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This participant employs a hybrid Model-Based (MB) and Model-Free (MF) reinforcement learning strategy.
+    Low anxiety (low STAI) is hypothesized to correlate with higher cognitive resources available for model-based planning.
+    Therefore, the mixing weight 'w' (0=MF, 1=MB) is modulated by STAI such that lower STAI increases 'w'.
+    
+    The model calculates Q-values for Stage 1 using both:
+    1. MF: TD learning from the second stage value.
+    2. MB: Bellman equation using learned transition probabilities and Stage 2 values.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta: [0, 10]   # Inverse temperature
+    w_base: [0, 1]  # Base mixing weight
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize MF Q-values
+        self.q_mf = np.zeros(self.n_choices)
+        # Initialize MB Q-values (computed on the fly, but storage useful)
+        self.q_mb = np.zeros(self.n_choices)
+        # Transition counts for MB learning
+        self.trans_counts = np.ones((self.n_choices, self.n_states)) # Laplace smoothing
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Compute Model-Based values
+        # Transition probs: T[action, state]
+        T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+        # V_stage2 = max Q_stage2 for each state
+        v_stage2 = np.max(self.q_stage2, axis=1)
+        self.q_mb = T @ v_stage2
+
+        # 2. Compute Mixing Weight modulated by STAI
+        # Hypothesis: Low STAI -> Higher w (more MB). 
+        # We map STAI (approx 0.2-0.8 range) to a modulation factor.
+        # Using a simple linear inverse relationship bounded at 0 and 1.
+        # If STAI is low, modulation is positive.
+        stai_factor = (0.5 - self.stai) # Positive for low anxiety, negative for high
+        w = self.w_base + stai_factor
+        w = np.clip(w, 0.0, 1.0)
+
+        # 3. Combine
+        q_net = w * self.q_mb + (1 - w) * self.q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 MF Update (TD-learning)
+        # Using Q(s2, a2) as the target (SARSA-like) or max Q (Q-learning)
+        # Standard 2-step task often uses the value of the state arrived at.
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+        
+        # Model-Based Transition Update
+        self.trans_counts[action_1, state] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Perseveration with Anxiety-Driven Exploration Suppression
+This model hypothesizes that the participant's behavior is dominated by a simple Model-Free strategy augmented by "perseveration" (stickiness to the previous choice). The STAI score modulates the exploration-exploitation trade-off. Specifically, even with low anxiety, there might be a baseline tendency to repeat choices (perseveration). However, the hypothesis here is that *lower* anxiety allows for *more* flexible switching when rewards are low, whereas high anxiety might lead to rigid perseveration or random flailing. Here, we model `perseveration` strength as inversely related to STAI: lower anxiety participants might actually be *less* sticky and more optimal, or conversely, they might be comfortable sticking with a good option without anxious switching. Given the data shows long streaks of choosing spaceship 0, we test if low anxiety correlates with high `perseveration` (stability) when things are going well.
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This participant relies on Model-Free learning with a 'stickiness' or perseveration bonus.
+    The STAI score modulates the inverse temperature (beta).
+    
+    Hypothesis: Low anxiety (low STAI) corresponds to a more precise selection mechanism (higher beta),
+    meaning the participant is less 'noisy' and more deterministic in exploiting high values.
+    High anxiety would introduce noise (lower beta).
+    
+    Additionally, a perseveration parameter 'p' adds a bonus to the previously chosen action,
+    capturing the long streaks of identical choices seen in the data.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta_base: [0, 10] # Base inverse temperature
+    pers: [-5, 5]   # Perseveration bonus
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.pers = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta based on STAI
+        # Low STAI -> Higher Beta (less noise)
+        # We assume a baseline beta and scale it up for low anxiety.
+        # 0.28 is low, so (1 - 0.28) is high.
+        effective_beta = self.beta_base * (1.0 + (0.5 - self.stai))
+        effective_beta = max(0.0, effective_beta)
+
+        # Add perseveration bonus
+        q_values = self.q_stage1.copy()
+        if self.last_action1 is not None:
+            q_values[self.last_action1] += self.pers
+            
+        return self.softmax(q_values, effective_beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning for both stages
+        # Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1
+        # Using the value of the chosen stage 2 action as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Asymmetric Learning Rates Modulated by Anxiety
+This model investigates whether the participant learns differently from positive versus negative prediction errors, and if this asymmetry is driven by their anxiety level. The hypothesis is that even low-anxiety individuals might have a bias, but perhaps less pronounced than high-anxiety individuals who might over-weight negative outcomes. However, looking at the data, the participant persists with Spaceship 0 even after some 0 rewards. This suggests they might under-weight negative prediction errors (ignoring losses) or have a very high learning rate for positive outcomes.
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant learns with asymmetric learning rates for positive (alpha_pos) 
+    and negative (alpha_neg) prediction errors.
+    
+    The STAI score modulates the ratio between these learning rates.
+    Low anxiety (low STAI) is hypothesized to result in a more balanced learning profile 
+    or a bias towards positive reinforcement (optimism), whereas high anxiety might bias towards 
+    negative avoidance.
+    
+    We define a base alpha and a bias parameter. The bias is shifted by STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] # Base learning rate
+    beta: [0, 10]      # Inverse temperature
+    bias: [0, 1]       # Bias towards positive learning (0.5 = neutral)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.bias = model_parameters
+
+    def init_model(self) -> None:
+        # Adjust bias based on STAI
+        # If STAI is low (e.g. 0.28), we increase the positive bias.
+        # If STAI is high, we might decrease it (closer to 0 or negative bias).
+        # We center STAI around 0.4 (approx population mean/cutoff).
+        stai_effect = (0.4 - self.stai) * 0.5 # Scale effect
+        
+        self.effective_bias = np.clip(self.bias + stai_effect, 0.01, 0.99)
+        
+        # Split alpha into pos and neg based on effective bias
+        # bias > 0.5 means alpha_pos > alpha_neg
+        self.alpha_pos = self.alpha_base * (2 * self.effective_bias)
+        self.alpha_neg = self.alpha_base * (2 * (1 - self.effective_bias))
+        
+        # Clip to ensure stability
+        self.alpha_pos = np.clip(self.alpha_pos, 0, 1)
+        self.alpha_neg = np.clip(self.alpha_neg, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 > 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        # TD(0) update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 > 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

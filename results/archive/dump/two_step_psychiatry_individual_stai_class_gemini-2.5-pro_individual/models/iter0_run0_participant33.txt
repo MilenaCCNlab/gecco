@@ -1,0 +1,131 @@
+As a cognitive scientist and programmer, I will propose three distinct models to explain this participant's decision-making process. Given the participant's high STAI score of 0.75, each model will test a different hypothesis about how anxiety influences learning and choice in this two-step task.
+
+### Model 1: Anxiety-Amplified Pessimism
+This model tests the hypothesis that anxiety leads to a "pessimistic" learning style, where individuals are more sensitive to negative outcomes (i.e., not receiving a coin) than positive ones. This is implemented by using a higher learning rate for negative prediction errors, with the magnitude of this bias being scaled by the participant's anxiety level.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that anxiety modulates learning asymmetrically. 
+    Specifically, high anxiety (a high STAI score) amplifies learning from negative
+    outcomes (prediction errors where the outcome was worse than expected). This 
+    captures a "pessimistic" learning style, where failures loom larger than successes. 
+    The model uses separate effective learning rates for positive and negative prediction 
+    errors, with the learning rate for negative errors being scaled up by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Base learning rate)
+    beta: [0, 10]     (Decision stochasticity)
+    neg_bias: [0, 2]   (Anxiety-driven bias towards learning from negative events)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_bias = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update with asymmetric learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha * (1 + self.neg_bias * self.stai) if delta_2 < 0 else self.alpha
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update with asymmetric learning
+        # The TD target is the updated Q-value from stage 2
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha * (1 + self.neg_bias * self.stai) if delta_1 < 0 else self.alpha
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Perseveration
+This model explores the idea that anxiety promotes behavioral rigidity. Instead of flexibly adapting to outcomes, an anxious individual might get "stuck" repeating a previous choice. This is modeled as a "stickiness" bonus added to the value of the action that was just taken. The strength of this perseverative tendency is directly proportional to the participant's STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that anxiety induces behavioral perseveration, 
+    or a "stickiness" to recent choices. Anxious individuals may be less flexible 
+    and more likely to repeat an action, irrespective of its recent outcomes. This 
+    is implemented as a bonus value added to the most recently chosen stage-1 action. 
+    The magnitude of this stickiness bonus is directly scaled by the participant's 
+    STAI score, such that higher anxiety leads to stronger perseveration.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]     (Decision stochasticity)
+    kappa: [0, 5]      (Strength of the perseveration bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize a perseverance bonus for each stage-1 action
+        self.perseveration_bonus = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities including perseveration bonus."""
+        # Add the perseveration bonus to the learned Q-values
+        q_effective = self.q_stage1 + self.perseveration_bonus
+        return self.softmax(q_effective, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update the perseveration bonus for the next trial."""
+        super().post_trial(action_1, state, action_2, reward)
+        # Set bonus for the chosen action, scaled by anxiety
+        self.perseveration_bonus[action_1] = self.kappa * self.stai
+        # Reset bonus for the unchosen action
+        self.perseveration_bonus[1 - action_1] = 0.0
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Impaired Planning
+This model tests a central theory in computational psychiatry: that anxiety impairs goal-directed planning (model-based control) and favors habitual actions (model-free control). The model implements a hybrid controller that arbitrates between these two systems. The weight given to the computationally intensive planning system is reduced as a function of the participant's anxiety, pushing choices to be more reliant on simple, learned habits.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that anxiety impairs model-based, goal-directed 
+    planning. It implements a hybrid controller that mixes model-free (habitual) 
+    and model-based (planning) value estimates. The weight given to the computationally 
+    demanding model-based controller is negatively modulated by the STAI score. 
+    Therefore, a highly anxious participant is predicted to rely more heavily on 
+    simpler, less accurate model-free values, reflecting a shift from planning to habit.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for the model-free system)
+    beta: [0, 10]     (Decision stochasticity)
+    w: [0, 1]          (Base weight on the model-based controller)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using a hybrid MB/MF controller."""
+        # 1. Model-Free (MF) values are stored directly from past learning
+        q_mf = self.q_stage1
+
+        # 2. Model-Based (MB) values are computed on the fly using the transition model
+        max_q_s2 = np.max(self.q_stage2, axis=1) # Max value for each planet
+        q_mb = self.T @ max_q_s2 # Expected value of spaceships given transitions
+
+        # 3. Anxiety modulates the mixing weight
+        # Higher STAI score reduces the weight on the MB system
+        effective_w = self.w * (1 - self.stai)
+
+        # 4. Combine MF and MB values to form a hybrid Q-value
+        q_hybrid = effective_w * q_mb + (1 - effective_w) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    # Note: The base class value_update method correctly updates the model-free 
+    # (q_stage1) and stage-2 (q_stage2) values, which are the necessary inputs 
+    # for this hybrid policy.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

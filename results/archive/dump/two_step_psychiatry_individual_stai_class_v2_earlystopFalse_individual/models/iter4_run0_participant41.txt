@@ -1,0 +1,131 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates value coupling (generalization) between options.
+    High anxiety leads to updating the unchosen option based on the chosen option's outcome.
+    
+    The participant might view the spaceships as correlated. If 'coupling' is positive, 
+    a positive prediction error for the chosen spaceship improves the value of the 
+    unchosen one (optimism/correlation). If negative, it devalues it (competition).
+    The magnitude of this spread is scaled by the participant's STAI score.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     # Learning rate
+    beta: [0, 10]     # Inverse temperature
+    coupling: [-1, 1] # Correlation coefficient (-1 to 1)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.coupling = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Model-Free)
+        # Calculate prediction error based on the value of the state arrived at
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Hypothesis: Update unchosen option
+        unchosen_action = 1 - action_1
+        
+        # The coupling effect is modulated by anxiety
+        effective_coupling = self.coupling * self.stai
+        
+        # Apply a fraction of the chosen option's prediction error to the unchosen option
+        self.q_stage1[unchosen_action] += self.alpha * effective_coupling * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety promotes reactive "Win-Stay, Lose-Shift" behavior.
+    Instead of relying solely on integrated value (Q-learning), anxious participants
+    have a heuristic bias to repeat rewarded actions and switch from unrewarded ones.
+    
+    This bias is added to the Q-values before the softmax step, overriding or 
+    enhancing the learned values.
+    Bias = reactivity * stai * (1 if Win else -1)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    reactivity: [0, 5] # Strength of the heuristic bias
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.reactivity = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_vals = self.q_stage1.copy()
+        
+        # Apply reactive bias if there was a previous trial
+        if self.last_action1 is not None and self.last_reward is not None:
+            # Direction: +1 for Win (Stay), -1 for Loss (Shift)
+            # Assuming Reward is 1.0 or 0.0
+            direction = 1.0 if self.last_reward > 0 else -1.0
+            
+            # The strength of this heuristic is determined by anxiety
+            bias = self.reactivity * self.stai * direction
+            
+            q_vals[int(self.last_action1)] += bias
+            
+        return self.softmax(q_vals, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety acts as a cognitive load, impairing Model-Based control.
+    The participant uses a hybrid Model-Based / Model-Free strategy.
+    The weight 'w' given to the Model-Based component is reduced by anxiety.
+    
+    w = w_max * (1 - stai)
+    
+    If STAI is high, behavior is dominated by Model-Free (TD) values.
+    If STAI is low, behavior integrates Model-Based planning (using transition matrix).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate (for MF values)
+    beta: [0, 10]   # Inverse temperature
+    w_max: [0, 1]   # Maximum model-based weight (at 0 anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values
+        # Q_MB(a) = Sum_s' T(s'|a) * Max_a' Q_stage2(s', a')
+        q_mb = np.zeros(self.n_choices)
+        
+        # Use the transition probabilities stored in self.T (from base class)
+        # self.T is shape (2, 2) -> [[P(X|A), P(Y|A)], [P(X|U), P(Y|U)]]
+        
+        # Get the max value available in each state (X and Y)
+        max_q_stage2 = np.max(self.q_stage2, axis=1) 
+        
+        for a in range(self.n_choices):
+            # T[a] is the row of transition probs for action a
+            q_mb[a] = np.dot(self.T[a], max_q_stage2)
+            
+        # 2. Calculate Mixing Weight
+        # The weight is constrained by STAI. High anxiety -> Low w (Low MB)
+        w = self.w_max * (1.0 - self.stai)
+        w = np.clip(w, 0.0, 1.0)
+        
+        # 3. Combine Values
+        # self.q_stage1 tracks the Model-Free values (updated in value_update)
+        q_net = w * q_mb + (1.0 - w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

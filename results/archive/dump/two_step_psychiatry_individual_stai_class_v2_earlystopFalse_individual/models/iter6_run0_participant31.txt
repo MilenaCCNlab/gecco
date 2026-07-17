@@ -1,0 +1,124 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety leads to "entrenchment" or cumulative perseveration. 
+    Unlike simple stickiness (which depends only on the last choice), this model 
+    posits that anxious individuals build up a 'choice trace' over time. 
+    Repeatedly choosing the same option makes them increasingly likely to choose it again, 
+    making habits harder to break. The weight of this cumulative bias is scaled by STAI.
+
+    Mechanism:
+    - A leaky integrator tracks choice history: trace = decay * trace + choice_indicator
+    - A bias is added to Q-values: Q_biased = Q + (w_persev * STAI * trace)
+    - Decay is fixed at 0.8 to capture medium-term history.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_persev: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_persev = model_parameters
+
+    def init_model(self) -> None:
+        self.choice_trace = np.zeros(self.n_choices)
+        self.trace_decay = 0.8
+
+    def policy_stage1(self) -> np.ndarray:
+        # Add cumulative perseveration bonus scaled by STAI
+        bonus = self.w_persev * self.stai * self.choice_trace
+        return self.softmax(self.q_stage1 + bonus, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Update choice trace (leaky integration)
+        self.choice_trace *= self.trace_decay
+        self.choice_trace[action_1] += 1.0
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety promotes the use of simple reactive heuristics 
+    (Win-Stay, Lose-Shift) to reduce cognitive load, rather than relying solely 
+    on value-based reinforcement learning.
+    
+    The final policy is a mixture of the RL policy (Softmax) and the WSLS heuristic.
+    The weight of the heuristic component increases with STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_heuristic_scale: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_heuristic_scale = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Compute RL probabilities
+        p_rl = self.softmax(self.q_stage1, self.beta)
+        
+        # 2. Compute WSLS probabilities
+        p_wsls = np.ones(self.n_choices) / self.n_choices # Default uniform if no history
+        
+        if self.last_action1 is not None and self.last_reward is not None:
+            p_wsls = np.zeros(self.n_choices)
+            prev_a = int(self.last_action1)
+            if self.last_reward > 0: # Win: Stay
+                p_wsls[prev_a] = 1.0
+            else: # Lose: Shift
+                p_wsls[1 - prev_a] = 1.0
+        
+        # 3. Mix policies based on STAI
+        # Ensure weight is within [0, 1]
+        w = min(1.0, max(0.0, self.w_heuristic_scale * self.stai))
+        
+        return (1 - w) * p_rl + w * p_wsls
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety causes a "panic" response to negative outcomes (losses), 
+    resulting in increased uncertainty and exploration specifically after a loss.
+    
+    This is modeled by modulating the inverse temperature (beta). 
+    After a loss (0 coins), beta is reduced (more random behavior), 
+    scaled by the participant's STAI score. After a win, beta remains at baseline.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    loss_sensitivity: [0, 10]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.loss_sensitivity = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        current_beta = self.beta_base
+        
+        # If the last trial was a loss (reward == 0), reduce beta based on STAI
+        if self.last_reward is not None and self.last_reward == 0:
+            # Denominator increases with STAI, reducing beta
+            current_beta = self.beta_base / (1.0 + self.loss_sensitivity * self.stai)
+            
+        return self.softmax(self.q_stage1, current_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Apply the same state of mind (beta) to stage 2
+        current_beta = self.beta_base
+        if self.last_reward is not None and self.last_reward == 0:
+            current_beta = self.beta_base / (1.0 + self.loss_sensitivity * self.stai)
+            
+        return self.softmax(self.q_stage2[state], current_beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

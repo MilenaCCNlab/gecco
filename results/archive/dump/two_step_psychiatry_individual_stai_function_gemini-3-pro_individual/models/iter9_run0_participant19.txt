@@ -1,0 +1,192 @@
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    STAI-modulated learning rate specifically for rare transitions.
+    
+    Hypothesis: High anxiety individuals are hypersensitive to 'structural' prediction errors.
+    When a rare transition occurs (model violation), they update their Model-Free values 
+    more aggressively than for common transitions, potentially destabilizing the hybrid policy.
+
+    Parameters:
+    - lr_base: [0, 1] Baseline learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for Model-Based control.
+    - rare_stai_slope: [0, 1] Additional learning rate added for rare transitions, scaled by STAI.
+    """
+    lr_base, beta, w, rare_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Determine if transition was rare (Action 0->State 1 or Action 1->State 0)
+        is_rare = (action_1[trial] != state_idx)
+        
+        # Calculate effective learning rate
+        current_lr = lr_base
+        if is_rare:
+            current_lr += (rare_stai_slope * stai_val)
+        
+        # Bound learning rate
+        if current_lr > 1.0: current_lr = 1.0
+        if current_lr < 0.0: current_lr = 0.0
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += current_lr * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Dual-Beta model where STAI modulates Stage 2 (Reactive) precision only.
+    
+    Hypothesis: Anxiety manifests differently in planning vs execution. 
+    This model posits that STAI affects the inverse temperature (consistency) 
+    of the second-stage choice (reactive to immediate reward), while the 
+    first-stage (planning) consistency remains independent of anxiety.
+
+    Parameters:
+    - lr: [0, 1] Learning rate.
+    - w: [0, 1] Weight for Model-Based control.
+    - beta_plan: [0, 10] Inverse temperature for Stage 1 (Planning).
+    - beta_reactive_base: [0, 10] Baseline inverse temperature for Stage 2.
+    - beta_reactive_stai: [-5, 5] Modulation of Stage 2 beta by STAI (can increase or decrease noise).
+    """
+    lr, w, beta_plan, beta_reactive_base, beta_reactive_stai = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Calculate Stage 2 beta once based on STAI
+    beta_stage2 = beta_reactive_base + (beta_reactive_stai * stai_val)
+    # Bound beta to be non-negative
+    if beta_stage2 < 0: beta_stage2 = 0
+    if beta_stage2 > 20: beta_stage2 = 20 # Upper safety bound
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Use beta_plan for Stage 1
+        exp_q1 = np.exp(beta_plan * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        # Use beta_stage2 for Stage 2
+        exp_q2 = np.exp(beta_stage2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += lr * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Post-Loss Model-Based Suppression model.
+    
+    Hypothesis: High anxiety leads to a collapse of cognitive control (Model-Based planning)
+    specifically following negative outcomes (losses). When the previous trial was a loss,
+    the agent relies more on Model-Free habits.
+
+    Parameters:
+    - lr: [0, 1] Learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w_base: [0, 1] Baseline weight for Model-Based control.
+    - w_loss_penalty_stai: [0, 2] Reduction in 'w' after a loss, scaled by STAI.
+    """
+    lr, beta, w_base, w_loss_penalty_stai = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_reward = 0 # Initialize previous reward
+
+    for trial in range(n_trials):
+        
+        # Calculate dynamic w based on previous trial outcome and STAI
+        current_w = w_base
+        if last_reward < 0:
+            current_w -= (w_loss_penalty_stai * stai_val)
+        
+        # Bound w
+        if current_w < 0: current_w = 0
+        if current_w > 1: current_w = 1
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = current_w * q_stage1_mb + (1 - current_w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += lr * delta_stage2
+        
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss

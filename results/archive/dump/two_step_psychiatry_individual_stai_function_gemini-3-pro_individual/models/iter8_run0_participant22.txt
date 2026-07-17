@@ -1,0 +1,234 @@
+Here are the 3 proposed cognitive models.
+
+### Model 1: Anxiety-Induced Transition Tunnel Vision
+This model tests the hypothesis opposite to the "Transition Degradation" model. Instead of anxiety causing uncertainty (blurring probabilities towards 0.5), this model posits that anxiety causes **Tunnel Vision** or "Transition Sharpening." High-anxiety participants may simplify the world by assuming the "Common" transition is nearly deterministic (closer to 1.0) to reduce cognitive load, effectively ignoring the possibility of Rare transitions during planning.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 1: Anxiety-Induced Transition Tunnel Vision.
+    
+    Hypothesis: Anxiety causes participants to over-sharpen their internal model 
+    of the environment. They may treat the common transition (usually 0.7) as 
+    nearly deterministic (closer to 1.0) to reduce the cognitive load of 
+    handling probabilistic uncertainty.
+    
+    Parameters:
+    - learning_rate: [0, 1] Value update rate.
+    - beta: [0, 10] Inverse temperature (softmax).
+    - w: [0, 1] Weight of Model-Based system (0=MF, 1=MB).
+    - trans_sharp_base: [0, 0.3] Base amount added to 0.7 for the common probability.
+    - trans_sharp_stai: [0, 0.5] Amount STAI further increases the perceived common probability.
+      (Perceived p = 0.7 + base + slope * stai).
+    """
+    learning_rate, beta, w, trans_sharp_base, trans_sharp_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate subjective transition probability
+    # Standard is 0.7. We add a sharpening factor based on STAI.
+    sharpening = trans_sharp_base + (trans_sharp_stai * stai_score)
+    perceived_common_p = 0.7 + sharpening
+    
+    # Cap at 0.99 to prevent log errors or mathematical impossibilities
+    if perceived_common_p > 0.99:
+        perceived_common_p = 0.99
+        
+    transition_matrix = np.array([[perceived_common_p, 1-perceived_common_p], 
+                                  [1-perceived_common_p, perceived_common_p]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        # MB calculation uses the sharpened (tunnel vision) matrix
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+
+        # --- Value Updating ---
+        # Standard TD updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Surprise Learning
+This model hypothesizes that anxiety creates a specific sensitivity to "Surprise" (Rare transitions). While standard models use a single learning rate, this model separates learning into `lr_common` (for expected transitions) and `lr_rare` (for unexpected transitions). It posits that anxious individuals are hyper-vigilant to anomalies, so their learning rate for Rare transitions increases with their STAI score.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 2: Anxiety-Modulated Surprise Learning (Rare Transition Hyper-vigilance).
+    
+    Hypothesis: Anxious individuals react differently to "surprise" (Rare transitions)
+    versus expected outcomes. This model uses a dynamic learning rate for Stage 1.
+    If the transition was Rare (Action 0->State 1 or Action 1->State 0), the 
+    learning rate is modulated by STAI.
+    
+    Parameters:
+    - lr_common: [0, 1] Learning rate for Common transitions.
+    - lr_rare_base: [0, 1] Base learning rate for Rare transitions.
+    - lr_rare_stai_slope: [0, 1] Increase in Rare LR per unit of STAI.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight of Model-Based system.
+    """
+    lr_common, lr_rare_base, lr_rare_stai_slope, beta, w = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate the personalized learning rate for rare events
+    lr_rare_person = lr_rare_base + (lr_rare_stai_slope * stai_score)
+    if lr_rare_person > 1.0: lr_rare_person = 1.0
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+
+        # --- Value Updating ---
+        
+        # Determine if transition was Common or Rare
+        # Common: (A->X/0->0) or (U->Y/1->1). Rare: (0->1) or (1->0).
+        is_common = (a1 == state_idx)
+        
+        current_lr = lr_common if is_common else lr_rare_person
+
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += current_lr * delta_stage1
+        
+        # We assume stage 2 learning uses the common rate as there is no "transition" logic there
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += lr_common * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Attentional Lapses
+This model incorporates an "epsilon-greedy" mixture into the softmax policy. It hypothesizes that high anxiety depletes attentional resources, leading to "lapses" where the participant momentarily disengages from value-based decision making and chooses randomly. The rate of these random lapses ($\epsilon$) is a linear function of the STAI score.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 3: Anxiety-Driven Attentional Lapses.
+    
+    Hypothesis: Anxiety reduces attentional control, leading to "lapses" or 
+    momentary disengagement from the task. This is modeled as a mixture of 
+    Softmax choice and uniform random choice (epsilon-greedy-like).
+    The weight of the random component (epsilon) increases with STAI.
+    
+    Parameters:
+    - learning_rate: [0, 1] Value update rate.
+    - beta: [0, 10] Inverse temperature for the Softmax component.
+    - w: [0, 1] Weight of Model-Based system.
+    - lapse_base: [0, 0.5] Base probability of a random choice (epsilon).
+    - lapse_stai_slope: [0, 0.5] Increase in lapse rate per unit of STAI.
+    """
+    learning_rate, beta, w, lapse_base, lapse_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate lapse rate (epsilon)
+    epsilon = lapse_base + (lapse_stai_slope * stai_score)
+    if epsilon > 0.9: epsilon = 0.9 # Cap to prevent total randomness
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        softmax_probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        # Mixture model: (1-eps) * Softmax + eps * Random(0.5)
+        probs_1 = (1 - epsilon) * softmax_probs_1 + epsilon * 0.5
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        softmax_probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        # We apply the same lapse rate to stage 2
+        probs_2 = (1 - epsilon) * softmax_probs_2 + epsilon * 0.5
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+
+        # --- Value Updating ---
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

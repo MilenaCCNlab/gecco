@@ -1,0 +1,175 @@
+Here are three cognitive models proposing different strategies for the participant, modulated by their high anxiety score.
+
+---
+
+### Cognitive Model 1: Model-Free RL with Anxiety-Modulated Learning Rate
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Model-Free Reinforcement Learning with Anxiety-Modulated Learning Rate.
+    This model proposes that the participant primarily learns through a model-free
+    (Q-learning) mechanism. High anxiety (STAI score) is hypothesized to increase
+    the effective learning rate, making the participant more reactive to recent
+    outcomes and potentially leading to more volatile Q-values and choice behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Base learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    alpha_stai_mod: [0, 1] - Modulatory parameter for STAI on the learning rate.
+                            A positive value means higher anxiety increases alpha.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.alpha_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective learning rate, modulated by STAI score.
+        # Higher STAI leads to a higher alpha, reflecting increased reactivity.
+        # Clip to ensure alpha remains within a valid [0, 1] range.
+        self.alpha_eff = np.clip(self.alpha_base + self.alpha_stai_mod * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using standard TD learning with the anxiety-modulated learning rate.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_eff * delta_2
+        
+        # Stage 1 update, using the updated value of the chosen stage 2 option
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_eff * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### Cognitive Model 2: Hybrid Model with Anxiety-Modulated Model-Based Weight
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Hybrid Model-Free/Model-Based Reinforcement Learning with Anxiety-Modulated Model-Based Weight.
+    This model assumes participants combine both habitual (model-free) and planning (model-based)
+    control strategies. High anxiety (STAI score) is hypothesized to reduce the weight given
+    to the model-based component, shifting decision-making towards more habitual, model-free control.
+    This could reflect a reduced capacity for deliberation or increased reliance on simpler strategies under stress.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for model-free Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    w_base: [0, 1] - Base weight for model-based control (0=purely MF, 1=purely MB).
+    w_stai_mod: [0, 1] - Modulatory parameter for STAI on the model-based weight.
+                         A positive value means higher anxiety *decreases* 'w'.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective model-based weight, modulated by STAI score.
+        # Higher STAI leads to a lower 'w_eff', reflecting reduced model-based control.
+        # Clip to ensure 'w_eff' stays within a valid [0, 1] range.
+        self.w_eff = np.clip(self.w_base - self.w_stai_mod * self.stai, 0, 1)
+
+        # The base class initializes self.trans_counts and self.T. We will update them.
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, update the transition probability counts based on the
+        outcome of the previous trial.
+        """
+        if self.trial > 0: # Only update after the first trial
+            # Increment the count for the observed (action1, state) transition
+            self.trans_counts[self.last_action1, self.last_state] += 1
+            # Recalculate transition probabilities
+            self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a weighted combination of
+        model-free and model-based Q-values.
+        """
+        # 1. Model-free Q-values (q_mf) are the directly learned Q-values for stage 1.
+        q_mf = self.q_stage1
+
+        # 2. Model-based Q-values (q_mb) are computed by planning one step ahead.
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices): # For each spaceship (action 1)
+            for s2 in range(self.n_states): # For each possible planet (state 2)
+                # P(s2|a1) is the probability of transitioning to state s2 given action a1
+                # max_a2 Q_MF(s2, a2) is the maximum expected value at stage 2 from state s2
+                max_q2_for_s2 = np.max(self.q_stage2[s2])
+                q_mb[a1] += self.T[a1, s2] * max_q2_for_s2
+
+        # 3. Combine model-free and model-based Q-values using the effective weight 'w_eff'.
+        q_combined = self.w_eff * q_mb + (1 - self.w_eff) * q_mf
+        
+        return self.softmax(q_combined, self.beta)
+
+    # The value_update method for q_stage1 and q_stage2 remains the base class's
+    # TD learning, updating only the model-free Q-values (`self.alpha` is used here).
+    # The `self.alpha` parameter from unpack_parameters will be used by the base `value_update`.
+    # No need to override value_update if it simply uses self.alpha, which is unpacked.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Cognitive Model 3: Prospect Theory with Anxiety-Modulated Loss Aversion
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Prospect Theory with Anxiety-Modulated Loss Aversion.
+    This model assumes participants evaluate outcomes with respect to a reference point,
+    and losses (receiving 0 coins) are weighted more heavily than gains (receiving 1 coin).
+    High anxiety (STAI score) is hypothesized to increase this loss aversion, making the
+    participant more sensitive to and avoidant of negative outcomes. This could lead
+    to more cautious behavior or stronger switching after a 0-coin outcome.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    lambda_base: [1, 5] - Base loss aversion parameter (values > 1 mean loss aversion).
+                          Lambda represents how much more impactful a loss of 1 unit is than a gain of 1 unit.
+    lambda_stai_mod: [0, 1] - Modulatory parameter for STAI on loss aversion.
+                              A positive value means higher anxiety increases lambda.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base, self.lambda_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective loss aversion parameter, modulated by STAI score.
+        # Higher STAI leads to a higher 'lambda_eff', reflecting increased loss aversion.
+        # Ensure 'lambda_eff' is at least 1 (no gain aversion).
+        self.lambda_eff = np.clip(self.lambda_base + self.lambda_stai_mod * self.stai, 1.0, None)
+        
+        # Initial Q-values are 0.5. They will adapt to the new subjective reward scale.
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using subjective rewards, where 0-coin outcomes are
+        weighted by the anxiety-modulated loss aversion parameter.
+        """
+        # Transform the objective reward into a subjective reward
+        # Reward of 1 remains 1. Reward of 0 becomes a negative value scaled by lambda_eff.
+        subjective_reward = reward if reward == 1 else -self.lambda_eff
+
+        # Stage 2 update using the subjective reward
+        delta_2 = subjective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update, using the updated value of the chosen stage 2 option
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

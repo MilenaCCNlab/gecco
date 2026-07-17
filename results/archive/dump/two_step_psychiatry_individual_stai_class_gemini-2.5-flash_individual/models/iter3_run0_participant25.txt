@@ -1,0 +1,177 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, with anxiety (STAI score) modulating a specific aspect of their cognitive process.
+
+```python
+import numpy as np # numpy is already available
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Model-Based and Model-Free Control with Anxiety Modulating Model-Based Weight.
+    This model posits that participants combine model-free (habitual) and model-based (goal-directed)
+    control to make decisions. Anxiety (STAI score) is hypothesized to reduce the weight given to
+    model-based control, leading to a greater reliance on simpler, habitual strategies.
+    Specifically, a higher STAI score will linearly decrease the influence of the model-based system
+    on first-stage choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (model-free component).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    omega_base: [0, 1] - Base weight for the model-based component.
+    stai_omega_factor: [0, 1] - Factor by which STAI score linearly decreases the effective omega.
+                                If 0, no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega_base, self.stai_omega_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective omega based on base rate and STAI score.
+        # Higher STAI leads to a lower effective_omega, increasing model-free reliance.
+        self.effective_omega = self.omega_base - self.stai_omega_factor * self.stai
+        # Clamp to [0, 1] to ensure it's a valid weight.
+        self.effective_omega = np.clip(self.effective_omega, 0, 1)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a mixture of model-free and model-based values.
+        """
+        # Model-free values are self.q_stage1, updated via TD learning.
+        q_mf_s1 = self.q_stage1.copy()
+
+        # Model-based values for stage 1
+        q_mb_s1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Expected future reward for choosing a1, considering common/rare transitions
+            # Sum over possible next states (planets)
+            expected_future_reward = 0
+            for s2 in range(self.n_states):
+                # Probability of transitioning to s2 given a1
+                transition_prob = self.T[a1, s2]
+                # Max value at stage 2 for state s2 (greedy choice)
+                max_q_s2 = np.max(self.q_stage2[s2])
+                expected_future_reward += transition_prob * max_q_s2
+            q_mb_s1[a1] = expected_future_reward
+        
+        # Combine model-free and model-based values
+        q_combined_s1 = self.effective_omega * q_mb_s1 + (1 - self.effective_omega) * q_mf_s1
+        
+        return self.softmax(q_combined_s1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values (model-free component) after observing outcome using standard TD learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update: uses the *updated* stage 2 value for the chosen path
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Reward Prediction Error (RPE) Sensitivity.
+    This model proposes that anxiety impacts the sensitivity to prediction errors,
+    effectively scaling the magnitude of the learning signal. Medium anxiety is
+    hypothesized to increase this sensitivity, meaning both positive and negative
+    prediction errors are amplified, leading to larger Q-value updates. This is
+    distinct from differential learning rates for positive/negative outcomes, as it
+    scales the raw prediction error before the learning rate is applied.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate applied after RPE scaling.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    k_base: [0, 2] - Base scaling factor for prediction errors. Values >1 amplify RPEs.
+    stai_k_factor: [0, 1] - Factor by which STAI score linearly increases the RPE scaling factor.
+                            If 0, no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.k_base, self.stai_k_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective RPE scaling factor based on base rate and STAI score.
+        # Higher STAI leads to a higher effective_k.
+        self.effective_k = self.k_base + self.stai_k_factor * self.stai
+        # Clamp to a reasonable range to avoid extreme values.
+        self.effective_k = np.clip(self.effective_k, 0, 5) # Allowing up to 5 for scaling
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values with anxiety-modulated RPE scaling.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        scaled_delta_2 = self.effective_k * delta_2
+        self.q_stage2[state, action_2] += self.alpha * scaled_delta_2
+        
+        # Stage 1 update
+        # The Q-value for stage 1 is updated towards the *updated* Q-value of the chosen stage 2 action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        scaled_delta_1 = self.effective_k * delta_1
+        self.q_stage1[action_1] += self.alpha * scaled_delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+
+
+class ParticipantModel4(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated State-Dependent Stickiness After Rare Transitions.
+    This model proposes that participants exhibit a "stickiness" or perseveration bias
+    towards their previously chosen first-stage action. Crucially, this stickiness
+    is amplified when the previous transition to the second stage was rare (unexpected),
+    and this amplification is further modulated by anxiety. Higher anxiety is
+    hypothesized to increase this conditional stickiness, potentially as a strategy
+    to reduce uncertainty or avoid further negative surprises after surprising events.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stickiness_base: [0, 5] - Base stickiness bonus added to the last chosen action's value.
+    stai_stickiness_factor: [0, 1] - Factor by which STAI score linearly increases stickiness
+                                     specifically after a rare transition. If 0, no STAI modulation.
+    rare_transition_threshold: [0, 1] - Probability threshold below which a transition is considered 'rare'.
+                                        For this task, a value like 0.35 would classify 0.3 transitions as rare.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_base, self.stai_stickiness_factor, self.rare_transition_threshold = model_parameters
+
+    def init_model(self) -> None:
+        # No specific initialization needed for anxiety modulation as it's computed per trial.
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities with anxiety-modulated state-dependent stickiness.
+        """
+        q_s1_biased = self.q_stage1.copy()
+
+        # Apply stickiness bonus if not the very first trial and previous actions/states are known
+        if self.trial > 0 and self.last_action1 is not None and self.last_state is not None:
+            # Check if the last transition was rare based on the defined threshold
+            last_transition_prob = self.T[self.last_action1, self.last_state]
+            is_rare_transition = (last_transition_prob < self.rare_transition_threshold)
+
+            # Calculate effective stickiness bonus
+            effective_stickiness_bonus = self.stickiness_base
+            if is_rare_transition:
+                # Anxiety amplifies stickiness only after a rare transition
+                effective_stickiness_bonus += self.stai_stickiness_factor * self.stai
+            
+            # Add bonus to the Q-value of the last chosen first-stage action
+            q_s1_biased[self.last_action1] += effective_stickiness_bonus
+        
+        return self.softmax(q_s1_biased, self.beta)
+
+    # The value_update and post_trial methods from the base class are sufficient
+    # as stickiness affects choice policy but not the learning rule itself.
+
+cognitive_model4 = make_cognitive_model(ParticipantModel4)
+```

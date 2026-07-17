@@ -1,0 +1,149 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Familiarity Bias.
+    
+    This model hypothesizes that high anxiety leads to a preference for "familiar" options 
+    as a safety-seeking behavior. Unlike simple stickiness (which repeats the very last action), 
+    this model tracks the cumulative history of choices.
+    
+    A "familiarity bonus" is added to the Q-value of an option, proportional to the 
+    frequency with which it has been chosen in the past. This bias is scaled by the 
+    participant's STAI score, suggesting that anxious individuals are more likely to 
+    habituate to a specific choice to avoid the uncertainty of switching.
+
+    Q_net(a) = Q_learned(a) + (familiarity_w * STAI * (count(a) / trial_number))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    familiarity_w: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.familiarity_w = model_parameters
+
+    def init_model(self) -> None:
+        # Track cumulative choices for each spaceship
+        self.choice_counts = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        q_biased = self.q_stage1.copy()
+        
+        # Apply familiarity bonus only after the first trial
+        if self.trial > 0:
+            # Calculate frequency of choice (0 to 1)
+            familiarity = self.choice_counts / self.trial
+            # Bonus is scaled by anxiety (STAI) and the weight parameter
+            bonus = self.familiarity_w * self.stai * familiarity
+            q_biased += bonus
+            
+        return self.softmax(q_biased, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Increment count for the chosen spaceship
+        self.choice_counts[action_1] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Subjective Utility (Loss Aversion).
+    
+    This model hypothesizes that high anxiety alters the subjective utility of outcomes. 
+    Specifically, anxious individuals may perceive the lack of a reward (0 coins) not as 
+    a neutral event, but as a painful loss (negative utility).
+    
+    The model transforms the reward function such that 0 coins yields a negative reward 
+    scaled by the STAI score. This drives Q-values for unrewarding options below zero, 
+    potentially causing stronger avoidance or different exploration dynamics compared 
+    to standard RL where 0 is the baseline.
+    
+    Effective_Reward = Reward - (loss_scale * STAI * (1 - Reward))
+    
+    If Reward is 1: Effective_Reward = 1
+    If Reward is 0: Effective_Reward = -loss_scale * STAI
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    loss_scale: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Transform the reward based on anxiety
+        # If reward is 1, the subtraction term is 0.
+        # If reward is 0, the subtraction term is (loss_scale * STAI).
+        effective_reward = reward - (self.loss_scale * self.stai * (1.0 - reward))
+        
+        # Standard TD update using the transformed effective_reward
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Heuristic Arbitration (Win-Stay, Lose-Shift).
+    
+    This model hypothesizes that anxiety acts as a cognitive load or stressor that 
+    shifts decision-making from computationally expensive Reinforcement Learning (RL) 
+    to simple reactive heuristics.
+    
+    The model implements a mixture of a standard RL policy and a "Win-Stay, Lose-Shift" (WSLS) 
+    heuristic. The weight of the WSLS component is directly proportional to the participant's 
+    STAI score. High anxiety leads to greater reliance on the heuristic.
+    
+    P(choice) = (1 - w) * P_RL + w * P_WSLS
+    w = clip(heuristic_scale * STAI, 0, 1)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    heuristic_scale: [0, 1.5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.heuristic_scale = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Compute Standard RL Policy
+        p_rl = self.softmax(self.q_stage1, self.beta)
+        
+        # 2. Compute Heuristic Policy (Win-Stay, Lose-Shift)
+        p_wsls = np.ones(self.n_choices) / self.n_choices # Default to uniform if no history
+        
+        if self.last_action1 is not None:
+            p_wsls = np.zeros(self.n_choices)
+            prev_a = int(self.last_action1)
+            prev_r = self.last_reward
+            
+            if prev_r == 1.0:
+                # Win-Stay: Repeat previous action
+                p_wsls[prev_a] = 1.0
+            else:
+                # Lose-Shift: Switch to the other action
+                p_wsls[1 - prev_a] = 1.0
+        
+        # 3. Arbitrate based on Anxiety (STAI)
+        # Calculate mixture weight w
+        w = self.heuristic_scale * self.stai
+        w = np.clip(w, 0.0, 1.0)
+        
+        # Combine policies
+        return (1 - w) * p_rl + w * p_wsls
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

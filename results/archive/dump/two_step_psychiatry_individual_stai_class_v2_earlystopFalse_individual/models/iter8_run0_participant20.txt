@@ -1,0 +1,165 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Modulated Transition Volatility (Dynamic Model-Based)
+This model hypothesizes that high anxiety leads to a belief that the world's structure is unstable. While a standard Model-Based agent might learn transition probabilities (Spaceship -> Planet) slowly or treat them as fixed, this agent updates their internal model of transitions rapidly if anxiety is high. They are "paranoid" that the spaceship mappings have changed.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Transition Volatility.
+    
+    This is a Model-Based (MB) agent. It computes Stage 1 values by planning 
+    using an internal transition matrix T.
+    
+    The core hypothesis is that anxiety modulates the learning rate of this 
+    transition matrix. High anxiety participants perceive the environment as 
+    more volatile, updating their beliefs about spaceship-planet transitions 
+    more aggressively after every trial.
+    
+    T_new = (1 - lr_trans) * T_old + lr_trans * Observation
+    lr_trans = volatility_scale * STAI
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          (Reward learning rate for Stage 2 values)
+    beta: [0, 10]          (Inverse temperature)
+    volatility_scale: [0, 1] (Scaling factor for transition learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.volatility_scale = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition probabilities (A->X, A->Y; U->X, U->Y)
+        # We start with the prior counts provided in base class, normalized
+        self.T_est = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based Calculation:
+        # Q_MB(a1) = Sum_s2 [ T(a1, s2) * V(s2) ]
+        # Where V(s2) = max_a2 Q_stage2(s2, a2)
+        
+        v_stage2 = np.max(self.q_stage2, axis=1) # Max value of each planet
+        
+        # Compute MB values for each spaceship
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Dot product of transition probs for action a1 and planet values
+            q_mb[a1] = np.dot(self.T_est[a1], v_stage2)
+            
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Standard TD update for Stage 2 values (Reward Learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Anxiety-Modulated Transition Update (Structure Learning)
+        # Calculate transition learning rate based on STAI
+        lr_trans = self.volatility_scale * self.stai
+        lr_trans = np.clip(lr_trans, 0, 1)
+        
+        # Create a one-hot vector for the observed state (planet)
+        obs_vec = np.zeros(self.n_states)
+        obs_vec[state] = 1.0
+        
+        # Update the row corresponding to the chosen spaceship
+        # T[a1] = (1 - eta) * T[a1] + eta * Observed_State
+        self.T_est[action_1] = (1 - lr_trans) * self.T_est[action_1] + lr_trans * obs_vec
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Novelty Avoidance
+This model hypothesizes that anxiety drives an avoidance of the unknown. Rather than seeking to explore options that have been chosen fewer times (novelty seeking), high anxiety participants penalize options that are unfamiliar. This acts as a "safety bias" towards familiar options, regardless of their reward value.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Novelty Avoidance.
+    
+    This model hypothesizes that anxious individuals are averse to uncertainty 
+    and novelty. They apply a penalty to the Q-values of options based on 
+    how infrequently they have been chosen.
+    
+    A 'novelty' score is calculated as 1 / sqrt(count + 1).
+    A penalty is subtracted from Q-values: penalty = avoidance_scale * STAI * novelty.
+    
+    As counts increase, novelty decreases, and the penalty vanishes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          (Learning rate)
+    beta: [0, 10]          (Inverse temperature)
+    avoidance_scale: [0, 5] (Magnitude of novelty penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.avoidance_scale = model_parameters
+
+    def init_model(self) -> None:
+        # Track how many times each Stage 1 spaceship has been chosen
+        self.choice_counts = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate novelty for each option: higher if chosen less
+        novelty = 1.0 / np.sqrt(self.choice_counts + 1.0)
+        
+        # Calculate penalty scaled by anxiety
+        penalty = self.avoidance_scale * self.stai * novelty
+        
+        # Apply penalty to learned Q-values
+        q_net = self.q_stage1 - penalty
+        
+        return self.softmax(q_net, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update choice counts
+        self.choice_counts[action_1] += 1
+        
+        # Call base method to store last actions
+        super().post_trial(action_1, state, action_2, reward)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Stage-Specific Precision
+This model hypothesizes that anxiety affects the two stages of the task differently. While Stage 1 involves complex planning under uncertainty, Stage 2 is a simple bandit task (grab the coin). High anxiety might lead to "hyper-focus" or rigidity at the proximal goal (Stage 2), resulting in much more deterministic choices (higher beta) at Stage 2 compared to Stage 1.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Stage-Specific Precision.
+    
+    This model hypothesizes that anxiety increases the 'greediness' or 
+    precision of choices specifically at Stage 2 (the planet level), 
+    while Stage 1 remains subject to baseline exploration.
+    
+    Beta_Stage1 = beta_base
+    Beta_Stage2 = beta_base * (1 + focus_param * STAI)
+    
+    This reflects a tendency for anxious individuals to be more rigid/deterministic 
+    when the reward is immediately available (Stage 2), potentially reducing 
+    exploration of the changing alien reward probabilities.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta_base: [0, 10]  (Base inverse temperature)
+    focus_param: [0, 10] (Multiplier for Stage 2 precision boost)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.focus_param = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Use base beta for Stage 1
+        return self.softmax(self.q_stage1, self.beta_base)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Boost beta for Stage 2 based on anxiety
+        beta_s2 = self.beta_base * (1.0 + self.focus_param * self.stai)
+        return self.softmax(self.q_stage2[state], beta_s2)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

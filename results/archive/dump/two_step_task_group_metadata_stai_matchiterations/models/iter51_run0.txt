@@ -1,0 +1,246 @@
+Here are three new cognitive models that incorporate STAI scores into the decision-making process in distinct ways.
+
+### Model 1: Anxiety-Induced Model-Based Suppression
+This model hypothesizes that high anxiety consumes cognitive resources (working memory), thereby suppressing the ability to use Model-Based (planning) strategies. Instead of a fixed weight `w`, the weight given to the model-based system is dynamically reduced as STAI increases.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Model-Based Suppression.
+    
+    Hypothesis: High anxiety consumes working memory resources required for 
+    model-based planning. Therefore, the weight (w) assigned to the model-based 
+    controller is not fixed but is suppressed by the participant's anxiety level.
+    Higher STAI scores lead to a lower effective 'w', pushing behavior toward 
+    model-free habits.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate for value updates.
+    - beta: [0, 10] Inverse temperature (exploration/exploitation).
+    - w_max: [0, 1] The maximum possible model-based weight (at 0 anxiety).
+    - suppression_rate: [0, 5] How strongly STAI reduces w_max.
+    """
+    learning_rate, beta, w_max, suppression_rate = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective w based on anxiety
+    # As STAI increases, w decreases from w_max towards 0.
+    # We clip at 0 to prevent negative weights.
+    w_effective = max(0.0, w_max - (suppression_rate * stai_score))
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Initialize Q-values
+    q_stage1_mf = np.zeros(2)      # Model-free values for stage 1
+    q_stage2_mf = np.zeros((2, 2)) # Model-free values for stage 2 (State x Action)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # Model-Based valuation: V(S') = max(Q(S', a'))
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        # Hybrid valuation
+        q_net = w_effective * q_stage1_mb + (1 - w_effective) * q_stage1_mf
+
+        # Softmax choice 1
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning ---
+        # Stage 1 MF Update (TD(0))
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Stage 2 MF Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Transition Learning Impairment
+This model posits that anxiety interferes with the ability to learn the transition structure of the environment. While the standard model assumes a fixed transition matrix (0.7/0.3), real participants often learn this matrix online. This model assumes participants update their belief about transition probabilities, but high anxiety acts as "noise" or a dampener on this learning process, making the internal model of the world less accurate or slower to adapt.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Transition Learning Impairment.
+    
+    Hypothesis: Anxiety impairs the learning of state transitions (the map of the world).
+    Instead of a fixed transition matrix, the agent learns transition probabilities 
+    online. However, the learning rate for these transitions is dampened by anxiety,
+    making high-anxiety individuals slower to build an accurate model of the task structure.
+
+    Parameters:
+    - learning_rate_reward: [0, 1] Learning rate for reward values (Q-values).
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - lr_transition_base: [0, 1] Base learning rate for state transitions.
+    - anxiety_damp: [0, 1] How much STAI reduces the transition learning rate.
+    """
+    learning_rate_reward, beta, w, lr_transition_base, anxiety_damp = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Effective transition learning rate is reduced by anxiety
+    lr_transition = max(0.0, lr_transition_base * (1.0 - (anxiety_damp * stai_score)))
+
+    # Initialize transition counts/probabilities (start with uniform prior 0.5)
+    # We track prob of Action 0 -> State 0 and Action 1 -> State 1 (Common transitions)
+    # trans_probs[0] is P(State 0 | Action 0)
+    # trans_probs[1] is P(State 1 | Action 1)
+    trans_probs = np.array([0.5, 0.5]) 
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Construct dynamic transition matrix based on current beliefs
+        # Row 0: Action 0 -> [P(S0|A0), 1-P(S0|A0)]
+        # Row 1: Action 1 -> [1-P(S1|A1), P(S1|A1)]
+        T = np.array([
+            [trans_probs[0], 1 - trans_probs[0]],
+            [1 - trans_probs[1], trans_probs[1]]
+        ])
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = T @ max_q_stage2 # Use learned matrix
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning ---
+        # 1. Update Transition Beliefs
+        # If action was 0, did we go to state 0? (1 if yes, 0 if no)
+        # If action was 1, did we go to state 1? (1 if yes, 0 if no)
+        chosen_a1 = action_1[trial]
+        observed_s = state[trial]
+        
+        if chosen_a1 == 0:
+            outcome = 1.0 if observed_s == 0 else 0.0
+            trans_probs[0] += lr_transition * (outcome - trans_probs[0])
+        else:
+            outcome = 1.0 if observed_s == 1 else 0.0
+            trans_probs[1] += lr_transition * (outcome - trans_probs[1])
+
+        # 2. Update Q-values
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate_reward * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate_reward * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Loss Sensitivity
+This model suggests that anxiety specifically alters how individuals process negative outcomes (losses or lack of reward). High anxiety individuals are often characterized by a "negativity bias." Here, the learning rate is split: one for positive prediction errors (better than expected) and one for negative prediction errors (worse than expected). The sensitivity to negative errors is scaled up by the STAI score.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Loss Sensitivity.
+    
+    Hypothesis: Anxiety creates a negativity bias in learning. High anxiety 
+    participants over-weight negative prediction errors (disappointments) compared 
+    to positive ones. This model scales the learning rate for negative prediction 
+    errors (delta < 0) by the STAI score.
+
+    Parameters:
+    - lr_base: [0, 1] Base learning rate for positive prediction errors.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - loss_sens_mult: [0, 5] Multiplier for STAI to boost learning from negative errors.
+      (Effective LR_neg = lr_base * (1 + loss_sens_mult * STAI))
+    """
+    lr_base, beta, w, loss_sens_mult = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate the multiplier for negative prediction errors
+    neg_learning_multiplier = 1.0 + (loss_sens_mult * stai_score)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning ---
+        
+        # Stage 1 Update
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        
+        # Apply asymmetric learning rate based on sign of delta
+        if delta_stage1 < 0:
+            eff_lr_1 = min(1.0, lr_base * neg_learning_multiplier)
+        else:
+            eff_lr_1 = lr_base
+            
+        q_stage1_mf[action_1[trial]] += eff_lr_1 * delta_stage1
+        
+        # Stage 2 Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # Apply asymmetric learning rate based on sign of delta
+        if delta_stage2 < 0:
+            eff_lr_2 = min(1.0, lr_base * neg_learning_multiplier)
+        else:
+            eff_lr_2 = lr_base
+
+        q_stage2_mf[state_idx, action_2[trial]] += eff_lr_2 * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

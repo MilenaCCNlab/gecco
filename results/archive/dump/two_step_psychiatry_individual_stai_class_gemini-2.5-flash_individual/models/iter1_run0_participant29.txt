@@ -1,0 +1,138 @@
+Here are three cognitive models, each proposing a different hypothesis about how the participant's high anxiety (STAI score = 0.575) might influence their decision-making in the two-step task.
+
+### Cognitive Models
+
+```python
+import numpy as np # numpy is implicitly available, but good practice to include for clarity in development
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to asymmetric learning, where participants learn more
+    from negative outcomes (0 coins) than from positive outcomes (1 coin).
+    This is modeled by having separate learning rates for rewards and punishments,
+    with the punishment learning rate increasing with STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] (Base learning rate for all outcomes)
+    alpha_stai_effect: [0, 1] (Magnitude of STAI effect on punishment learning rate.
+                                A positive value means higher STAI increases punishment learning.)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.alpha_stai_effect, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate punishment learning rate based on STAI
+        # The punishment learning rate is the base rate plus an effect scaled by STAI, capped at 1.0
+        alpha_punish = min(1.0, self.alpha_base + self.alpha_stai_effect * self.stai)
+        alpha_reward = self.alpha_base # Reward learning rate is the base rate
+
+        # Select the appropriate learning rate based on the observed reward
+        current_alpha = alpha_reward if reward == 1 else alpha_punish
+
+        # Standard TD update for Stage 2 values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        # Standard TD update for Stage 1 values, using the value of the chosen alien
+        # and the learning rate determined by the outcome of the trial.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety shifts the balance from model-based (goal-directed)
+    to model-free (habitual) control. This is modeled by a mixing parameter 'w_mb'
+    that determines the contribution of model-based learning to Stage 1 value updates.
+    'w_mb' decreases with increasing STAI score, meaning higher anxiety leads to
+    more model-free behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    w_anxiety_effect: [0, 1] (Magnitude of STAI effect on reducing model-based control.
+                                A positive value means higher STAI reduces model-based weight.)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_anxiety_effect = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate model-based mixing weight: higher STAI -> lower w_mb (more model-free)
+        # The w_mb parameter is clamped between 0 and 1.
+        # A w_anxiety_effect of 0 means w_mb is always 1 (purely model-based in this update formulation).
+        # A w_anxiety_effect of 1 means w_mb decreases linearly with STAI, potentially to 0.
+        w_mb = max(0.0, 1.0 - self.stai * self.w_anxiety_effect)
+        w_mb = min(1.0, w_mb) 
+
+        # Stage 2 update (always model-free TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-free delta for Stage 1: updates Q1 based on the actual Q2 value of the chosen alien
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+
+        # Model-based delta for Stage 1: updates Q1 based on the expected maximum Q2 value
+        # across all possible planets reachable from action_1, considering transition probabilities.
+        # np.max(self.q_stage2[0]) is the value of the best alien on planet 0 (X)
+        # np.max(self.q_stage2[1]) is the value of the best alien on planet 1 (Y)
+        expected_q_stage2_val = (self.T[action_1, 0] * np.max(self.q_stage2[0])) + \
+                                (self.T[action_1, 1] * np.max(self.q_stage2[1]))
+        delta_1_mb = expected_q_stage2_val - self.q_stage1[action_1]
+
+        # Hybrid update for Stage 1: combines model-free and model-based deltas
+        # (1 - w_mb) weights the model-free component, w_mb weights the model-based component.
+        delta_1 = (1 - w_mb) * delta_1_mf + w_mb * delta_1_mb
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases "choice stickiness" or a repetition bias
+    for the first-stage action. This means participants are more likely to repeat
+    the spaceship choice they made on the previous trial, with the strength of
+    this bias increasing with their STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    stickiness_stai_factor: [0, 5] (Factor by which STAI score influences stickiness bonus.
+                                    A positive value means higher STAI increases stickiness.)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_stai_factor = model_parameters
+        
+    def init_model(self) -> None:
+        # Initialize last_action1 to a value that signifies no previous action (e.g., -1)
+        # This prevents stickiness from being applied on the very first trial.
+        self.last_action1 = -1 
+
+    def policy_stage1(self) -> np.ndarray:
+        # Create a copy of the current Q-values for Stage 1 to apply the stickiness bonus
+        q_prime_stage1 = np.copy(self.q_stage1)
+        
+        # Apply stickiness bonus only if a previous Stage 1 action exists
+        if self.last_action1 != -1: 
+            # The stickiness bonus is scaled by the STAI score and the stickiness factor.
+            # This makes the previous choice more attractive.
+            stickiness_bonus = self.stickiness_stai_factor * self.stai
+            q_prime_stage1[self.last_action1] += stickiness_bonus
+            
+        # Compute action probabilities using softmax on the modified Q-values
+        return self.softmax(q_prime_stage1, self.beta)
+
+    # The value_update and post_trial methods use the default implementations
+    # from CognitiveModelBase, where post_trial correctly updates self.last_action1.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,131 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Modulated Win-Stickiness
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases "Win-Stay" behavior (Reinforced Stickiness).
+    While general stickiness applies to any previous choice, anxious individuals 
+    may be specifically risk-averse after a success, clinging to the "winning" 
+    option to maintain safety.
+    
+    Mechanism: A bonus is added to the Stage 1 Q-value of the previously chosen 
+    action, but ONLY if the previous trial resulted in a reward. The magnitude 
+    of this bonus scales with STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    win_stick_k: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.win_stick_k = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_modified = self.q_stage1.copy()
+        
+        # Apply bonus only if there is a history and the last result was a win (reward > 0)
+        if self.last_action1 is not None and self.last_reward is not None:
+            if self.last_reward > 0:
+                idx = int(self.last_action1)
+                # Bonus scales with anxiety
+                bonus = self.win_stick_k * self.stai
+                q_modified[idx] += bonus
+            
+        return self.softmax(q_modified, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Transition Blurring (Model-Based Impairment)
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety degrades the fidelity of Model-Based planning (Transition Blurring).
+    Anxious individuals may attempt to use the task structure (Model-Based control) 
+    but suffer from "blurred" representations of the transition probabilities due 
+    to cognitive load or uncertainty.
+    
+    Mechanism: The agent calculates Stage 1 values using a Model-Based approach 
+    (V_stage1 = T * V_stage2). However, the transition matrix T used for this 
+    calculation is a mixture of the true transition matrix and a uniform (random) 
+    matrix. The weight of the uniform component (blur) increases with STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    blur_k: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.blur_k = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate V_stage2 (max Q for each state)
+        # q_stage2 is shape (2, 2). Max over actions (axis 1) gives V(state)
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # 2. Define True Transition Matrix (from task description/base class)
+        # self.T is initialized in base as [[0.7, 0.3], [0.3, 0.7]]
+        
+        # 3. Calculate Distorted Matrix
+        # Blur factor bounded between 0 and 1
+        blur = np.clip(self.blur_k * self.stai, 0, 1)
+        
+        T_uniform = np.array([[0.5, 0.5], [0.5, 0.5]])
+        T_used = (1 - blur) * self.T + blur * T_uniform
+        
+        # 4. Calculate Model-Based Q-values for Stage 1
+        # Q_MB(action) = sum(P(state|action) * V(state))
+        q_mb = T_used @ v_stage2
+        
+        return self.softmax(q_mb, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Pessimistic Learning
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety creates asymmetric learning from negative outcomes (Pessimistic Update).
+    Anxious individuals may be hypersensitive to the omission of reward (outcomes of 0),
+    updating their value estimates more aggressively after a "loss" than after a "win".
+    
+    Mechanism: The model uses two learning rates. The positive learning rate is the base alpha.
+    The negative learning rate is boosted by a factor proportional to STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Base learning rate (and rate for positive outcomes)
+    beta: [0, 10]
+    neg_boost_k: [0, 1] # Scaling factor for negative learning rate boost
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_boost_k = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine learning rate based on outcome
+        # Here we assume reward is binary 0 or 1.
+        # If reward is 1 (Win), use base alpha.
+        # If reward is 0 (Loss), use boosted alpha.
+        
+        if reward > 0.5:
+            lr = self.alpha
+        else:
+            # Boost alpha, clipping at 1.0
+            lr = np.clip(self.alpha + (self.neg_boost_k * self.stai), 0, 1)
+
+        # Standard TD update with selected learning rate
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += lr * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += lr * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

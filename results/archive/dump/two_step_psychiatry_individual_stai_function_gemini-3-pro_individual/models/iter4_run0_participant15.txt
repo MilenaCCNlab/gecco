@@ -1,0 +1,229 @@
+Here are three new cognitive models that incorporate the STAI anxiety score into the decision-making process in different ways.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid Model with Anxiety-Modulated Inverse Temperature (Beta).
+    
+    This model hypothesizes that anxiety levels influence the exploration-exploitation 
+    trade-off. Specifically, higher anxiety increases the inverse temperature (beta), 
+    leading to more deterministic choices (reduced exploration/higher rigidity).
+    
+    beta = beta_base + (stai_beta_sensitivity * stai)
+    
+    Parameters:
+    learning_rate: [0, 1] Rate at which Q-values are updated.
+    w: [0, 1] Mixing weight for Model-Based (1) vs Model-Free (0) control.
+    beta_base: [0, 10] Baseline inverse temperature.
+    stai_beta_sensitivity: [0, 10] How strongly STAI increases beta.
+    """
+    learning_rate, w, beta_base, stai_beta_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0] 
+    
+    # Calculate anxiety-modulated beta
+    # We clip to ensure it stays within reasonable numerical bounds
+    beta = beta_base + (stai_beta_sensitivity * stai_val)
+    beta = np.clip(beta, 0, 20) 
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        # Model-Based Value Calculation
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Hybrid Value Calculation
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Softmax Policy
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        a1 = int(action_1[trial])
+        p_choice_1[trial] = probs_1[a1]
+        
+        state_idx = int(state[trial])
+
+        # --- Stage 2 Choice ---
+        # Standard Softmax on Stage 2 MF values
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        a2 = int(action_2[trial])
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Learning Updates ---
+        r = reward[trial]
+        
+        # Stage 2 Update (TD Error)
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # Stage 1 Update (TD Error using updated Stage 2 value as target)
+        value_state_reached = q_stage2_mf[state_idx, a2]
+        delta_stage1 = value_state_reached - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid Model with Anxiety-Modulated Punishment Sensitivity.
+    
+    This model hypothesizes that anxiety specifically affects learning from negative outcomes 
+    (reward = 0). Higher anxiety leads to a higher learning rate for negative prediction errors,
+    reflecting a "loss aversion" or increased sensitivity to failure.
+    
+    If prediction error < 0:
+        lr = lr_base + (stai_neg_sensitivity * stai)
+    Else:
+        lr = lr_base
+    
+    Parameters:
+    beta: [0, 10] Inverse temperature.
+    w: [0, 1] Weight for Model-Based control.
+    lr_base: [0, 1] Baseline learning rate (used for positive updates).
+    stai_neg_sensitivity: [0, 1] Additional learning rate magnitude for negative errors.
+    """
+    beta, w, lr_base, stai_neg_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        a1 = int(action_1[trial])
+        p_choice_1[trial] = probs_1[a1]
+        
+        state_idx = int(state[trial])
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        a2 = int(action_2[trial])
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Learning Updates ---
+        r = reward[trial]
+        
+        # Stage 2 Update
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        
+        # Determine LR based on sign of delta (asymmetric learning)
+        if delta_stage2 < 0:
+            current_lr = lr_base + (stai_neg_sensitivity * stai_val)
+        else:
+            current_lr = lr_base
+        current_lr = np.clip(current_lr, 0, 1) # Ensure valid range
+        
+        q_stage2_mf[state_idx, a2] += current_lr * delta_stage2
+        
+        # Stage 1 Update
+        value_state_reached = q_stage2_mf[state_idx, a2]
+        delta_stage1 = value_state_reached - q_stage1_mf[a1]
+        
+        # Apply the same asymmetry logic to stage 1 updates
+        if delta_stage1 < 0:
+            current_lr_s1 = lr_base + (stai_neg_sensitivity * stai_val)
+        else:
+            current_lr_s1 = lr_base
+        current_lr_s1 = np.clip(current_lr_s1, 0, 1)
+
+        q_stage1_mf[a1] += current_lr_s1 * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid Model with Anxiety-Modulated Eligibility Trace (Lambda).
+    
+    This model hypothesizes that anxiety increases the direct reinforcement of the 
+    first-stage choice by the final trial outcome (eligibility trace). 
+    Higher anxiety leads to a higher lambda, making the agent more "reactive" 
+    in a Model-Free sense, bypassing the two-step structure.
+    
+    lambda = lambda_base + (stai_lambda_sensitivity * stai)
+    
+    Parameters:
+    learning_rate: [0, 1] Learning rate.
+    beta: [0, 10] Inverse temperature.
+    w: [0, 1] Weight for Model-Based control.
+    lambda_base: [0, 1] Baseline eligibility trace parameter.
+    stai_lambda_sensitivity: [0, 1] How strongly STAI increases lambda.
+    """
+    learning_rate, beta, w, lambda_base, stai_lambda_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+    
+    # Calculate anxiety-modulated lambda
+    lambda_val = lambda_base + (stai_lambda_sensitivity * stai_val)
+    lambda_val = np.clip(lambda_val, 0, 1)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        a1 = int(action_1[trial])
+        p_choice_1[trial] = probs_1[a1]
+        
+        state_idx = int(state[trial])
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        a2 = int(action_2[trial])
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Learning Updates ---
+        r = reward[trial]
+        
+        # Stage 2 Update
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # Stage 1 Update
+        # TD(0) part: update towards value of state 2
+        value_state_reached = q_stage2_mf[state_idx, a2]
+        delta_stage1 = value_state_reached - q_stage1_mf[a1]
+        
+        # Eligibility trace part: Stage 1 also gets updated by Stage 2 RPE scaled by lambda
+        # Total update: Q1 += lr * (delta_stage1 + lambda * delta_stage2)
+        q_stage1_mf[a1] += learning_rate * (delta_stage1 + lambda_val * delta_stage2)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

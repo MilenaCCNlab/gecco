@@ -1,0 +1,235 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety differentially modulates learning rates for Stage 1 (abstract) vs Stage 2 (concrete).
+    
+    Anxious individuals may show different plasticity for the high-level choice (Spaceship)
+    compared to the immediate reward-based choice (Alien). This model allows the Stage 1
+    learning rate to vary with STAI, while Stage 2 learning rate is independent.
+    
+    alpha_1 = alpha_1_base + (alpha_1_stai * stai)
+    alpha_2 = alpha_2 (fixed parameter)
+
+    Parameter Bounds:
+    -----------------
+    alpha_2: [0, 1]
+    beta: [0, 10]
+    alpha_1_base: [0, 1]
+    alpha_1_stai: [-1, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_2, self.beta, self.alpha_1_base, self.alpha_1_stai = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective alpha for stage 1
+        alpha_1 = self.alpha_1_base + (self.alpha_1_stai * self.stai)
+        alpha_1 = np.clip(alpha_1, 0.0, 1.0)
+        
+        # Stage 2 update (Standard TD with alpha_2)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_2 * delta_2
+        
+        # Stage 1 update (TD with anxiety-modulated alpha_1)
+        # Note: We use the updated Q2 value as the target, or the pre-update value. 
+        # Standard TD(0) often uses the value of the state reached.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates a fixed 'Safety Bias' towards Spaceship A (Option 0).
+    
+    Anxious individuals often exhibit safety behaviors or preferences for defaults.
+    If Spaceship A is perceived as the default or safer option, anxiety might increase
+    a fixed bias added to its value during selection, independent of reward history.
+    
+    bias = bias_base + (bias_stai * stai)
+    Q_choice[0] = Q_stage1[0] + bias
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    bias_base: [-2, 2]
+    bias_stai: [-2, 2]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.bias_base, self.bias_stai = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate bias
+        bias = self.bias_base + (self.bias_stai * self.stai)
+        
+        # Apply bias to option 0
+        biased_values = self.q_stage1.copy()
+        biased_values[0] += bias
+        
+        return self.softmax(biased_values, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates 'Counterfactual Updating' (Model-Based spreading).
+    
+    A key feature of model-based reasoning is updating the value of the *unchosen* option
+    based on the outcome of the chosen path (using the transition matrix).
+    This model hypothesizes that anxiety affects the strength of this counterfactual update.
+    
+    When updating Q1[chosen], we also update Q1[unchosen]:
+    update = cf_weight * P(state | unchosen) * (alpha * delta_2)
+    
+    cf_weight = cf_base + (cf_stai * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    cf_base: [0, 1]
+    cf_stai: [-1, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.cf_base, self.cf_stai = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate Stage 2 RPE
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Update Stage 2
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 (Chosen) - Standard TD
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update Stage 1 (Unchosen) - Counterfactual
+        # We propagate the value change from Stage 2 to the unchosen option
+        # weighted by the probability that the unchosen option would have led to this state.
+        unchosen_action = 1 - action_1
+        prob_transition = self.T[unchosen_action, state]
+        
+        cf_weight = self.cf_base + (self.cf_stai * self.stai)
+        cf_weight = np.clip(cf_weight, 0.0, 1.0)
+        
+        # The update is proportional to the change in the downstream state's value (alpha * delta_2)
+        # scaled by the transition probability and the counterfactual weight.
+        cf_update = cf_weight * prob_transition * (self.alpha * delta_2)
+        self.q_stage1[unchosen_action] += cf_update
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,123 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Split Attention]
+    This model hypothesizes that anxiety shifts cognitive resources between the two stages of the task.
+    Specifically, anxiety might cause a "tunnel vision" effect, focusing learning on the immediate 
+    outcomes (Stage 2, the aliens) while neglecting the abstract structure or choice history (Stage 1, the spaceships).
+    
+    We model this by splitting the learning rate `alpha` into `alpha_stage1` and `alpha_stage2`.
+    The split is controlled by STAI and a `focus_param`.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Base learning rate)
+    beta: [0, 10] (Inverse temperature)
+    focus_param: [0, 2] (Modulates the split. Positive values increase Stage 2 learning relative to Stage 1)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.focus_param = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate stage-specific learning rates
+        # We clip to ensure they remain valid probabilities [0, 1]
+        # If focus_param is positive and STAI is high, lr2 > lr1, implying focus on immediate outcome
+        
+        mod = self.stai * self.focus_param
+        lr1 = np.clip(self.alpha * (1.0 - mod), 0.0, 1.0)
+        lr2 = np.clip(self.alpha * (1.0 + mod), 0.0, 1.0)
+
+        # Stage 2 Update (Alien choice)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += lr2 * delta_2
+        
+        # Stage 1 Update (Spaceship choice)
+        # TD(0) update: target is the value of the state we landed in (Q_stage2 of chosen action)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += lr1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Driven Rare Transition Penalty]
+    This model hypothesizes that anxious individuals have a specific aversion to unexpected or "rare" 
+    transitions (uncertainty intolerance). When a rare transition occurs (e.g., Spaceship A -> Planet Y), 
+    the participant penalizes the value of the chosen spaceship, regardless of the subsequent reward.
+    This penalty represents the "cognitive cost" of the surprise/anxiety experienced.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    rare_penalty: [0, 2] (Magnitude of value reduction upon rare transition, scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_penalty = model_parameters
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Define Rare Transitions based on task description:
+        # A (0) -> X (0) is Common. A (0) -> Y (1) is Rare.
+        # U (1) -> Y (1) is Common. U (1) -> X (0) is Rare.
+        
+        is_rare = False
+        if action_1 == 0 and state == 1:
+            is_rare = True
+        elif action_1 == 1 and state == 0:
+            is_rare = True
+            
+        if is_rare:
+            # Apply penalty proportional to anxiety to the chosen spaceship
+            penalty = self.stai * self.rare_penalty
+            self.q_stage1[action_1] -= penalty
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Win-Stay Lose-Shift (WSLS)]
+    This model hypothesizes that anxiety promotes the use of a reactive "Win-Stay, Lose-Shift" heuristic 
+    over complex value integration. While the participant maintains Q-values, their choice policy is 
+    biased by the immediate previous outcome.
+    
+    Unlike simple perseveration (stickiness), this bias is directional:
+    - If previous reward was positive (Win), boost probability of repeating action.
+    - If previous reward was zero (Loss), reduce probability of repeating action (Shift).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    wsls_strength: [0, 5] (Strength of the heuristic bias, scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.wsls_strength = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        logits = self.q_stage1.copy()
+        
+        # Apply heuristic bias if we have a previous trial
+        if self.last_action1 is not None and self.last_reward is not None:
+            # Determine direction: +1 for Win, -1 for Loss
+            # Assuming reward is 1.0 or 0.0
+            direction = 1.0 if self.last_reward > 0 else -1.0
+            
+            # Calculate bias
+            bias = direction * self.stai * self.wsls_strength
+            
+            # Apply to the last chosen action
+            logits[int(self.last_action1)] += bias
+            
+        return self.softmax(logits, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

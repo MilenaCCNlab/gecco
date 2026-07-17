@@ -1,0 +1,140 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases sensitivity to 'disappointment' (negative prediction errors).
+    
+    Anxious individuals often exhibit a negativity bias, reacting more strongly to 
+    outcomes that are worse than expected compared to outcomes that are better than expected.
+    This model implements this by scaling the learning rate when the prediction error (delta) 
+    is negative. Higher anxiety leads to faster learning from disappointments, potentially 
+    causing the participant to quickly abandon options that fail to reward.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          # Base learning rate
+    beta: [0, 10]          # Inverse temperature
+    disappoint_k: [0, 5]   # Scaling factor for negative prediction errors based on STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.disappoint_k = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # --- Stage 2 Update ---
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine effective learning rate for Stage 2
+        # If the outcome was worse than expected (delta < 0), boost learning rate by anxiety
+        lr_2 = self.alpha
+        if delta_2 < 0:
+            lr_2 *= (1.0 + self.disappoint_k * self.stai)
+        
+        # Clip to ensure stability (0 <= lr <= 1)
+        lr_2 = min(lr_2, 1.0)
+        
+        self.q_stage2[state, action_2] += lr_2 * delta_2
+        
+        # --- Stage 1 Update (TD-0) ---
+        # The value of the chosen option in Stage 2 acts as the target for Stage 1
+        outcome_val = self.q_stage2[state, action_2]
+        delta_1 = outcome_val - self.q_stage1[action_1]
+        
+        # Apply same logic to Stage 1 prediction errors
+        lr_1 = self.alpha
+        if delta_1 < 0:
+            lr_1 *= (1.0 + self.disappoint_k * self.stai)
+        lr_1 = min(lr_1, 1.0)
+
+        self.q_stage1[action_1] += lr_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety dampens the subjective value of positive rewards (Anhedonia).
+    
+    High anxiety is often associated with reduced positive affect or anhedonia. 
+    This model hypothesizes that anxious individuals perceive the 'gold coin' (reward=1) 
+    as having less subjective value than non-anxious individuals. 
+    The effective reward signal is scaled down by STAI, leading to lower Q-values 
+    and potentially reduced motivation to pursue rewards (appearing as more noise/exploration 
+    if beta is not sufficiently high to compensate).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    damp_k: [0, 1]      # Reward dampening factor. Effective reward = r * (1 - damp_k * stai)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.damp_k = model_parameters
+
+    def init_model(self) -> None:
+        # Pre-calculate the subjective reward for a "win"
+        # Ensure multiplier is non-negative and <= 1
+        dampening = min(self.damp_k * self.stai, 1.0)
+        self.subjective_win = 1.0 * (1.0 - dampening)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Apply subjective valuation to the reward
+        if reward == 1.0:
+            eff_reward = self.subjective_win
+        else:
+            eff_reward = 0.0 # Assuming 0 remains 0 (neutral)
+            
+        # Standard update with effective reward
+        delta_2 = eff_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 updates towards the dampened Stage 2 values
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases temporal discounting (Myopia).
+    
+    Anxious individuals may focus excessively on immediate outcomes and struggle to 
+    propagate value correctly from the second stage back to the first stage (planning). 
+    This model introduces a discount factor (gamma) between Stage 1 and Stage 2 that 
+    decreases as STAI increases. High anxiety leads to 'myopic' Stage 1 choices 
+    because the future value of Stage 2 is heavily discounted.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    disc_k: [0, 1]      # Discounting sensitivity. Gamma = 1 - (disc_k * stai)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.disc_k = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate discount factor gamma based on anxiety
+        # If disc_k is 0, gamma is 1 (standard, no discounting). 
+        # If disc_k is high, gamma < 1, reducing the impact of Stage 2 values on Stage 1.
+        penalty = self.disc_k * self.stai
+        self.gamma = max(0.0, 1.0 - penalty)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Immediate reward, no discounting relative to itself)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Propagating value from Stage 2)
+        # The value of the chosen Stage 2 option is discounted by gamma before updating Stage 1
+        target_val = self.gamma * self.q_stage2[state, action_2]
+        
+        delta_1 = target_val - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

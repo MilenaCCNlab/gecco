@@ -1,0 +1,148 @@
+Here are three new cognitive models that explore different mechanisms for how anxiety (STAI) might modulate decision-making in this task.
+
+### Model 1: Anxiety-Modulated Risk Aversion
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Risk Aversion]
+    This model hypothesizes that anxiety induces risk aversion. The participant 
+    tracks not only the expected value (Q) of each spaceship but also the 
+    variance (uncertainty/risk) of the rewards received from it. The final 
+    choice value is the Q-value minus a penalty proportional to the estimated 
+    risk (standard deviation), where the magnitude of this penalty is scaled 
+    by the participant's anxiety (STAI).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for both Q and Variance)
+    beta: [0, 10] (Inverse temperature)
+    risk_weight: [0, 5] (Scaling factor for anxiety-driven risk penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.risk_weight = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance estimates for the two spaceships (Stage 1 choices)
+        # Initialize with a small non-zero value to prevent division errors if needed
+        self.var_stage1 = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate risk-adjusted values
+        # Risk is modeled as the standard deviation (sqrt of variance)
+        risk_penalty = self.risk_weight * self.stai * np.sqrt(self.var_stage1)
+        adjusted_values = self.q_stage1 - risk_penalty
+        
+        return self.softmax(adjusted_values, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Q-learning update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD(0) update for Stage 1 Q-value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update Variance estimate for Stage 1
+        # Var <- Var + alpha * ((R - Q)^2 - Var)
+        # We use the squared prediction error from the final outcome relative to Stage 1 Q
+        # This captures the volatility of the total path
+        sq_error = (reward - self.q_stage1[action_1]) ** 2
+        self.var_stage1[action_1] += self.alpha * (sq_error - self.var_stage1[action_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Rare Event Suppression
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Rare Event Suppression]
+    This model hypothesizes that anxious individuals are intolerant of uncertainty 
+    and "surprising" events. When a rare transition occurs (e.g., Spaceship A 
+    going to Planet Y), the participant suppresses learning from this trial to 
+    protect their internal model from outliers. The degree of learning rate 
+    dampening on rare trials is proportional to their anxiety level.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Base learning rate)
+    beta: [0, 10] (Inverse temperature)
+    suppress_k: [0, 10] (Strength of suppression for rare transitions)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.suppress_k = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if the transition was Common or Rare
+        # We assume the standard structure: 
+        # Action 0 -> State 0 (Common), State 1 (Rare)
+        # Action 1 -> State 1 (Common), State 0 (Rare)
+        is_common = (action_1 == state)
+        
+        # Calculate effective learning rate
+        if is_common:
+            eff_alpha = self.alpha
+        else:
+            # Dampen learning rate for rare transitions based on anxiety
+            # Higher anxiety -> stronger suppression (lower alpha)
+            eff_alpha = self.alpha / (1.0 + self.suppress_k * self.stai)
+
+        # Update Stage 2 (Standard)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += eff_alpha * delta_2
+        
+        # Update Stage 1 (Dampened if rare)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += eff_alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Direct Reward Association (TD-Lambda)
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Direct Reward Association]
+    This model hypothesizes that anxiety promotes a simpler, "model-free" 
+    strategy that relies on direct associations between the first-stage choice 
+    and the final reward, bypassing the state structure of the planets. 
+    This is implemented as a mixture of TD(0) (chaining values) and TD(1) 
+    (direct reward update), where the weight of the direct reward update (lambda) 
+    increases with anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature)
+    lambda_scale: [0, 2.5] (Scales STAI to determine the mixing weight lambda)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 (Standard)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Calculate mixing weight lambda based on anxiety
+        # lambda_val represents the degree of "eligibility trace" or direct reward association
+        # We clamp it to [0, 1] to ensure valid convex combination
+        lambda_val = np.clip(self.lambda_scale * self.stai, 0.0, 1.0)
+        
+        # Define the two targets
+        target_td0 = self.q_stage2[state, action_2] # Standard Model-Free chaining
+        target_td1 = reward                         # Direct Reward (Monte Carlo / TD(1))
+        
+        # Combined target
+        combined_target = (1 - lambda_val) * target_td0 + lambda_val * target_td1
+        
+        # Update Stage 1
+        delta_1 = combined_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

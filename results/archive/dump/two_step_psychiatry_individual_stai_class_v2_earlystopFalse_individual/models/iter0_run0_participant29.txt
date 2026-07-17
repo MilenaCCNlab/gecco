@@ -1,0 +1,134 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Model-Based/Model-Free Hybrid
+    
+    This model hypothesizes that the participant uses a mixture of Model-Based (MB) 
+    and Model-Free (MF) strategies. Crucially, it posits that high anxiety (STAI) 
+    consumes cognitive resources, reducing the weight of the computationally 
+    expensive Model-Based system.
+    
+    The mixing weight 'w' (for the MB system) is scaled down by the STAI score.
+    w = w_max * (1 - stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]   (Inverse temperature)
+    w_max: [0, 1]   (Maximum Model-Based weight for a 0-anxiety individual)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based values
+        # V_MB(a) = Sum_s' T(a, s') * max_a' Q_stage2(s', a')
+        # We use the fixed transition probabilities self.T provided in base class
+        # self.T[action, state]
+        
+        # Max Q-values for each state in stage 2
+        max_q_s2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Compute MB values for each stage 1 action
+        q_mb = np.dot(self.T, max_q_s2)
+        
+        # 2. Calculate Model-Free values (standard Q-learning values)
+        q_mf = self.q_stage1
+        
+        # 3. Combine based on Anxiety
+        # Higher anxiety -> Lower w -> More Model-Free
+        # We clip STAI to [0,1] just in case, though data is within range.
+        stai_clipped = np.clip(self.stai, 0, 1)
+        w = self.w_max * (1.0 - stai_clipped)
+        
+        q_net = w * q_mb + (1 - w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Perseveration
+    
+    This model hypothesizes that high anxiety leads to "safety behaviors" manifested 
+    as perseveration (stickiness). The participant is more likely to repeat their 
+    previous stage-1 choice to avoid the uncertainty of switching.
+    
+    The degree of stickiness is directly proportional to the STAI score.
+    Stickiness Bonus = stick_scale * stai
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]       (Inverse temperature)
+    stick_scale: [0, 5] (Scaling factor for anxiety-driven stickiness)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stick_scale = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate stickiness bonus
+        # If it's the first trial, last_action1 is None, so no bonus
+        bonus = np.zeros(self.n_choices)
+        
+        if self.last_action1 is not None:
+            # The bonus is applied to the action taken previously
+            stickiness_magnitude = self.stick_scale * self.stai
+            bonus[int(self.last_action1)] = stickiness_magnitude
+            
+        # Add bonus to Q-values before softmax
+        # This effectively increases the probability of the repeated action
+        augmented_values = self.q_stage1 + bonus
+        
+        return self.softmax(augmented_values, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Biased Negative Learning Sensitivity
+    
+    This model hypothesizes that high anxiety individuals are hypersensitive to 
+    negative outcomes (omission of reward). They update their internal value 
+    representations more aggressively after a loss (0 coins) compared to a win.
+    
+    The learning rate for losses is boosted by the STAI score.
+    alpha_loss = alpha + (loss_sens * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Base learning rate for wins)
+    beta: [0, 10]     (Inverse temperature)
+    loss_sens: [0, 1] (Sensitivity to losses, scaled by anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_sens = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine effective learning rate based on outcome
+        if reward == 0.0:
+            # Loss: Boost alpha based on anxiety
+            # We clip the resulting alpha to max 1.0 to maintain stability
+            effective_alpha = self.alpha + (self.loss_sens * self.stai)
+            effective_alpha = min(effective_alpha, 1.0)
+        else:
+            # Win: Use base alpha
+            effective_alpha = self.alpha
+
+        # Standard TD update using the effective alpha
+        # Update Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += effective_alpha * delta_2
+        
+        # Update Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += effective_alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

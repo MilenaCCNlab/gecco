@@ -1,0 +1,145 @@
+Here are three new cognitive models.
+
+### Model 1
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that decision-making is a mix of goal-directed
+    (model-based) and habitual (model-free) control. Trait anxiety impairs the
+    ability to use the goal-directed system, which relies on a cognitive map of
+    the task. High anxiety (stai) reduces the weight of the model-based update,
+    making the agent's behavior more reliant on simple, retrospective model-free
+    updates. This can lead to perseveration and a slower adaptation to environmental
+    changes, as seen in the participant's initial sticky choice behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate)
+    beta: [0, 10]    (Inverse softmax temperature)
+    omega: [0, 5]     (Base weight for model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Implements a hybrid value update where anxiety reduces model-based contribution.
+        """
+        # Stage 2 is updated as normal with a simple TD error.
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # The weight for the model-based system is scaled down by anxiety.
+        # High stai -> lower mb_weight -> more model-free control.
+        mb_weight = self.omega * (1 - self.stai)
+        mf_weight = 1.0 # The model-free contribution is constant.
+
+        # Model-Based Update: Update stage-1 value based on the best possible
+        # outcome from the reached state.
+        delta_1_mb = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * mb_weight * delta_1_mb
+
+        # Model-Free Update (Eligibility Trace): Update stage-1 value based on
+        # the terminal reward prediction error.
+        self.q_stage1[action_1] += self.alpha * mf_weight * delta_2
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety induces a pessimistic learning bias. Individuals learn
+    more from outcomes that are worse than expected (negative prediction errors)
+    than from those that are better than expected (positive prediction errors).
+    Trait anxiety (stai) directly scales the magnitude of this learning asymmetry.
+    This can cause a participant to rapidly devalue options after even a single
+    disappointing outcome, leading them to perseverate on choices that have
+    previously been reliable, even if they are not currently optimal.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Base learning rate for positive outcomes)
+    beta: [0, 10]    (Inverse softmax temperature)
+    kappa: [0, 2]     (Scales anxiety's enhancement of negative learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Implements asymmetric learning rates for positive and negative prediction errors,
+        where the negative learning rate is amplified by anxiety.
+        """
+        # Determine the learning rate for negative outcomes, scaled by stai
+        alpha_pos = self.alpha
+        alpha_neg = self.alpha + self.kappa * self.stai
+        alpha_neg = np.clip(alpha_neg, 0, 1) # Ensure learning rate is not > 1
+
+        # --- Stage 2 update ---
+        delta_2 = reward - self.q_stage2[state, action_2]
+        learning_rate_2 = alpha_neg if delta_2 < 0 else alpha_pos
+        self.q_stage2[state, action_2] += learning_rate_2 * delta_2
+
+        # --- Stage 1 update ---
+        # Use the updated Q-value for the stage-1 prediction error
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        learning_rate_1 = alpha_neg if delta_1 < 0 else alpha_pos
+        self.q_stage1[action_1] += learning_rate_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety disrupts the process of assigning credit for outcomes,
+    particularly after surprising events. When a rare transition occurs (e.g.,
+    taking the usual spaceship to an unusual planet), an anxious individual
+    struggles to update their value estimate for the initial choice. This is
+    modeled as a dampening of the learning rate for the first-stage action
+    following a rare transition. The degree of this dampening is scaled by
+    trait anxiety (stai), causing more anxious individuals to learn less
+    from surprising outcomes and potentially stick with suboptimal strategies.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Base learning rate)
+    beta: [0, 10]    (Inverse softmax temperature)
+    gamma: [0, 1]     (Scales how much anxiety dampens learning after surprise)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gamma = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Dampens the stage-1 learning rate after a rare state transition,
+        with the dampening effect scaled by anxiety.
+        """
+        # Standard stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Determine if the transition was common (action leads to its typical state)
+        # We assume spaceship 0 -> planet 0 and spaceship 1 -> planet 1 are common.
+        is_common_transition = (action_1 == state)
+
+        # Calculate the effective learning rate for the stage-1 update
+        if is_common_transition:
+            effective_alpha = self.alpha
+        else: # It was a rare transition
+            # Dampen the learning rate based on anxiety
+            dampening_factor = self.gamma * self.stai
+            effective_alpha = self.alpha * (1 - dampening_factor)
+
+        # Update stage-1 value with the (potentially dampened) learning rate
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += effective_alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

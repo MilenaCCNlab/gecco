@@ -1,0 +1,185 @@
+As a cognitive scientist and Python programmer, I will propose three distinct models to explain this participant's decision-making process. Given the participant's high score on the State-Trait Anxiety Inventory (STAI), each model will incorporate anxiety as a key modulator of cognitive function, but will test a different hypothesis about its specific effect.
+
+The participant's behavior, characterized by a strong initial preference for one spaceship followed by increased switching, suggests a dynamic learning process influenced by outcomes. The high anxiety score points towards potential biases in learning, planning, or choice perseveration.
+
+Here are three models that explore these possibilities.
+
+### Model 1: Anxiety-Modulated "Win-Stay" Heuristic
+
+This model hypothesizes that high anxiety enhances a safety-seeking heuristic. Specifically, after receiving a reward, an anxious individual feels a stronger-than-normal impulse to repeat the successful action, viewing it as a "safe" bet. This is a form of outcome-dependent perseveration, where anxiety doesn't cause general inflexibility, but rather an amplified tendency to stick with choices that have recently proven successful. This "win-stay" bias is layered on top of a standard reinforcement learning process.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety enhances a "win-stay" heuristic. The model
+    assumes that after a positive outcome, the value of the chosen first-stage
+    action is temporarily boosted, making it more likely to be chosen again.
+    The magnitude of this perseverative boost is scaled by the participant's
+    trait anxiety (stai), reflecting an anxiety-driven search for safety in
+    recently successful options.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate)
+    beta: [0, 10]    (Softmax inverse temperature)
+    pi: [0, 5]       (Perseveration strength scaling factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pi = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on learned Q-values plus
+        an anxiety-modulated perseveration bonus for the last choice if it
+        was rewarded.
+        """
+        # Start with the standard learned values
+        q_effective = self.q_stage1.copy()
+
+        # Apply perseveration bonus if not the first trial and last trial was rewarded
+        if self.trial > 0 and self.last_reward == 1.0:
+            # The perseveration bonus is scaled by the 'pi' parameter and the stai score
+            perseveration_bonus = self.pi * self.stai
+            q_effective[self.last_action1] += perseveration_bonus
+
+        return self.softmax(q_effective, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD learning update. The model learns Q-values as normal,
+        and the perseveration bias is applied separately at the choice stage.
+        This model uses an eligibility trace (lambda=1) for the first stage update.
+        """
+        # Update stage-2 value
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update stage-1 value
+        # This update incorporates the second-stage prediction error (delta_2)
+        # as an eligibility trace, strengthening the model-free learning.
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        self.q_stage1[action_1] += self.alpha * delta_2
+
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Pruning of Model-Based Planning
+
+This model proposes that anxiety impacts the sophistication of planning. A fully model-based agent considers all possible transitions and their outcomes. However, this can be cognitively demanding. This model suggests that anxious individuals simplify this process by "pruning" their mental simulations, specifically by underweighting or ignoring rare (uncommon) transitions. The degree of this pruning is proportional to their anxiety level, meaning a highly anxious individual's behavior will be driven more by the most likely consequences of their actions, making them less adaptive to rare but potentially important events.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety leads to a simplification of planning by "pruning"
+    the decision tree. The model computes the value of first-stage choices
+    by mentally simulating future outcomes (model-based control). However,
+    it systematically down-weights the value coming from rare transitions.
+    The extent of this down-weighting is controlled by the participant's
+    anxiety score (stai), capturing a narrowing of cognitive scope under duress.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate for stage-2 values)
+    beta: [0, 10]    (Softmax inverse temperature)
+    w: [0, 1]         (Weight of model-based vs. model-free control)
+    prune: [0, 1]     (Base pruning factor for rare transitions)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w, self.prune = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a hybrid of model-free
+        and pruned model-based values.
+        """
+        # 1. Model-free component (simple learned values)
+        q_mf = self.q_stage1
+
+        # 2. Pruned Model-based component
+        q_mb = np.zeros(self.n_choices)
+        max_q_s2 = np.max(self.q_stage2, axis=1) # Value of each planet
+        
+        # Anxiety scales the degree of pruning
+        effective_pruning = self.prune * self.stai
+
+        for a in range(self.n_choices):
+            # Identify common and rare transitions for action 'a'
+            s_common = np.argmax(self.T[a])
+            s_rare = np.argmin(self.T[a])
+            
+            # Calculate value, down-weighting the contribution of the rare state
+            val_common = self.T[a, s_common] * max_q_s2[s_common]
+            val_rare = self.T[a, s_rare] * max_q_s2[s_rare]
+            
+            q_mb[a] = val_common + (1 - effective_pruning) * val_rare
+        
+        # 3. Combine MF and MB values
+        q_hybrid = self.w * q_mb + (1 - self.w) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+    
+    # The default value_update from CognitiveModelBase is used, which updates
+    # both q_stage1 (the MF component) and q_stage2.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Pessimistic State Valuation
+
+This model tests the hypothesis that anxiety induces a pessimistic evaluation bias. When considering a first-stage choice, the participant must evaluate the worth of the planets they might travel to. Instead of valuing a planet by its best possible outcome (i.e., the alien with the most gold), an anxious individual might incorporate the worst possible outcome into their valuation. This model proposes that the value of a planet is a weighted average of its best and worst options. The weight given to the worst option is scaled by trait anxiety, meaning a more anxious person has a more pessimistic and cautious assessment of their options.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety induces a pessimistic bias in state valuation. When
+    planning, the model evaluates the value of the second-stage planets not just
+    by their best potential outcome, but by a mix of their best and worst
+    outcomes. The weight given to the worst outcome (the 'pessimism' level) is
+    directly scaled by the participant's anxiety score (stai), leading to more
+    cautious first-stage choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate for alien values)
+    beta: [0, 10]    (Softmax inverse temperature)
+    kappa: [0, 1]     (Pessimism factor, scales influence of worst outcome)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a fully model-based
+        approach, but using pessimistically valued second-stage states.
+        """
+        # Determine the effective pessimism based on trait anxiety
+        effective_kappa = self.kappa * self.stai
+
+        # Find the max (best) and min (worst) values for each planet
+        max_q_s2 = np.max(self.q_stage2, axis=1)
+        min_q_s2 = np.min(self.q_stage2, axis=1)
+
+        # Calculate the pessimistic value of each planet
+        pessimistic_v_s2 = (1 - effective_kappa) * max_q_s2 + effective_kappa * min_q_s2
+        
+        # Calculate stage-1 Q-values using these pessimistic state values
+        q_stage1_pessimistic = self.T @ pessimistic_v_s2
+        
+        return self.softmax(q_stage1_pessimistic, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        This model is purely model-based at stage 1, so it only needs to learn
+        the stage-2 (alien) values. The stage-1 Q-values are computed on the fly
+        and not stored or learned directly.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

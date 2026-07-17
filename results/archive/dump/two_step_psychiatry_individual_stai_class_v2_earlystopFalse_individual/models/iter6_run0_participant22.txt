@@ -1,0 +1,150 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Modulated Win-Stay, Lose-Shift (Reactive Heuristic)
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the reliance on a reactive "Win-Stay, Lose-Shift" (WSLS) heuristic.
+    While the participant uses value-based RL (Q-learning), they also exhibit a bias to repeat 
+    rewarded actions and switch from unrewarded ones, independent of the learned Q-values.
+    Anxiety (STAI) modulates the strength (weight) of this heuristic bias.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    wsls_base: [0, 5]   # Base weight of the WSLS bias
+    wsls_stai: [-5, 5]  # Modulation of WSLS weight by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.wsls_base, self.wsls_stai = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Standard Q-values
+        q_vals = self.q_stage1.copy()
+        
+        # Calculate WSLS bias vector
+        wsls_bias = np.zeros(self.n_choices)
+        
+        if self.last_action1 is not None:
+            # Calculate effective weight: w = base + slope * stai
+            # We clip to ensure it doesn't become negative (which would invert the heuristic)
+            w = max(0.0, self.wsls_base + (self.wsls_stai * self.stai))
+            
+            if self.last_reward > 0:
+                # Win-Stay: Add bias to the previously chosen action
+                wsls_bias[self.last_action1] = w
+            else:
+                # Lose-Shift: Add bias to the unchosen action
+                # (Assuming binary choice 0 vs 1)
+                other_action = 1 - int(self.last_action1)
+                wsls_bias[other_action] = w
+        
+        # Combine RL value and Heuristic bias
+        # The bias is added to the Q-values before the softmax
+        combined_values = q_vals + wsls_bias
+        
+        return self.softmax(combined_values, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Eligibility Trace (TD-Lambda)
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the "eligibility trace" (lambda) in the reinforcement learning update.
+    This parameter controls the balance between Model-Free bootstrapping (TD learning) and 
+    direct outcome learning (Monte Carlo). High anxiety might lead to a higher lambda, 
+    causing the participant to rely more on the concrete final reward rather than the 
+    estimated value of the second-stage state.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    lam_base: [-5, 5]   # Base logit for lambda
+    lam_stai: [-5, 5]   # STAI slope for lambda logit
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lam_base, self.lam_stai = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate lambda using sigmoid to keep it in [0, 1]
+        logit = self.lam_base + (self.lam_stai * self.stai)
+        lam = 1.0 / (1.0 + np.exp(-logit))
+        
+        # 1. Update Stage 2 Value (Standard TD)
+        # We capture the value before update for the TD target of stage 1
+        q2_pre = self.q_stage2[state, action_2]
+        
+        delta_2 = reward - q2_pre
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Stage 1 Value (TD-Lambda mixture)
+        # The target for Stage 1 is a mixture of the Stage 2 value (TD) and the Reward (MC)
+        # We use the updated Q2 (q2_post) as the best estimate for the TD target
+        q2_post = self.q_stage2[state, action_2]
+        
+        # Target = (1 - lambda) * Q2_est + lambda * Reward
+        mixed_target = (1 - lam) * q2_post + lam * reward
+        
+        delta_1 = mixed_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Epsilon-Greedy (Lapse Rate)
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety acts as a distractor, increasing the "lapse rate" or random exploration.
+    Instead of modulating the value-dependent noise (softmax beta), anxiety drives the participant 
+    to occasionally disengage from the value model entirely and choose randomly (epsilon-greedy).
+    Higher anxiety leads to a higher epsilon (probability of random choice).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature for the non-random part
+    eps_base: [-5, 5]   # Base logit for epsilon
+    eps_stai: [-5, 5]   # STAI slope for epsilon logit
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eps_base, self.eps_stai = model_parameters
+
+    def _get_epsilon(self):
+        # Calculate epsilon using sigmoid to keep it in [0, 1]
+        logit = self.eps_base + (self.eps_stai * self.stai)
+        return 1.0 / (1.0 + np.exp(-logit))
+
+    def policy_stage1(self) -> np.ndarray:
+        epsilon = self._get_epsilon()
+        
+        # Value-based policy (Softmax)
+        softmax_probs = self.softmax(self.q_stage1, self.beta)
+        
+        # Random policy (Uniform)
+        uniform_probs = np.ones(self.n_choices) / self.n_choices
+        
+        # Mixture
+        return (1 - epsilon) * softmax_probs + epsilon * uniform_probs
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        epsilon = self._get_epsilon()
+        
+        # Value-based policy (Softmax)
+        softmax_probs = self.softmax(self.q_stage2[state], self.beta)
+        
+        # Random policy (Uniform)
+        uniform_probs = np.ones(self.n_choices) / self.n_choices
+        
+        # Mixture
+        return (1 - epsilon) * softmax_probs + epsilon * uniform_probs
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

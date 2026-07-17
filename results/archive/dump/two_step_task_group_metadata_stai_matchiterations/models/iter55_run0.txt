@@ -1,0 +1,216 @@
+Here are three new cognitive models that incorporate STAI anxiety scores into the decision-making process of the two-step task.
+
+### Model 1: Anxiety-Induced Model-Based Suppression
+This model hypothesizes that high anxiety consumes cognitive resources (working memory), thereby suppressing the ability to use Model-Based (planning) strategies. Instead of a fixed weight `w`, the weight is dynamically reduced by the participant's anxiety level.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Model-Based Suppression.
+
+    Hypothesis: High anxiety consumes working memory resources required for 
+    model-based planning. Therefore, higher STAI scores reduce the weight (w) 
+    assigned to the model-based system, forcing a reliance on model-free habits.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate for value updates.
+    - beta: [0, 10] Inverse temperature (exploration/exploitation trade-off).
+    - w_max: [0, 1] The maximum possible model-based weight (at 0 anxiety).
+    - suppression_rate: [0, 5] How strongly anxiety suppresses w_max.
+    """
+    learning_rate, beta, w_max, suppression_rate = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate the effective weight w based on anxiety
+    # As anxiety increases, w decreases from w_max towards 0 (pure Model-Free)
+    w = w_max * np.exp(-suppression_rate * stai_score)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Initialize Q-values
+    q_stage1_mf = np.zeros(2)      # Model-free values for stage 1
+    q_stage2_mf = np.zeros((2, 2)) # Model-free values for stage 2 (states x actions)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # Model-Based valuation: Use transition matrix + max stage 2 values
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        # Hybrid valuation
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        # Softmax choice probability for Stage 1
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        # Standard softmax on stage 2 values
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning / Updates ---
+        # Update Stage 1 Model-Free Q-values (SARSA-like)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Update Stage 2 Model-Free Q-values (Reward prediction error)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Loss Rigidity
+This model posits that anxiety affects how participants update their beliefs after a loss (0 reward). Specifically, anxious individuals may "freeze" or become rigid, reducing their learning rate specifically when outcomes are negative, preventing them from adapting to bad news effectively.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Loss Rigidity.
+
+    Hypothesis: Anxiety causes a 'freezing' response to negative outcomes.
+    While learning from rewards remains normal, the learning rate for 
+    non-rewarded trials (losses) is dampened by anxiety.
+
+    Parameters:
+    - learning_rate_base: [0, 1] Base learning rate for rewarded trials.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Balance between Model-Based and Model-Free control.
+    - loss_rigidity: [0, 1] Factor scaling how much anxiety reduces learning from loss.
+      (1 = high anxiety stops learning from loss; 0 = anxiety has no effect).
+    """
+    learning_rate_base, beta, w, loss_rigidity = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Determine Learning Rate ---
+        # If reward is 0 (loss), reduce LR based on anxiety and rigidity param
+        if reward[trial] == 0:
+            # Effective LR decreases as STAI * rigidity increases
+            current_lr = learning_rate_base * (1.0 - (loss_rigidity * stai_score))
+            # Ensure LR doesn't go below 0
+            current_lr = max(0.0, current_lr)
+        else:
+            current_lr = learning_rate_base
+
+        # --- Learning / Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += current_lr * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Rare Transition Penalty
+This model suggests that anxious individuals are intolerant of uncertainty and "surprise." When a rare transition occurs (e.g., choosing Spaceship A but ending up on Planet Y), anxious participants penalize the action that led to it, regardless of the subsequent reward, treating the unexpected transition itself as a negative event.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Rare Transition Penalty.
+
+    Hypothesis: Anxious individuals are intolerant of uncertainty. When a 
+    'rare' transition occurs (unexpected state), they apply a penalty to the 
+    Stage 1 action value, effectively punishing the choice that led to the 
+    surprise, regardless of the actual reward obtained.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] MB/MF weight.
+    - surprise_penalty: [0, 2] Magnitude of penalty applied to rare transitions, scaled by STAI.
+    """
+    learning_rate, beta, w, surprise_penalty = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Detect Rare Transition ---
+        # Common: Action 0 -> State 0, Action 1 -> State 1
+        # Rare: Action 0 -> State 1, Action 1 -> State 0
+        is_rare = (action_1[trial] != state_idx)
+        
+        # Calculate penalty based on anxiety
+        current_penalty = 0.0
+        if is_rare:
+            current_penalty = surprise_penalty * stai_score
+
+        # --- Learning / Updates ---
+        # The penalty is subtracted from the prediction error target for Stage 1
+        # Effectively: Target = Q_stage2 - Penalty
+        delta_stage1 = (q_stage2_mf[state_idx, action_2[trial]] - current_penalty) - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

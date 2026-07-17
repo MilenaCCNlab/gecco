@@ -1,0 +1,218 @@
+Here are three new cognitive models based on the two-step task, incorporating the STAI anxiety score into the decision-making process.
+
+### Model 1: Post-Error "Panic" Exploration
+**Hypothesis:** High anxiety leads to a "panic" response following a lack of reward (0 coins). While low-anxiety individuals maintain a consistent exploration/exploitation trade-off (beta), high-anxiety individuals experience a temporary collapse in decision consistency (low beta) immediately after a loss, resulting in more random behavior on the subsequent trial.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Post-Error "Panic" Exploration Model.
+    
+    Hypothesis: Anxiety induces a 'panic' response after a loss (0 reward), 
+    temporarily reducing the inverse temperature (beta). This leads to 
+    more random/noisy choices immediately following a negative outcome.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta_base: [0, 10] Baseline inverse temperature (consistency).
+    - w: [0, 1] Weight for model-based control (0=MF, 1=MB).
+    - panic_scale: [0, 10] How much STAI reduces beta after a loss.
+      beta_trial = beta_base / (1 + panic_scale * STAI) if prev_reward == 0.
+    """
+    learning_rate, beta_base, w, panic_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track previous reward to trigger panic mechanism
+    last_reward = 1.0 # Initialize with a 'win' so no panic on trial 0
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Weighted mixture of MF and MB values
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Dynamic Beta: If last trial was a loss, reduce beta based on anxiety
+        current_beta = beta_base
+        if last_reward == 0.0:
+            current_beta = beta_base / (1.0 + panic_scale * stai_score)
+
+        exp_q1 = np.exp(current_beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(current_beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Update Q-values
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Store reward for next trial's panic check
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Win-Stay/Lose-Shift (WSLS) Override
+**Hypothesis:** Anxiety reduces reliance on complex probabilistic learning (RL) and increases reliance on simple heuristics. This model proposes that anxious participants mix their RL policy with a primitive "Win-Stay, Lose-Shift" heuristic. If they won previously, they get a "bonus" to repeat the action; if they lost, they get a "penalty," bypassing the Q-value calculations.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven WSLS Override Model.
+    
+    Hypothesis: Anxiety increases reliance on a primitive Win-Stay/Lose-Shift 
+    heuristic. A bias is added to the Q-values of the previously chosen action:
+    positive if rewarded, negative if unrewarded. The magnitude depends on STAI.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - wsls_bias: [0, 5] Magnitude of the heuristic bias scaled by STAI.
+    """
+    learning_rate, beta, w, wsls_bias = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = 0
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply WSLS heuristic bias
+        if last_action_1 != -1:
+            heuristic_val = wsls_bias * stai_score
+            if last_reward == 1.0:
+                # Win-Stay: Boost previous action
+                q_net[last_action_1] += heuristic_val
+            else:
+                # Lose-Shift: Penalize previous action
+                q_net[last_action_1] -= heuristic_val
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Update Q-values
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Counterfactual "Regret" Updating
+**Hypothesis:** Anxious individuals are more prone to "regret" or worrying about the path not taken. In this model, anxiety drives counterfactual updating: when an outcome is observed for the chosen spaceship, the participant also updates the value of the *unchosen* spaceship, assuming it would have yielded the opposite outcome (e.g., if I won, the other choice would have lost).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Counterfactual "Regret" Updating Model.
+    
+    Hypothesis: Anxious participants engage in higher counterfactual updating.
+    They update the unchosen Stage 1 option assuming it would have yielded 
+    the inverse of the received reward (1-R).
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - cf_weight: [0, 1] Weight of the counterfactual update, scaled by STAI.
+    """
+    learning_rate, beta, w, cf_weight = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Update Q-values
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Counterfactual Update for the unchosen option
+        unchosen_action = 1 - action_1[trial]
+        # Assume unchosen would have given opposite reward (1-reward)
+        # This simulates "If I won here, I would have lost there" (Regret minimization logic)
+        # or "If I lost here, I would have won there" (The grass is greener)
+        cf_target = 1.0 - reward[trial] 
+        # Note: We use the raw reward as proxy for Stage 2 value in the counterfactual case
+        delta_cf = cf_target - q_stage1_mf[unchosen_action]
+        q_stage1_mf[unchosen_action] += (learning_rate * cf_weight * stai_score) * delta_cf
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

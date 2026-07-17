@@ -1,0 +1,239 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: State-Based Perseveration.
+    The participant exhibits a tendency to choose the spaceship that leads to the 
+    planet (state) they visited on the previous trial, regardless of the reward obtained.
+    This heuristic reduces transition uncertainty. Anxiety (STAI) modulates the strength 
+    of this "state stickiness".
+    
+    Mechanism:
+    If the previous state was Planet X (State 0), the participant receives a bonus 
+    for choosing Spaceship A (Action 0), which commonly leads to X.
+    If the previous state was Planet Y (State 1), they receive a bonus for Spaceship U (Action 1).
+    Bonus = w_state * STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_state: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_state = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        logits = np.copy(self.q_stage1)
+        
+        # Apply state-based stickiness if a previous state exists
+        if self.last_state is not None:
+            bonus = self.w_state * self.stai
+            
+            # If last state was 0 (Planet X), boost Action 0 (Spaceship A)
+            # If last state was 1 (Planet Y), boost Action 1 (Spaceship U)
+            # This assumes the participant knows the common transitions (A->X, U->Y)
+            if self.last_state == 0:
+                logits[0] += bonus
+            else:
+                logits[1] += bonus
+                
+        return self.softmax(logits, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Exploratory Learning Suppression (Confirmation Bias).
+    Anxiety increases confirmation bias. The participant learns normally when they choose
+    the option they currently believe is best (greedy choice). However, when they make an 
+    exploratory choice (choosing the non-max option), anxiety suppresses the learning rate,
+    causing them to discount the outcome of that exploration.
+
+    Mechanism:
+    If Action == argmax(Q_stage1), alpha_eff = alpha.
+    If Action != argmax(Q_stage1), alpha_eff = alpha / (1 + phi * STAI).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    phi: [0, 10] (Suppression factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.phi = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Determine if the Stage 1 choice was greedy or exploratory
+        # We check the Q-values *before* the update
+        best_action = np.argmax(self.q_stage1)
+        
+        # Calculate effective learning rate for Stage 1
+        if action_1 == best_action:
+            alpha_eff = self.alpha
+        else:
+            # Exploratory choice: suppress learning based on anxiety
+            alpha_eff = self.alpha / (1.0 + self.phi * self.stai)
+            
+        # Update Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_eff * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Stakes-Sensitive Precision.
+    Anxiety modulates how strongly the "stakes" of the decision affect choice precision (beta).
+    The "stakes" are defined as the difference in potential value between the two planets (Stage 2).
+    If one planet is much better than the other, an anxious participant becomes more precise 
+    (higher beta) in Stage 1 to ensure they reach the good planet. If planets are similar, 
+    they may be less precise.
+
+    Mechanism:
+    Stakes = |max(Q_stage2[Planet X]) - max(Q_stage2[Planet Y])|
+    Beta_Stage1 = Beta_base * (1 + s_sens * STAI * Stakes)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    s_sens: [0, 10] (Sensitivity to stakes)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.s_sens = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate the value of the best alien on each planet
+        val_planet_x = np.max(self.q_stage2[0])
+        val_planet_y = np.max(self.q_stage2[1])
+        
+        # Stakes is the absolute difference between the best outcomes of the two states
+        stakes = np.abs(val_planet_x - val_planet_y)
+        
+        # Modulate beta based on stakes and anxiety
+        # High anxiety + High stakes -> Very high beta (deterministic choice)
+        beta_eff = self.beta * (1.0 + self.s_sens * self.stai * stakes)
+        
+        return self.softmax(self.q_stage1, beta_eff)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

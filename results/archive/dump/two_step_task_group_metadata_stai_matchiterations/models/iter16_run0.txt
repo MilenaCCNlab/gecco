@@ -1,0 +1,242 @@
+Here are three new cognitive models that incorporate STAI scores into the decision-making process in the two-step task.
+
+### Model 1: Anxiety-Modulated Transition Learning
+This model hypothesizes that high anxiety (high STAI) leads to hyper-vigilance regarding environmental structure. Instead of assuming a fixed transition matrix (0.7/0.3), highly anxious participants might update their belief about transition probabilities more aggressively after every trial, constantly suspecting the "rules" have changed.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Transition Learning Model.
+    
+    Hypothesis: High anxiety leads to faster updating of the internal model of the 
+    environment (transition probabilities). Anxious individuals are hyper-vigilant 
+    to changes in state transitions.
+    
+    Parameters:
+    - learning_rate: [0, 1] Learning rate for reward values (Q-values).
+    - beta: [0, 10] Inverse temperature for softmax.
+    - w: [0, 1] Weight for model-based control.
+    - trans_lr_base: [0, 1] Base learning rate for updating the transition matrix.
+    - trans_lr_mod: [0, 5] How much STAI scales the transition learning rate.
+    """
+    learning_rate, beta, w, trans_lr_base, trans_lr_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Transition learning rate scales with anxiety
+    lr_transition = trans_lr_base + (trans_lr_mod * stai_score)
+    # Clip to ensure it stays valid [0, 1]
+    lr_transition = np.clip(lr_transition, 0.0, 1.0)
+
+    # Initialize transition matrix (belief state)
+    # Rows: Action 1 (0 or 1), Cols: State (0 or 1)
+    # Start with the true prior roughly: 0->0 is common, 1->1 is common
+    transition_counts = np.array([[0.7, 0.3], [0.3, 0.7]]) 
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Normalize transition matrix rows to get probabilities
+        row_sums = transition_counts.sum(axis=1, keepdims=True)
+        trans_probs = transition_counts / row_sums
+
+        # Model-Based Value Calculation
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = trans_probs @ max_q_stage2
+
+        # Net Q-value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        # Stage 1 Choice
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        state_idx = state[trial] # 0 for Planet X, 1 for Planet Y
+        
+        # Stage 2 Choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Update Q-values (Standard TD)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        # Update Transition Beliefs
+        # We use a simple delta rule on the counts or probabilities to simulate learning
+        # Here we update the row corresponding to the action taken
+        # Target is 1 for the state visited, 0 for the other
+        act1 = action_1[trial]
+        
+        # Create a one-hot vector for the state visited
+        state_vec = np.zeros(2)
+        state_vec[state_idx] = 1.0
+        
+        # Update the specific row of the transition matrix towards the observed outcome
+        # We update the raw probabilities directly here for simplicity in this implementation style
+        current_probs = trans_probs[act1]
+        new_probs = current_probs + lr_transition * (state_vec - current_probs)
+        transition_counts[act1] = new_probs # Store back as "counts" (conceptually probs here)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Induced Pruning (Avoidance)
+This model suggests that anxiety induces a "pruning" heuristic. When calculating Model-Based values, highly anxious individuals may pessimistically ignore the potential value of the "rare" transition, focusing solely on the common transition to reduce cognitive load and uncertainty. This effectively simplifies the tree search.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Pruning Model.
+    
+    Hypothesis: Anxiety causes a simplification of the internal model. 
+    Instead of calculating the full expected value over both possible state transitions,
+    anxious individuals 'prune' the rare transition branch, assuming the common 
+    transition is the only one that matters.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - prune_thresh: [0, 1] STAI threshold above which pruning occurs.
+    """
+    learning_rate, beta, w, prune_thresh = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Determine if this participant prunes based on their anxiety
+    # If STAI > threshold, they prune.
+    # We use a sigmoid-like soft switch or just a hard check. 
+    # To make it differentiable/smooth for fitting, we can weight the pruning logic.
+    # However, for this discrete logic, we'll define a 'pruning_factor' 
+    # that scales from 0 (full model) to 1 (pruned model) based on STAI.
+    
+    # Let's define pruning_intensity. If STAI is high, intensity is high.
+    # We map STAI [0,1] and prune_thresh [0,1] to an intensity.
+    # If STAI > prune_thresh, intensity approaches 1.
+    pruning_intensity = 1.0 / (1.0 + np.exp(-10 * (stai_score - prune_thresh)))
+
+    # Fixed transition matrix
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    # Pruned transition matrix (assumes probability 1.0 for common, 0.0 for rare)
+    # Action 0 (A) -> State 0 (X) is common
+    # Action 1 (U) -> State 1 (Y) is common
+    pruned_matrix = np.array([[1.0, 0.0], [0.0, 1.0]])
+    
+    # Effective matrix is a blend based on anxiety
+    effective_matrix = (1 - pruning_intensity) * transition_matrix + pruning_intensity * pruned_matrix
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # MB calculation uses the anxiety-modulated effective matrix
+        q_stage1_mb = effective_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Exploration Suppression
+This model posits that anxiety suppresses exploration. While `beta` usually controls exploration globally, this model suggests that anxiety specifically dampens the `beta` parameter over time or scales it, making anxious individuals more deterministic (exploitative) to avoid the uncertainty of exploring unknown options, effectively "freezing" on what they know.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Exploration Suppression Model.
+    
+    Hypothesis: Anxiety reduces exploration (increases exploitation). 
+    High STAI scores lead to a higher effective inverse temperature (beta),
+    making choices more deterministic and sensitive to value differences.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta_base: [0, 10] Baseline inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - anxiety_stiffening: [0, 5] How much anxiety increases beta (reduces randomness).
+    """
+    learning_rate, beta_base, w, anxiety_stiffening = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Effective beta is higher for higher anxiety
+    # Beta = 0 is random, Beta = high is deterministic
+    beta_eff = beta_base + (anxiety_stiffening * stai_score)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        # Use effective beta
+        exp_q1 = np.exp(beta_eff * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        state_idx = state[trial]
+
+        # Use effective beta for second stage as well
+        exp_q2 = np.exp(beta_eff * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

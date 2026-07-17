@@ -1,0 +1,168 @@
+Here are three cognitive models designed to capture different hypotheses about how high anxiety (STAI = 0.575) influences decision-making in this two-step task.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model hypothesizes that high anxiety impairs model-based control (planning) and favors model-free (habitual) control. The mixing weight `w` between model-based and model-free values is modulated by the STAI score. A higher STAI score reduces the contribution of the model-based system, making the participant more reliant on simple temporal difference learning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety (STAI) reduces the reliance on Model-Based (MB) planning 
+    and increases reliance on Model-Free (MF) learning.
+    
+    The mixing parameter 'w' determines the balance between MB and MF systems.
+    We model 'w' as a function of STAI: w_effective = w_base * (1 - stai).
+    Since this participant has high anxiety (0.575), they will have a lower effective w,
+    relying more on the MF system (TD learning).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Base mixing weight (1 = full MB, 0 = full MF)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize Model-Free Q-values (already in base class as q_stage1, q_stage2)
+        # We need a separate structure for Model-Based values if we want to be explicit,
+        # but usually MB values are computed on the fly using the transition matrix T and stage 2 Q-values.
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Value (MF): self.q_stage1
+        
+        # 2. Model-Based Value (MB):
+        # Q_MB(a1) = sum(P(s2|a1) * max(Q_stage2(s2, a2)))
+        # self.T is shape (2, 2) -> (action1, state2)
+        # self.q_stage2 is shape (2, 2) -> (state2, action2)
+        max_q2 = np.max(self.q_stage2, axis=1) # Max value of each state
+        q_mb = np.sum(self.T * max_q2.reshape(1, -1), axis=1)
+        
+        # 3. Mix MB and MF
+        # Effective w is reduced by anxiety
+        w_eff = self.w_base * (1.0 - self.stai) 
+        
+        q_net = w_eff * q_mb + (1 - w_eff) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Model-Free values
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (TD(0))
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Note: In a full hybrid model, we might also update the transition matrix T here,
+        # but for simplicity and given the fixed probabilities in the prompt description, 
+        # we assume T is static or the participant uses the "common" knowledge.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Loss Aversion
+This model hypothesizes that high anxiety makes participants hypersensitive to the lack of reward (which they perceive as a loss or failure). Instead of a standard symmetric learning rate, the model uses separate learning rates for positive outcomes (reward=1) and negative outcomes (reward=0). The STAI score amplifies the learning rate for negative outcomes (`alpha_neg`), causing the participant to quickly abandon options that fail to yield gold.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety leads to increased sensitivity to negative outcomes (0 coins).
+    
+    We implement dual learning rates: alpha_pos and alpha_neg.
+    The effective alpha_neg is boosted by the STAI score:
+    alpha_neg_effective = alpha_neg_base * (1 + stai).
+    This causes the participant to react more strongly to missing a reward than getting one.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   # Learning rate for rewards (1 coin)
+    alpha_neg_base: [0, 1] # Base learning rate for non-rewards (0 coins)
+    beta: [0, 10]       # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine effective learning rate based on outcome
+        if reward > 0:
+            alpha = self.alpha_pos
+        else:
+            # Anxiety amplifies the reaction to negative outcomes
+            # We clip at 1.0 to maintain stability
+            alpha = min(1.0, self.alpha_neg_base * (1.0 + self.stai))
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha * delta_2
+        
+        # Stage 1 update
+        # We use the updated stage 2 value for the TD target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Exploration Suppression
+This model hypothesizes that high anxiety reduces exploration. Anxious individuals often prefer safety and exploiting known good options rather than exploring uncertain ones. Here, the inverse temperature parameter `beta` (which controls the exploration-exploitation trade-off) is modulated by STAI. A higher STAI leads to a higher `beta`, resulting in "stiffer" or more deterministic choices (less exploration). Additionally, we include a "stickiness" parameter that is also modulated by anxiety, suggesting anxious people tend to repeat previous choices to avoid the cognitive load of re-decision.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety suppresses exploration and increases choice perseveration (stickiness).
+    
+    The inverse temperature 'beta' is scaled up by STAI: beta_eff = beta * (1 + stai).
+    Higher beta means more exploitation/less randomness.
+    
+    Additionally, a choice stickiness bonus is added to the previously chosen action,
+    scaled by STAI: stickiness_eff = stickiness * (1 + stai).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Base inverse temperature
+    stickiness: [0, 5]  # Base choice stickiness bonus
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta
+        beta_eff = self.beta * (1.0 + self.stai)
+        
+        # Calculate stickiness bonus
+        stickiness_eff = self.stickiness * (1.0 + self.stai)
+        
+        # Add stickiness to Q-values for selection only (not for learning)
+        q_modified = self.q_stage1.copy()
+        if self.last_action1 is not None:
+            q_modified[int(self.last_action1)] += stickiness_eff
+            
+        return self.softmax(q_modified, beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Calculate effective beta
+        beta_eff = self.beta * (1.0 + self.stai)
+        
+        # Note: Stickiness usually applies more strongly to the first stage choice in this task,
+        # but we can apply a smaller effect or no effect here. 
+        # For this model, we apply standard softmax at stage 2.
+        return self.softmax(self.q_stage2[state], beta_eff)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

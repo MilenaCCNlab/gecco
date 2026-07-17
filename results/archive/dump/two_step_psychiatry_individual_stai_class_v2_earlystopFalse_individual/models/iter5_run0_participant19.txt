@@ -1,0 +1,222 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Induced Temporal Myopia]
+    This model hypothesizes that anxiety increases temporal discounting. Anxious individuals 
+    may be more "myopic," focusing on immediate outcomes and undervaluing the connection 
+    between the first-stage choice and the second-stage value.
+    
+    The discount factor `gamma` (usually 1.0 in this task) is reduced by anxiety.
+    gamma = 1.0 - (myopia_scale * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    myopia_scale: [0, 1] (Scales how much anxiety reduces the discount factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.myopia_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate anxiety-modulated discount factor
+        # If stai is high, gamma becomes smaller (more myopic)
+        gamma = 1.0 - (self.myopia_scale * self.stai)
+        gamma = np.clip(gamma, 0.0, 1.0)
+
+        # Stage 2 update (Terminal, so no discounting needed for reward)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # The target is the discounted value of the state we landed in
+        target_val = gamma * self.q_stage2[state, action_2]
+        delta_1 = target_val - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Driven Generalization]
+    This model hypothesizes that anxiety leads to over-generalization of feedback. 
+    When an anxious participant observes an outcome for one spaceship, they may 
+    "leak" some of that learning to the unchosen spaceship, assuming the environment 
+    is globally good or bad.
+    
+    The unchosen option is updated in the same direction as the chosen option, 
+    scaled by anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    spread_scale: [0, 1] (Proportion of learning applied to the unchosen option per unit of anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.spread_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update for chosen action
+        target = self.q_stage2[state, action_2]
+        delta_1 = target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Generalized update for the UNCHOSEN action
+        # Anxiety causes the value of the unchosen option to drift towards the value of the chosen path
+        unchosen_action = 1 - action_1
+        delta_unchosen = target - self.q_stage1[unchosen_action]
+        
+        # Effective learning rate for generalization
+        alpha_gen = self.alpha * self.spread_scale * self.stai
+        self.q_stage1[unchosen_action] += alpha_gen * delta_unchosen
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Pessimism (Priors)]
+    This model hypothesizes that anxiety determines the initial expectations (priors) 
+    of the participant. While standard models initialize Q-values at 0.5 or 0, 
+    this model assumes anxious individuals start with lower, pessimistic expectations.
+    
+    Initial Q = 0.5 - (pessimism_factor * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    pessimism_factor: [0, 1] (Scales how much anxiety lowers initial values)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pessimism_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate initial value based on anxiety
+        # High anxiety -> Lower initial value (Pessimism)
+        # Low anxiety -> Closer to neutral (0.5)
+        initial_val = 0.5 - (self.pessimism_factor * self.stai)
+        
+        # Initialize Q-tables with this biased prior
+        self.q_stage1 = np.full(self.n_choices, initial_val)
+        self.q_stage2 = np.full((self.n_states, self.n_choices), initial_val)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

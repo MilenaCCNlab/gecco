@@ -1,0 +1,159 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety causes "Distal Discounting".
+    
+    High anxiety participants may struggle to propagate value from the outcome (Stage 2) 
+    back to the initial choice (Stage 1). They learn the value of the planets (Stage 2) 
+    normally, but the link to the spaceships (Stage 1) is dampened.
+    
+    Mechanism:
+    When updating Stage 1 values based on Stage 2 values, the target value is discounted 
+    by a factor dependent on STAI.
+    
+    Discount = 1 / (1 + distal_disc * STAI)
+    Target for Q1 = Discount * Q2_value
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    distal_disc: [0, 10] (Strength of discounting due to anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.distal_disc = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 (Planets) normally
+        # Q2(s, a2) += alpha * (Reward - Q2(s, a2))
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Stage 1 (Spaceships) with Anxiety-based Discounting
+        # The value of the chosen spaceship should move towards the value of the state reached.
+        # However, anxiety weakens this link.
+        
+        discount_factor = 1.0 / (1.0 + self.distal_disc * self.stai)
+        
+        # The target value is the current value of the action taken in stage 2
+        target_val = self.q_stage2[state, action_2]
+        
+        # Apply discount
+        discounted_target = target_val * discount_factor
+        
+        # TD Update for Stage 1
+        delta_1 = discounted_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety causes "Transition Uncertainty" (Blurry Model-Based).
+    
+    The participant uses a Model-Based strategy (planning based on transition probabilities),
+    but anxiety introduces entropy ("blur") into their internal model of the transitions.
+    High anxiety makes them perceive the transitions as more random (closer to 50/50) 
+    than they actually are (70/30), reducing the effectiveness of planning.
+
+    Mechanism:
+    Effective_T = True_T * (1 - k) + 0.5 * k
+    where k = blur_param * STAI.
+    Stage 1 values are calculated on-the-fly using this distorted T matrix.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Stage 2 values)
+    beta: [0, 10]
+    blur_param: [0, 1] (How much anxiety flattens the transition matrix)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.blur_param = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values for Stage 1
+        # Standard MB: Q1 = T * max(Q2)
+        
+        # 1. Calculate distortion factor k
+        k = self.blur_param * self.stai
+        k = np.clip(k, 0.0, 1.0)
+        
+        # 2. Distort the transition matrix
+        # self.T is [[0.7, 0.3], [0.3, 0.7]] derived from counts in base class
+        # We mix it with a uniform distribution [[0.5, 0.5], [0.5, 0.5]]
+        T_uniform = 0.5 * np.ones_like(self.T)
+        T_effective = self.T * (1.0 - k) + T_uniform * k
+        
+        # 3. Compute max value of each state in Stage 2
+        # V(state) = max_a Q2(state, a)
+        values_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # 4. Compute Q-values for Stage 1 actions
+        # Q1(action) = Sum_states ( P(state|action) * V(state) )
+        q_mb_stage1 = T_effective @ values_stage2
+        
+        return self.softmax(q_mb_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Only update Stage 2 values (Model-Free part of the hybrid, or pure MB base)
+        # Stage 1 values are computed dynamically in policy_stage1, so we don't update self.q_stage1 array.
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety causes "Surprise Reactivity" (Hyper-learning from Rare Transitions).
+    
+    Anxious individuals are hyper-vigilant to violations of their internal model. 
+    When a "rare" transition occurs (Spaceship A -> Planet Y, or U -> X), they react 
+    by drastically increasing their learning rate for that trial, trying to update 
+    their beliefs rapidly.
+
+    Mechanism:
+    If transition is Rare:
+        Effective Alpha = alpha * (1 + surprise_boost * STAI)
+    Else:
+        Effective Alpha = alpha
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    surprise_boost: [0, 5] (Multiplier for alpha during rare events)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.surprise_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if transition was rare
+        # Common: 0->0 (A->X) or 1->1 (U->Y)
+        # Rare: 0->1 (A->Y) or 1->0 (U->X)
+        
+        is_rare = (action_1 == 0 and state == 1) or (action_1 == 1 and state == 0)
+        
+        # Calculate effective alpha
+        if is_rare:
+            # Boost alpha based on anxiety
+            eff_alpha = self.alpha * (1.0 + self.surprise_boost * self.stai)
+            # Cap at 1.0 to ensure stability
+            eff_alpha = min(eff_alpha, 1.0)
+        else:
+            eff_alpha = self.alpha
+            
+        # Update Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += eff_alpha * delta_2
+        
+        # Update Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += eff_alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

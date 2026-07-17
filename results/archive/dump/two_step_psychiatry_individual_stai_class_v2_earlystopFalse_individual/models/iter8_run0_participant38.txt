@@ -1,0 +1,145 @@
+Here are three new cognitive models that incorporate the participant's STAI score to explain their decision-making in the two-step task.
+
+### Model 1: Anxiety-Modulated Asymmetric Learning
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates learning from negative prediction errors (disappointments).
+    Anxious individuals may be hypersensitive to outcomes that are worse than expected (Reward=0),
+    updating their value estimates more drastically after a loss than a win.
+    
+    Mechanism:
+    The learning rate 'alpha' is scaled by STAI specifically when the prediction error is negative.
+    alpha_neg = alpha * (1 + xi * STAI)
+    alpha_pos = alpha
+    
+    If xi > 0, anxiety amplifies the impact of negative feedback (loss chasing or rapid avoidance).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Base learning rate
+    beta: [0, 10]       # Inverse temperature
+    xi: [-2, 5]         # Anxiety modulation of negative learning rate
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.xi = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine effective alpha for stage 2
+        eff_alpha_2 = self.alpha
+        if delta_2 < 0:
+            eff_alpha_2 = self.alpha * (1 + self.xi * self.stai)
+            eff_alpha_2 = np.clip(eff_alpha_2, 0, 1)
+            
+        self.q_stage2[state, action_2] += eff_alpha_2 * delta_2
+        
+        # Stage 1 update
+        # Note: Standard TD uses Q_stage2 as the target.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Determine effective alpha for stage 1
+        eff_alpha_1 = self.alpha
+        if delta_1 < 0:
+            eff_alpha_1 = self.alpha * (1 + self.xi * self.stai)
+            eff_alpha_1 = np.clip(eff_alpha_1, 0, 1)
+
+        self.q_stage1[action_1] += eff_alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Model-Based Control
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    High anxiety might disrupt model-based planning (reducing the weight of the transition structure),
+    leading to more habitual (MF) choices.
+    
+    Mechanism:
+    Q_net = w * Q_MB + (1 - w) * Q_MF
+    w = sigmoid(omega * (STAI - 0.4))
+    
+    Where 0.4 is the approximate mean STAI.
+    If omega < 0, higher anxiety leads to lower w (less MB, more MF).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for MF values
+    beta: [0, 10]       # Inverse temperature
+    omega: [-10, 10]    # Slope of anxiety effect on MB weighting
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values
+        # We assume the participant knows the fixed transition probabilities:
+        # Spaceship A (0) -> Planet X (0) w/ p=0.7
+        # Spaceship U (1) -> Planet Y (1) w/ p=0.7
+        v_stage2 = np.max(self.q_stage2, axis=1) # Max value of each state
+        
+        q_mb = np.zeros(self.n_choices)
+        q_mb[0] = 0.7 * v_stage2[0] + 0.3 * v_stage2[1]
+        q_mb[1] = 0.3 * v_stage2[0] + 0.7 * v_stage2[1]
+        
+        # 2. Calculate Mixing Weight
+        # Centering STAI around 0.4 to allow the logistic curve to pivot near the participant's range
+        w = 1 / (1 + np.exp(-self.omega * (self.stai - 0.4)))
+        
+        # 3. Combine MB and MF values
+        q_net = w * q_mb + (1 - w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Loss-Shift Heuristic
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety drives a "Loss-Shift" heuristic.
+    Anxious participants are more likely to switch their Stage 1 choice immediately 
+    after receiving no reward (0 coins), regardless of the transition type (Common/Rare).
+    This represents a reactive "flight" response to failure.
+    
+    Mechanism:
+    If the previous reward was 0, add a bonus to the *unchosen* option.
+    Bonus = upsilon * STAI
+    
+    Q_net(a) = Q_stage1(a) + Bonus * I(a != last_action)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    upsilon: [-5, 5]    # Anxiety modulation of switching bonus
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.upsilon = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        values = self.q_stage1.copy()
+        
+        # Apply Loss-Shift Bonus
+        # If the last trial resulted in 0 coins, boost the value of the OTHER spaceship
+        if self.last_reward == 0.0 and self.last_action1 is not None:
+            # Identify the unchosen action (assuming binary choice 0/1)
+            unchosen_action = 1 - int(self.last_action1)
+            
+            # Calculate bonus based on anxiety
+            bonus = self.upsilon * self.stai
+            
+            values[unchosen_action] += bonus
+            
+        return self.softmax(values, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

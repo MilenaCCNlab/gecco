@@ -1,0 +1,177 @@
+Here are three new cognitive models.
+
+### Model 1
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant's medium anxiety leads
+    to asymmetric learning, specifically a heightened sensitivity to negative
+    outcomes. They learn more from outcomes that are worse than expected
+    (negative prediction errors) compared to outcomes that are better than
+    expected. This anxiety-driven loss sensitivity is scaled by the STAI score,
+    causing the participant to more strongly devalue options that lead to
+    disappointment.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] (Base learning rate)
+    beta: [0, 10]      (Softmax inverse temperature)
+    sensitivity: [0, 2] (Factor scaling anxiety's effect on learning from negative PEs)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using separate learning rates for positive and negative
+        prediction errors (PEs), where the negative learning rate is amplified
+        by anxiety.
+        """
+        # Define anxiety-modulated learning rates
+        alpha_pos = self.alpha_base
+        alpha_neg = self.alpha_base + self.sensitivity * self.stai
+        alpha_neg = np.clip(alpha_neg, 0, 1) # Ensure learning rate is not > 1
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = alpha_pos if delta_2 > 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+
+        # Stage 1 update (model-free)
+        # The 'reward' for the first stage is the value of the second stage
+        q_stage2_max = np.max(self.q_stage2[state])
+        delta_1 = q_stage2_max - self.q_stage1[action_1]
+        alpha_1 = alpha_pos if delta_1 > 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that the participant's medium anxiety
+    drives an uncertainty-reducing exploration strategy. Rather than exploring
+    randomly, the participant is motivated to choose options they have less
+    recent experience with, effectively adding an "uncertainty bonus" to their
+    value calculations. This drive to resolve uncertainty is proportional to
+    their STAI score, reflecting an anxious need to know the value of all
+    options to avoid potential negative surprises.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]  (Learning rate)
+    beta: [0, 10]  (Softmax inverse temperature)
+    kappa: [0, 5]  (Strength of the uncertainty bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize counters for action selections to track uncertainty."""
+        # Initialize counts to 1 to avoid division by zero
+        self.action_counts_s1 = np.ones(self.n_choices)
+        self.action_counts_s2 = np.ones_like(self.q_stage2)
+
+    def get_policy_values(self, q_values, counts) -> np.ndarray:
+        """Calculate policy values by adding an uncertainty bonus."""
+        # UCB-like bonus: sqrt(log(t)/N(a))
+        # Add a small epsilon to trial to avoid log(0)
+        total_trials = self.trial + 1
+        uncertainty_bonus = np.sqrt(np.log(total_trials) / counts)
+        
+        # Anxiety scales the magnitude of the bonus
+        anxiety_scaled_bonus = self.kappa * self.stai * uncertainty_bonus
+        return q_values + anxiety_scaled_bonus
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities with uncertainty bonus."""
+        policy_values = self.get_policy_values(self.q_stage1, self.action_counts_s1)
+        return self.softmax(policy_values, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities with uncertainty bonus."""
+        policy_values = self.get_policy_values(self.q_stage2[state], self.action_counts_s2[state])
+        return self.softmax(policy_values, self.beta)
+        
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update action counters after each trial."""
+        super().post_trial(action_1, state, action_2, reward)
+        self.action_counts_s1[action_1] += 1
+        self.action_counts_s2[state, action_2] += 1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that the participant dynamically adjusts their
+    reliance on a mental model of the task based on its recent accuracy.
+    Specifically, their medium anxiety causes them to lose confidence in their
+    model after a surprising event (a rare spaceship transition). On the trial
+    immediately following a rare transition, they rely less on goal-directed,
+    model-based planning and more on simpler, habitual (model-free) values.
+    The magnitude of this shift is scaled by their STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]    (Learning rate for model-free values)
+    beta: [0, 10]    (Softmax inverse temperature)
+    w_base: [0, 1]   (Baseline weight on model-based control)
+    w_decay: [0, 2]  (Anxiety-scaled reduction in w after a rare transition)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_decay = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize flag to track rare transitions."""
+        self.last_transition_was_rare = False
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 probabilities based on a dynamic mix of model-based
+        and model-free values.
+        """
+        # 1. Calculate Model-Based (MB) values
+        q_max_per_state = np.max(self.q_stage2, axis=1)
+        q_mb = self.T @ q_max_per_state  # Matrix multiplication: T[a,s] * max(Q(s,a'))
+
+        # 2. Retrieve Model-Free (MF) values (learned via TD in base class)
+        q_mf = self.q_stage1
+
+        # 3. Determine the weighting (w) between MB and MF control
+        w = self.w_base
+        if self.last_transition_was_rare:
+            # Anxiety causes a greater drop in model reliance after it fails
+            w -= self.w_decay * self.stai
+        
+        w = np.clip(w, 0, 1)
+
+        # 4. Combine values and compute policy
+        q_hybrid = w * q_mb + (1 - w) * q_mf
+        return self.softmax(q_hybrid, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update state for the next trial, noting if the transition was rare.
+        """
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # A transition is common if action_1 leads to its corresponding state
+        # (e.g., action 0 -> state 0; action 1 -> state 1).
+        # It is rare otherwise.
+        is_common = (action_1 == state)
+        self.last_transition_was_rare = not is_common
+    
+    # The base value_update method correctly updates the model-free (q_stage1)
+    # and second-stage (q_stage2) values, which is exactly what this hybrid model requires.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

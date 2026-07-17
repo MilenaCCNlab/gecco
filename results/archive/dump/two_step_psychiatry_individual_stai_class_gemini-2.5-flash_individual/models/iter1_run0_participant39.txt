@@ -1,0 +1,162 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, with a specific role for anxiety (STAI score).
+
+### ParticipantModel1: Hybrid Model-Based/Model-Free with Anxiety-Driven Model-Based Impairment
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes a hybrid control system combining model-free (MF) and
+    model-based (MB) learning. High anxiety (STAI score) is hypothesized to reduce the
+    reliance on the computationally demanding model-based system, shifting control
+    towards the simpler, habitual model-free system due to cognitive load or stress-induced
+    impairment of planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for model-free updates.
+    beta: [0, 10] - Softmax inverse temperature.
+    w_base: [0, 1] - Base weight for model-based control (when STAI is 0).
+    w_anxiety_factor: [0, 1] - Factor by which STAI reduces the model-based weight.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_anxiety_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective model-based weight based on STAI
+        # The higher the STAI, the lower the 'w' (model-based influence).
+        # Ensure w_effective stays within [0, 1].
+        self.w_effective = max(0.0, min(1.0, self.w_base - self.stai * self.w_anxiety_factor))
+
+        # self.q_stage1 and self.q_stage2 from the base class will be used as the
+        # model-free (MF) Q-values which are updated via TD learning.
+        # The policy_stage1 will then combine these MF values with computed MB values.
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Model-Free (MF) learning for Stage 2 (direct outcome)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-Free (MF) learning for Stage 1 (based on subsequent state value)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def policy_stage1(self) -> np.ndarray:
+        # Compute Model-Based (MB) Q-values for Stage 1
+        # Q_MB(a1) = sum_s' P(s'|a1) * max_a2 Q_MF(s', a2)
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # The transition probabilities self.T[a1, s'] are already available
+            # max(self.q_stage2[s', :]) represents the maximal expected value from state s'
+            q_mb_stage1[a1] = (self.T[a1, 0] * np.max(self.q_stage2[0, :])) + \
+                              (self.T[a1, 1] * np.max(self.q_stage2[1, :]))
+
+        # Combine MF and MB Q-values for Stage 1 decision based on effective weight
+        # self.q_stage1 holds the MF Q-values for Stage 1 after value_update
+        q_hybrid_stage1 = self.w_effective * q_mb_stage1 + (1 - self.w_effective) * self.q_stage1
+        
+        return self.softmax(q_hybrid_stage1, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### ParticipantModel2: Stage- and Valence-Specific Learning Rates with Anxiety-Amplified Negative Learning
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes distinct learning rates for stage 1 and stage 2 value updates.
+    Furthermore, stage 2 learning is differentiated by reward valence (positive vs. negative).
+    Crucially, high anxiety (STAI score) is hypothesized to specifically increase the
+    learning rate for negative outcomes at the second stage, making the participant
+    more sensitive and reactive to punishments or losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1: [0, 1] - Learning rate for stage 1 value updates.
+    alpha_pos_stage2: [0, 1] - Learning rate for positive rewards at stage 2.
+    alpha_neg_stage2_base: [0, 1] - Base learning rate for negative rewards at stage 2.
+    stai_neg_sensitivity: [0, 1] - How much STAI amplifies the negative learning rate at stage 2.
+    beta: [0, 10] - Softmax inverse temperature.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1, self.alpha_pos_stage2, self.alpha_neg_stage2_base, \
+        self.stai_neg_sensitivity, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective negative learning rate for stage 2 based on STAI
+        # Higher STAI increases the negative learning rate. Ensure it doesn't exceed 1.0.
+        self.alpha_neg_stage2_effective = min(1.0, self.alpha_neg_stage2_base + self.stai * self.stai_neg_sensitivity)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine the stage 2 learning rate based on reward valence
+        alpha_stage2_actual = self.alpha_pos_stage2 if reward >= 0 else self.alpha_neg_stage2_effective
+
+        # Stage 2 update using the valence-specific learning rate
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_stage2_actual * delta_2
+        
+        # Stage 1 update uses its specific learning rate (alpha_stage1)
+        # It learns from the updated q_stage2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### ParticipantModel3: RPE-Magnitude Learning and Anxiety-Induced Exploitation Shift
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the learning rate is dynamic, scaling with the
+    magnitude of the reward prediction error (RPE) – larger surprises lead to more
+    pronounced value updates. Additionally, high anxiety (STAI score) is hypothesized
+    to shift the participant towards a more exploitative strategy, increasing their
+    propensity to select the seemingly best option and reducing exploration.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Base learning rate.
+    rpe_sensitivity: [0, 1] - Factor by which RPE magnitude modulates the learning rate.
+    beta_base: [0, 10] - Base softmax inverse temperature (exploration-exploitation).
+    stai_beta_factor: [0, 10] - Factor by which STAI increases the inverse temperature (beta).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.rpe_sensitivity, self.beta_base, self.stai_beta_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective beta based on STAI score
+        # Higher STAI means higher beta, leading to more exploitative choices (less exploration).
+        self.beta_effective = self.beta_base + self.stai * self.stai_beta_factor
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update with RPE-modulated learning rate
+        delta_2 = reward - self.q_stage2[state, action_2]
+        # Learning rate increases with the absolute magnitude of the prediction error
+        alpha_stage2_actual = self.alpha_base * (1 + self.rpe_sensitivity * abs(delta_2))
+        self.q_stage2[state, action_2] += alpha_stage2_actual * delta_2
+        
+        # Stage 1 update with RPE-modulated learning rate
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_stage1_actual = self.alpha_base * (1 + self.rpe_sensitivity * abs(delta_1))
+        self.q_stage1[action_1] += alpha_stage1_actual * delta_1
+
+    def policy_stage1(self) -> np.ndarray:
+        # Use the effective beta for stage 1 choices
+        return self.softmax(self.q_stage1, self.beta_effective)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Use the effective beta for stage 2 choices
+        return self.softmax(self.q_stage2[state], self.beta_effective)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

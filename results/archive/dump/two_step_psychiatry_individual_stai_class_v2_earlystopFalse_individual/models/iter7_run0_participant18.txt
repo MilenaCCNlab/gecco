@@ -1,0 +1,161 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the efficiency of credit assignment (Eligibility Traces).
+    
+    We hypothesize that anxiety impairs the ability to link distal outcomes (rewards) 
+    back to the initial choice (Stage 1), effectively reducing the eligibility trace parameter (lambda).
+    Low anxiety participants (like this one) maintain high lambda (efficient credit assignment),
+    while high anxiety participants have lower lambda (impaired credit assignment).
+    
+    Update rule (TD-Lambda for 2-step):
+    Q1(a1) <- Q1(a1) + alpha * (Q2(s, a2) - Q1(a1)) + alpha * lambda * (R - Q2(s, a2))
+    
+    lambda = lambda_max * (1.0 - stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    lambda_max: [0, 1]  # Maximum eligibility trace strength (at 0 anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_max = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate participant-specific lambda based on STAI
+        # Ensure lambda stays within [0, 1]
+        self.eff_lambda = self.lambda_max * (1.0 - self.stai)
+        self.eff_lambda = np.clip(self.eff_lambda, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 RPE
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Stage 1 RPE (based on Stage 2 value)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Update Stage 2
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 with eligibility trace
+        # The term (alpha * delta_1) is the standard TD(0) update
+        # The term (alpha * lambda * delta_2) passes the stage 2 outcome back to stage 1
+        self.q_stage1[action_1] += self.alpha * delta_1 + self.alpha * self.eff_lambda * delta_2
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety induces risk aversion (Mean-Variance Optimization).
+    
+    We hypothesize that anxious individuals penalize options that have high outcome variance.
+    The decision variable is not just Q, but Q - penalty * Variance.
+    The magnitude of the penalty is scaled by the STAI score.
+    
+    Utility(s, a) = Q(s, a) - (risk_factor * stai) * sqrt(Variance(s, a))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for both Q and Variance
+    beta: [0, 10]       # Inverse temperature
+    risk_factor: [0, 5] # Scaling factor for risk penalty
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.risk_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance tracking for Stage 1 and Stage 2
+        self.var_stage1 = np.zeros(self.n_choices)
+        self.var_stage2 = np.zeros((self.n_states, self.n_choices))
+        
+        # Calculate risk penalty coefficient
+        self.risk_penalty = self.risk_factor * self.stai
+
+    def policy_stage1(self) -> np.ndarray:
+        # Compute risk-adjusted utility
+        # Use sqrt of variance (standard deviation) for penalty
+        utility = self.q_stage1 - self.risk_penalty * np.sqrt(self.var_stage1)
+        return self.softmax(utility, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Compute risk-adjusted utility for stage 2
+        utility = self.q_stage2[state] - self.risk_penalty * np.sqrt(self.var_stage2[state])
+        return self.softmax(utility, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 Variance and Value
+        # Var <- Var + alpha * ((R - Q)^2 - Var)
+        pred_err_sq_2 = (reward - self.q_stage2[state, action_2])**2
+        self.var_stage2[state, action_2] += self.alpha * (pred_err_sq_2 - self.var_stage2[state, action_2])
+        
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Variance and Value
+        # We use the value of the chosen stage 2 state as the "reward" for stage 1
+        outcome_val_1 = self.q_stage2[state, action_2]
+        pred_err_sq_1 = (outcome_val_1 - self.q_stage1[action_1])**2
+        self.var_stage1[action_1] += self.alpha * (pred_err_sq_1 - self.var_stage1[action_1])
+        
+        delta_1 = outcome_val_1 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates learning asymmetry (Pessimism Bias).
+    
+    We hypothesize that anxiety leads to a "negativity bias" where negative prediction errors 
+    (disappointments) are weighted more heavily than positive ones.
+    The learning rate for negative errors is boosted by the STAI score.
+    
+    If delta < 0: alpha_eff = alpha * (1 + pessimism * stai)
+    Else:         alpha_eff = alpha
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Base learning rate (for positive errors)
+    beta: [0, 10]       # Inverse temperature
+    pessimism: [0, 5]   # Factor scaling the boost for negative errors based on STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pessimism = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the multiplier for negative errors
+        self.neg_alpha_mult = 1.0 + (self.pessimism * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine learning rate based on sign of error
+        if delta_2 < 0:
+            alpha_2 = self.alpha * self.neg_alpha_mult
+        else:
+            alpha_2 = self.alpha
+            
+        # Clip alpha to be safe (though not strictly required if bounds are respected)
+        alpha_2 = min(alpha_2, 1.0)
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        if delta_1 < 0:
+            alpha_1 = self.alpha * self.neg_alpha_mult
+        else:
+            alpha_1 = self.alpha
+            
+        alpha_1 = min(alpha_1, 1.0)
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

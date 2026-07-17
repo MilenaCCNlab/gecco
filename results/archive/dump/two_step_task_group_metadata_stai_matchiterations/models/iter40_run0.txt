@@ -1,0 +1,197 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Planning Disruption Model.
+
+    Hypothesis: Anxiety disproportionately affects high-level planning (Stage 1) compared to 
+    low-level stimulus-response execution (Stage 2). While the agent may be decisive 
+    once in the concrete alien stage, anxiety introduces noise (lower beta) specifically 
+    at the spaceship choice stage due to the cognitive load of the two-step planning.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta_stage2: [0, 10] Inverse temperature for Stage 2 (Alien choice).
+    - w: [0, 1] Weight for model-based control.
+    - planning_interference: [0, 1] Scaling factor. High values mean STAI reduces Stage 1 beta more.
+    """
+    learning_rate, beta_stage2, w, planning_interference = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Stage 1 beta is reduced by anxiety (planning cost)
+    # If planning_interference is 0, beta_1 == beta_2. 
+    # If high, beta_1 becomes very small (random) for high anxiety.
+    beta_stage1 = beta_stage2 * (1.0 - (stai_score * planning_interference))
+    # Ensure beta doesn't go negative
+    beta_stage1 = max(0.0, beta_stage1)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Use the anxiety-dampened beta for Stage 1
+        exp_q1 = np.exp(beta_stage1 * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        # Use the base beta for Stage 2 (reactive stage)
+        exp_q2 = np.exp(beta_stage2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Rare Transition Aversion Model.
+
+    Hypothesis: Anxious individuals are averse to structural unpredictability. 
+    If a "Rare" transition occurs (Spaceship A -> Planet Y, or U -> X), the agent 
+    penalizes the Model-Free value of the chosen spaceship, effectively treating 
+    the surprise as a negative outcome regardless of the actual coin reward.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - rare_penalty: [0, 2] Magnitude of the penalty applied to Q-MF after a rare transition, scaled by STAI.
+    """
+    learning_rate, beta, w, rare_penalty = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    # Define common transitions: Action 0 -> State 0, Action 1 -> State 1
+    # Rare transitions: Action 0 -> State 1, Action 1 -> State 0
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Apply Rare Transition Penalty
+        # If Action 0 (A) went to State 1 (Y) OR Action 1 (U) went to State 0 (X)
+        is_rare = (action_1[trial] == 0 and state_idx == 1) or (action_1[trial] == 1 and state_idx == 0)
+        
+        if is_rare:
+            # Subtract penalty from the chosen action's MF value
+            penalty_value = rare_penalty * stai_score
+            q_stage1_mf[action_1[trial]] -= penalty_value
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Conflict Hesitation Model.
+
+    Hypothesis: Anxiety increases decision noise (hesitation) specifically when 
+    the Model-Based (planning) and Model-Free (habit) systems provide conflicting 
+    advice. If the two systems favor different spaceships, the agent's beta is 
+    reduced proportional to their STAI score.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta_base: [0, 10] Baseline inverse temperature when systems agree.
+    - w: [0, 1] Weight for model-based control.
+    - conflict_hesitation: [0, 5] How much beta is reduced during conflict, scaled by STAI.
+    """
+    learning_rate, beta_base, w, conflict_hesitation = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Determine Conflict
+        # Conflict exists if the preferred action of MB differs from MF
+        mb_choice = np.argmax(q_stage1_mb)
+        mf_choice = np.argmax(q_stage1_mf)
+        
+        # Calculate current beta
+        current_beta = beta_base
+        if mb_choice != mf_choice:
+            # Systems disagree: reduce beta (increase noise) based on anxiety
+            # Denominator formulation ensures beta scales down smoothly
+            current_beta = beta_base / (1.0 + (conflict_hesitation * stai_score))
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(current_beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        # No conflict logic applied to stage 2 (pure MF usually)
+        exp_q2 = np.exp(beta_base * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

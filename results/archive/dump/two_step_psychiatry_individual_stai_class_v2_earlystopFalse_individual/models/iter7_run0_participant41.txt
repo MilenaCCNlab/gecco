@@ -1,0 +1,138 @@
+Here are three new cognitive models based on the hypothesis that anxiety (STAI) modulates specific mechanisms of learning and decision-making in the two-step task.
+
+### Model 1: Differential Stage Exploration (Anxiety-Modulated Stage 2 Beta)
+This model tests the hypothesis that anxiety differentially affects decision noise (exploration/exploitation) depending on the proximity of the threat/reward. While the participant may maintain a baseline level of consistency in the first stage (planning), high anxiety may lead to either rigid exploitation or panic-induced randomness in the second stage (immediate outcome).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates decision noise specifically at Stage 2 (proximal choice).
+    
+    While Stage 1 beta is constant, Stage 2 beta is scaled by STAI:
+    beta_stage2 = beta_stage1 * (1 + zeta * stai)
+    
+    If zeta > 0: Anxiety increases rigidity (exploitation) at the second stage.
+    If zeta < 0: Anxiety increases randomness (panic/exploration) at the second stage.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    zeta: [-1, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.zeta = model_parameters
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Calculate stage-specific beta
+        # We use a multiplicative factor based on STAI
+        beta_2 = self.beta * (1.0 + self.zeta * self.stai)
+        
+        # Ensure beta doesn't go negative (though softmax handles it, 
+        # negative beta implies seeking low values, which is rare but possible in panic)
+        # For stability, we'll keep it non-negative or allow it. 
+        # Let's clamp at 0 to prevent reversing preferences completely unless intended.
+        beta_2 = max(0.0, beta_2)
+        
+        return self.softmax(self.q_stage2[state], beta_2)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Rare Transition Sensitivity (Anxiety-Modulated Surprise Learning)
+This model tests the hypothesis that anxious individuals react differently to "surprising" (rare) transitions. High anxiety might lead to hyper-vigilance, causing the participant to over-update their values when a rare transition occurs, effectively treating the "unexpected" as a significant learning signal.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the learning rate specifically for Rare transitions.
+    
+    When a transition is Rare (Action A -> Planet Y, or Action U -> Planet X),
+    the learning rate is boosted or suppressed by STAI.
+    
+    alpha_effective = alpha * (1 + chi * stai)   [If Rare]
+    alpha_effective = alpha                      [If Common]
+    
+    If chi > 0: Anxiety causes over-reaction to rare events (hyper-vigilance).
+    If chi < 0: Anxiety causes under-reaction (ignoring outliers/confirmation bias).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    chi: [-1, 10]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.chi = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if transition was rare
+        # Common: (Action 0 -> State 0) or (Action 1 -> State 1)
+        # Rare:   (Action 0 -> State 1) or (Action 1 -> State 0)
+        is_rare = (int(action_1) != int(state))
+        
+        # Calculate effective alpha for Stage 1 update
+        if is_rare:
+            alpha_eff = self.alpha * (1.0 + self.chi * self.stai)
+            # Clamp to reasonable bounds [0, 1] to maintain stability
+            alpha_eff = np.clip(alpha_eff, 0.0, 1.0)
+        else:
+            alpha_eff = self.alpha
+
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update using the effective alpha
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_eff * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Distal Value Discounting (Anxiety-Modulated Value Transfer)
+This model tests the hypothesis that anxiety impairs the ability to propagate value from the second stage back to the first stage. Anxious participants might "discount" the future/distal outcome (Stage 2 value) when making Stage 1 decisions, perhaps due to uncertainty about whether they will actually reach that state again.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety increases the discounting of Stage 2 values when updating Stage 1.
+    
+    Instead of a 1-to-1 transfer of value (TD learning), the Stage 2 value is 
+    dampened by a factor related to STAI.
+    
+    Target_for_Q1 = (1 / (1 + psi * stai)) * Q_stage2
+    
+    If psi > 0: High anxiety reduces the impact of Stage 2 values on Stage 1 choices 
+                (myopia/uncertainty discounting).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    psi: [0, 10]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.psi = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Calculate discount factor
+        # As psi * stai increases, discount factor decreases from 1.0 towards 0.0
+        discount_factor = 1.0 / (1.0 + self.psi * self.stai)
+        
+        # Stage 1 update with discounted target
+        # We compare Q1 not to Q2, but to (Discount * Q2)
+        target_val = discount_factor * self.q_stage2[state, action_2]
+        delta_1 = target_val - self.q_stage1[action_1]
+        
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

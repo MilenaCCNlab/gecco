@@ -1,0 +1,250 @@
+Here are three cognitive models proposed to explain the participant's decision-making in the two-step task, incorporating their high anxiety score (STAI = 0.75). Each model tests a distinct hypothesis about how anxiety influences learning and choice.
+
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+# Base Class (DO NOT MODIFY)
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Learning Rate (Stage 2)
+    This model proposes that the participant uses Q-learning, but their high
+    anxiety score makes them more sensitive to immediate outcomes, leading
+    to a higher learning rate for stage 2 choices (i.e., learning about alien rewards).
+    The learning rate for stage 1 is a base value, while the learning rate for
+    stage 2 is boosted proportionally to the STAI score. This reflects a
+    heightened focus on immediate feedback under anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Base learning rate for both stages.
+    beta: [0, 10] - Softmax inverse temperature.
+    alpha_anxiety_boost: [0, 1] - How much STAI score boosts the stage 2 learning rate.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.alpha_anxiety_boost = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective learning rates
+        self.alpha_stage1 = self.alpha_base
+        # Cap alpha_stage2 at 1.0 to ensure it's a valid learning rate
+        self.alpha_stage2 = min(1.0, self.alpha_base + self.stai * self.alpha_anxiety_boost)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values with anxiety-modulated alpha for stage 2.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2 * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Stickiness / Repetition Bias
+    This model proposes that the participant exhibits a repetition bias for their
+    stage 1 choices. This "stickiness" makes them more likely to repeat the
+    previous first-stage action, independent of its current value. High anxiety
+    amplifies this stickiness, suggesting a shift towards more habitual or
+    less flexible decision-making, which is common under stress.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for both stages.
+    beta: [0, 10] - Softmax inverse temperature.
+    stickiness_base: [0, 5] - Base repetition bias for stage 1 actions.
+    stickiness_anxiety_boost: [0, 5] - How much STAI score boosts the stickiness.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_base, self.stickiness_anxiety_boost = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective stickiness parameter, ensuring it's non-negative
+        self.stickiness_param = max(0.0, self.stickiness_base + self.stai * self.stickiness_anxiety_boost)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities with repetition bias.
+        The stickiness parameter is added to the Q-value of the last chosen
+        first-stage action before applying the softmax function.
+        """
+        q_values_biased = np.copy(self.q_stage1)
+        if self.last_action1 is not None:
+            q_values_biased[self.last_action1] += self.stickiness_param
+        
+        return self.softmax(q_values_biased, self.beta)
+
+    # The value_update method is inherited from the base class, using the single 'alpha' parameter.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Model-Based Weight
+    This model proposes that the participant uses a hybrid model-free (MF)
+    and model-based (MB) strategy for stage 1 decisions. High anxiety shifts
+    the balance towards the model-free component, implying reduced reliance
+    on computationally demanding planning (MB) and increased reliance on direct
+    stimulus-response associations (MF).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for both stages.
+    beta: [0, 10] - Softmax inverse temperature.
+    w_base: [0, 1] - Base weight for the model-free component (0=pure MB, 1=pure MF).
+    w_anxiety_boost: [0, 1] - How much STAI score boosts the model-free weight.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_anxiety_boost = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective model-free weight, clamped between 0 and 1
+        self.w = max(0.0, min(1.0, self.w_base + self.stai * self.w_anxiety_boost))
+        
+        # The q_stage1 in the base class will serve as our model-free Q-values for stage 1.
+        # q_stage2 is already initialized and updated by the base value_update.
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a blend of model-free and model-based values.
+        Model-free values (q_mf_stage1) are learned through TD updates (self.q_stage1).
+        Model-based values (q_mb_stage1) are computed by considering expected future rewards
+        from each first-stage action, weighted by known transition probabilities.
+        """
+        # Model-free value for stage 1 is self.q_stage1 (updated by TD error from stage 2)
+        q_mf_stage1 = self.q_stage1
+
+        # Model-based value for stage 1: E[max_a2 Q2(s, a2) | a1]
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # T[a1, s] is P(s | a1)
+            # np.max(self.q_stage2, axis=1) gives the optimal value for each planet (state)
+            q_mb_stage1[a1] = np.sum(self.T[a1, :] * np.max(self.q_stage2, axis=1))
+
+        # Combine MF and MB values based on the anxiety-modulated weight 'w'
+        combined_q_stage1 = self.w * q_mf_stage1 + (1 - self.w) * q_mb_stage1
+        
+        return self.softmax(combined_q_stage1, self.beta)
+    
+    # The value_update method is inherited from the base class, using the single 'alpha' parameter.
+    # It updates self.q_stage1 (which acts as q_mf_stage1) and self.q_stage2.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+
+```

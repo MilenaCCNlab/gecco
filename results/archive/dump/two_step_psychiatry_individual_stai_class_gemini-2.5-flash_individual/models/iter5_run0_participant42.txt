@@ -1,0 +1,180 @@
+Here are three cognitive models, each proposing a different hypothesis for how this high-anxiety participant makes decisions in the two-step task.
+
+### Participant Data Summary and Anxiety Context
+The participant has a high STAI score (0.6875). A notable pattern in their behavior is a long initial period of exclusively choosing spaceship 0, followed by an abrupt and sustained switch to spaceship 1. This suggests either a strong initial preference/learning for spaceship 0, a trigger for switching, and then strong perseveration on spaceship 1. High anxiety often influences how individuals perceive uncertainty, learn from outcomes, and balance exploration with exploitation.
+
+---
+
+### Model 1: Anxiety-Modulated Asymmetric Learning from Outcomes
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to asymmetric learning rates, specifically increasing sensitivity to
+    negative outcomes (no reward). Participants with higher STAI scores will learn more strongly
+    from the absence of reward (reward=0) compared to positive outcomes (reward=1). This makes them
+    more sensitive to "losses" or non-rewards, potentially leading to quicker abandonment of options
+    that fail to pay off, or a more cautious approach after a negative experience.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive outcomes (reward = 1).
+    alpha_neg_base: [0, 1] - Base learning rate for negative outcomes (reward = 0).
+    stai_neg_boost: [0, 1] - How much STAI additively boosts the negative learning rate.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_neg_boost, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine the effective learning rate based on the reward
+        if reward == 1:
+            current_alpha = self.alpha_pos
+        else: # reward == 0
+            # Negative learning rate is boosted by STAI score
+            current_alpha = self.alpha_neg_base + self.stai_neg_boost * self.stai
+            # Clip to ensure alpha stays within valid bounds [0, 1]
+            current_alpha = np.clip(current_alpha, 0.0, 1.0)
+
+        # Update Stage 2 Q-values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        # Update Stage 1 Q-values using the same (asymmetric) learning rate
+        # The 'reward' for stage 1 is effectively the updated value of the chosen stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### Model 2: Anxiety-Modulated Hybrid Control (Model-Based vs. Model-Free)
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety reduces reliance on cognitive resources for complex model-based planning
+    and shifts control towards simpler, more habitual (model-free) strategies. This could lead to
+    less flexible adaptation to changes in transition probabilities or reward structures,
+    explaining the participant's prolonged adherence to one spaceship followed by a rigid switch.
+
+    Parameter Bounds:
+    -----------------
+    alpha_mf: [0, 1] - Learning rate for model-free Q-values (both stages).
+    alpha_t: [0, 1] - Learning rate for transition probabilities.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    w_base: [0, 1] - Base weight for model-based control (0=pure MF, 1=pure MB).
+    stai_w_reduction: [0, 1] - How much STAI reduces the model-based weight 'w'.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_mf, self.alpha_t, self.beta, self.w_base, self.stai_w_reduction = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize learned transition probabilities (T[action1, state])
+        # Start with a uniform belief
+        self.learned_T = np.array([[0.5, 0.5], [0.5, 0.5]]) 
+        
+        # Separate Q-values for model-free and model-based components for stage 1
+        self.q_stage1_mf = np.copy(self.q_stage1)
+        self.q_stage1_mb = np.copy(self.q_stage1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 Q-values (Model-Free learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_mf * delta_2
+
+        # 2. Update Transition Probabilities (for Model-Based component)
+        # Learn P(state | action_1) using a simple alpha_t update
+        for s_idx in range(self.n_states):
+            target_prob = 1.0 if s_idx == state else 0.0
+            self.learned_T[action_1, s_idx] += self.alpha_t * (target_prob - self.learned_T[action_1, s_idx])
+        
+        # Ensure probabilities remain valid (sum to 1) and avoid extreme values
+        self.learned_T = np.clip(self.learned_T, 1e-5, 1.0 - 1e-5) # Clip to avoid 0 or 1
+        self.learned_T = self.learned_T / self.learned_T.sum(axis=1, keepdims=True) # Re-normalize
+
+        # 3. Update Stage 1 Q-values (Hybrid: blend MF and MB)
+
+        # Model-Free (MF) update for Stage 1
+        delta_mf = self.q_stage2[state, action_2] - self.q_stage1_mf[action_1]
+        self.q_stage1_mf[action_1] += self.alpha_mf * delta_mf
+
+        # Model-Based (MB) calculation for Stage 1
+        # Q_MB(a1) = sum_s [ P(s|a1) * max_a2(Q2(s, a2)) ]
+        for a1_idx in range(self.n_choices):
+            expected_future_value = 0
+            for s_idx in range(self.n_states):
+                max_q2_s = np.max(self.q_stage2[s_idx, :]) # Maximize over second-stage actions
+                expected_future_value += self.learned_T[a1_idx, s_idx] * max_q2_s
+            self.q_stage1_mb[a1_idx] = expected_future_value # MB values are direct estimates, not learned via TD error
+
+        # Determine the effective 'w' (weight for model-based control), modulated by STAI
+        effective_w = self.w_base - self.stai_w_reduction * self.stai
+        effective_w = np.clip(effective_w, 0.0, 1.0) # Ensure w is within [0, 1]
+
+        # Combine MF and MB values for the final Stage 1 Q-values used for choice
+        self.q_stage1 = effective_w * self.q_stage1_mb + (1 - effective_w) * self.q_stage1_mf
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Model 3: Anxiety-Modulated Rare Transition Aversion
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases aversion to uncertainty and unexpected events. Participants
+    with higher STAI scores will penalize spaceship options that lead to rare (unexpected)
+    transitions, making them less likely to choose those options in the future. This could lead
+    to more rigid adherence to common transition paths and avoidance of variability.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values in both stages.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    rare_penalty_base: [0, 1] - Base penalty applied to stage 1 Q-value after a rare transition.
+    stai_penalty_amplification: [0, 1] - How much STAI amplifies the rare transition penalty.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_penalty_base, self.stai_penalty_amplification = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD update for Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Check if the observed transition was rare
+        is_rare_transition = False
+        # Spaceship A (0) commonly travels to Planet X (0). A->Y (1) is rare.
+        if action_1 == 0 and state == 1:
+            is_rare_transition = True
+        # Spaceship U (1) commonly travels to Planet Y (1). U->X (0) is rare.
+        elif action_1 == 1 and state == 0:
+            is_rare_transition = True
+        
+        # If a rare transition occurred, apply a penalty to the chosen Stage 1 action's Q-value
+        if is_rare_transition:
+            penalty_magnitude = self.rare_penalty_base + self.stai_penalty_amplification * self.stai
+            # Ensure penalty is non-negative and within a reasonable range
+            penalty_magnitude = np.clip(penalty_magnitude, 0.0, 5.0) 
+            self.q_stage1[action_1] -= penalty_magnitude
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

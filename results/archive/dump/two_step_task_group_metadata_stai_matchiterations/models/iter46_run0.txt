@@ -1,0 +1,211 @@
+Here are three cognitive models implemented as Python functions.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Gated Model-Based Control.
+
+    Hypothesis: Model-based (MB) planning is cognitively expensive. Anxious participants, 
+    suffering from reduced cognitive efficiency, only engage the MB system when the 
+    distinction between options is sufficiently clear. If the MB values for the two 
+    spaceships are too similar (below a threshold scaled by anxiety), the participant 
+    defaults to the cheaper Model-Free (MF) system.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control when engaged.
+    - gating_threshold: [0, 2] The value difference required to trigger MB planning, scaled by STAI.
+    """
+    learning_rate, beta, w, gating_threshold = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate the effective threshold for this participant
+    threshold = gating_threshold * stai_score
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2)) # 2 states (planets), 2 actions (aliens)
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        # Calculate Model-Based values
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Check Gating Condition
+        mb_diff = np.abs(q_stage1_mb[0] - q_stage1_mb[1])
+        
+        if mb_diff < threshold:
+            # MB signal is too weak/ambiguous for anxious agent; fallback to pure MF
+            q_net = q_stage1_mf
+        else:
+            # MB signal is strong enough; use hybrid
+            q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        # Stage 1 Update (TD)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Stage 2 Update (Reward)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Temporal Myopia.
+
+    Hypothesis: Anxiety leads to "short-sightedness" or temporal discounting. 
+    When making the Stage 1 decision (spaceship), anxious participants discount 
+    the value of the Stage 2 outcome (planet/alien) because it feels distal 
+    and uncertain. This affects both how the Model-Free system updates Stage 1 
+    values and how the Model-Based system calculates expected value.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - myopia_factor: [0, 1] Discount rate applied to Stage 2 values, scaled by STAI.
+    """
+    learning_rate, beta, w, myopia_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate discount factor (1.0 = no discount, 0.0 = full discount)
+    # Higher anxiety -> Higher myopia -> Lower discount_factor
+    discount_factor = 1.0 - (myopia_factor * stai_score)
+    # Ensure bounds
+    if discount_factor < 0: discount_factor = 0
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # MB Calculation: Discount the future Stage 2 values
+        q_stage1_mb = transition_matrix @ (max_q_stage2 * discount_factor)
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        # No discounting here, as the reward is immediate
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        # Stage 1 Update: The target value (Stage 2 Q) is discounted by myopia
+        target_val = q_stage2_mf[state_idx, action_2[trial]] * discount_factor
+        delta_stage1 = target_val - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Stage 2 Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Dependent Negative Freezing.
+
+    Hypothesis: Anxious participants exhibit a "freezing" response to negative outcomes 
+    (omission of reward). While they learn normally from positive rewards (1 coin), 
+    high anxiety suppresses the updating of Q-values following a loss (0 coins), 
+    effectively ignoring the negative feedback signal (denial/avoidance).
+
+    Parameters:
+    - learning_rate: [0, 1] Base learning rate for positive outcomes.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - freeze_param: [0, 1] Proportion of learning rate suppression for 0-rewards, scaled by STAI.
+    """
+    learning_rate, beta, w, freeze_param = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        # Determine effective learning rate based on outcome
+        current_reward = reward[trial]
+        
+        if current_reward == 0:
+            # Negative outcome: Anxiety causes freezing (reduced learning)
+            eff_lr = learning_rate * (1.0 - (freeze_param * stai_score))
+            if eff_lr < 0: eff_lr = 0
+        else:
+            # Positive outcome: Normal learning
+            eff_lr = learning_rate
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += eff_lr * delta_stage1
+        
+        delta_stage2 = current_reward - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += eff_lr * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

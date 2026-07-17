@@ -1,0 +1,239 @@
+Here are three new cognitive models that incorporate the STAI anxiety score into the decision-making process using mechanisms distinct from those previously attempted (such as simple learning rate or inverse temperature modulation).
+
+### Model 1: Anxiety-Modulated Reward Valuation
+This model hypothesizes that anxiety alters the subjective valuation of rewards. Rather than changing how fast a participant learns (learning rate), it changes *what* they learn by scaling the effective reward. High anxiety might blunt the perceived value of a coin (anhedonia) or hypersensitize the agent to the lack of a coin.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Reward Valuation Model.
+    
+    Hypothesis: Anxiety (STAI) modulates the subjective valuation of the reward 
+    before it enters the prediction error calculation. High anxiety might result 
+    in a blunted perception of reward (anhedonia-like) or an enhanced sensitivity.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based / Model-free weight.
+    - val_base: [0, 1] Baseline subjective valuation of a reward of 1.0.
+    - val_anxiety_slope: [0, 1] How STAI modifies the valuation. 
+      (Implemented as a subtractive penalty here to model blunting, but can be fit generally).
+    
+    Bounds:
+    learning_rate: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    val_base: [0, 1]
+    val_anxiety_slope: [0, 1]
+    """
+    learning_rate, beta, w, val_base, val_anxiety_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate subjective reward value based on anxiety
+    # We clip to ensure the effective reward doesn't go below 0 or unreasonably high
+    # Hypothesis: Effective Reward = Base - (Anxiety * Slope)
+    effective_reward_val = val_base - (stai_score * val_anxiety_slope)
+    # Ensure it stays within reasonable bounds (e.g., 0 to 1)
+    if effective_reward_val < 0: effective_reward_val = 0.0
+    if effective_reward_val > 1: effective_reward_val = 1.0
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Calculate effective reward for this trial
+        # If reward is 1, use the subjective value. If 0, keep as 0.
+        r_subjective = reward[trial] * effective_reward_val
+
+        # Update Stage 2
+        delta_stage2 = r_subjective - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Update Stage 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Distorted Transition Belief
+This model hypothesizes that anxiety affects the Model-Based (MB) component specifically by distorting the internal model of the world. While the real transition probability is 0.7, anxious individuals might perceive the world as more volatile or unpredictable (closer to 0.5), or conversely, more deterministic.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Distorted Transition Belief Model.
+    
+    Hypothesis: Anxiety (STAI) distorts the agent's internal model of the 
+    transition probabilities used for Model-Based planning. High anxiety might 
+    cause the agent to perceive the transitions as more random (closer to 0.5) 
+    regardless of the true 0.7 probability.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based / Model-free weight.
+    - belief_base: [0.5, 1] The baseline belief in the 'common' transition probability.
+    - belief_anxiety_mod: [0, 1] How much STAI reduces confidence in the transition structure.
+    
+    Bounds:
+    learning_rate: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    belief_base: [0.5, 1] (Constrained to be >= 0.5 to represent the 'common' path)
+    belief_anxiety_mod: [0, 1]
+    """
+    learning_rate, beta, w, belief_base, belief_anxiety_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    # Construct subjective transition matrix
+    # Subjective common prob = Base - (Anxiety * Mod)
+    # We ensure it doesn't drop below 0.5 (randomness)
+    subj_common_prob = belief_base - (stai_score * belief_anxiety_mod)
+    if subj_common_prob < 0.5: subj_common_prob = 0.5
+    if subj_common_prob > 1.0: subj_common_prob = 1.0
+    
+    subj_rare_prob = 1.0 - subj_common_prob
+    
+    # The agent uses this distorted matrix for MB planning
+    subjective_transition_matrix = np.array([
+        [subj_common_prob, subj_rare_prob], 
+        [subj_rare_prob, subj_common_prob]
+    ])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # MB calculation uses the ANXIETY-MODULATED matrix
+        q_stage1_mb = subjective_transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Updates (Standard)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Accelerated Forgetting
+This model hypothesizes that anxiety consumes cognitive resources (working memory load), leading to faster decay of learned values. In this model, Q-values "leak" or decay back toward zero (or a neutral point) on every trial, and the rate of this decay is determined by the STAI score.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Accelerated Forgetting Model.
+    
+    Hypothesis: Anxiety acts as a cognitive load that accelerates the decay (forgetting)
+    of learned Q-values. On every trial, all Q-values decay slightly towards 0.
+    High anxiety increases this decay rate.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based / Model-free weight.
+    - decay_base: [0, 1] Baseline forgetting rate per trial.
+    - decay_anxiety: [0, 1] Additional forgetting rate scaled by STAI.
+    
+    Bounds:
+    learning_rate: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    decay_base: [0, 1]
+    decay_anxiety: [0, 1]
+    """
+    learning_rate, beta, w, decay_base, decay_anxiety = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    # Calculate total decay rate
+    decay_rate = decay_base + (stai_score * decay_anxiety)
+    if decay_rate > 1.0: decay_rate = 1.0
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Standard Updates
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Forgetting Step: Apply decay to ALL Q-values
+        # This simulates memory trace degradation over time
+        q_stage1_mf *= (1 - decay_rate)
+        q_stage2_mf *= (1 - decay_rate)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

@@ -1,0 +1,173 @@
+Here are three cognitive models proposing different strategies for the participant, especially considering their high anxiety (STAI score of 0.6625). Each model introduces a distinct cognitive mechanism modulated by the STAI score.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Hybrid Model-Based/Model-Free RL with Anxiety-Modulated Planning Depth.
+    This model proposes that participants use a hybrid strategy, combining
+    model-free (habitual) learning with model-based (goal-directed) planning.
+    High anxiety (STAI score) is hypothesized to reduce the weight given to the
+    model-based component, leading to a more model-free, less planful decision
+    strategy under stress.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    w_base: [0, 1] - Baseline weight for the model-based component (0=pure MF, 1=pure MB).
+    w_stai_mod: [-1, 1] - Modulatory parameter for STAI on the model-based weight.
+                          A negative value means higher anxiety reduces the model-based component.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize model-free Q-values (self.q_stage1 and self.q_stage2 are already MF)
+        # Transition counts from base class are used to estimate P(s2|s1)
+        self.estimated_T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+        # Calculate effective 'w' modulated by STAI.
+        # Ensure 'w' stays within [0, 1]
+        self.effective_w = np.clip(self.w_base + self.w_stai_mod * self.stai, 0, 1)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a hybrid model-based/model-free approach.
+        """
+        # Model-Based Q-values for stage 1:
+        # Q_MB(a1) = sum_s2 P(s2|a1) * max_a2 Q_MF(s2, a2)
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_next_state_values = np.array([np.max(self.q_stage2[s2, :]) for s2 in range(self.n_states)])
+            q_mb_stage1[a1] = np.sum(self.estimated_T[a1, :] * expected_next_state_values)
+
+        # Combine model-free and model-based Q-values
+        # The base class self.q_stage1 already stores the model-free Q-values for stage 1
+        hybrid_q_stage1 = self.effective_w * q_mb_stage1 + (1 - self.effective_w) * self.q_stage1
+
+        return self.softmax(hybrid_q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard Q-learning (model-free component).
+        The model-based component only influences choice, not learning in this formulation.
+        """
+        # Update Stage 2 Q-value
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Update Stage 1 Q-value (model-free component)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Asymmetric Learning Rates for Common vs. Rare Transitions,
+    with Anxiety Modulating Rare Transition Learning.
+    This model proposes that participants learn differently based on whether
+    the transition from Stage 1 to Stage 2 was common or rare. High anxiety
+    (STAI score) is hypothesized to specifically increase the learning rate
+    when a rare transition occurs, making the participant more sensitive to
+    outcomes of unexpected events.
+
+    Parameter Bounds:
+    -----------------
+    alpha_common: [0, 1] - Learning rate for Q-values after a common transition.
+    alpha_rare_base: [0, 1] - Baseline learning rate for Q-values after a rare transition.
+    alpha_rare_stai_mod: [0, 1] - Modulatory parameter for STAI on the rare transition learning rate.
+                                  A positive value means higher anxiety increases rare alpha.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_common, self.alpha_rare_base, self.alpha_rare_stai_mod, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Determine which transitions are common/rare based on self.T
+        # Spaceship A (0) commonly to Planet X (0) => T[0,0] is common
+        # Spaceship U (1) commonly to Planet Y (1) => T[1,1] is common
+        # The other transitions are rare.
+        # Base class T is already normalized, so we can use it to determine common/rare
+        # For simplicity, we assume the common transitions are those with P > 0.5 (or based on initial counts)
+        self.common_transitions = {(0, 0), (1, 1)} # Based on task description: A->X, U->Y
+
+        # Calculate effective rare learning rate modulated by STAI.
+        self.effective_alpha_rare = np.clip(self.alpha_rare_base + self.alpha_rare_stai_mod * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using different learning rates based on transition type.
+        """
+        # Determine the effective learning rate for this trial
+        current_alpha = self.alpha_common
+        if (action_1, state) not in self.common_transitions:
+            current_alpha = self.effective_alpha_rare
+
+        # Update Stage 2 Q-value
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+
+        # Update Stage 1 Q-value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Model-Free RL with Anxiety-Modulated Value Decay (Forgetting).
+    This model proposes that learned action values (Q-values) decay or are "forgotten"
+    over time if they are not reinforced. High anxiety (STAI score) is hypothesized
+    to increase this decay rate, leading to a more volatile or less stable
+    representation of values, potentially reflecting impaired working memory or
+    increased cognitive load under stress.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    decay_base: [0, 1] - Baseline rate at which Q-values decay towards initial values (0.5).
+    decay_stai_mod: [0, 1] - Modulatory parameter for STAI on the decay rate.
+                             A positive value means higher anxiety increases the decay.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_base, self.decay_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective decay rate modulated by STAI.
+        # Ensure decay rate is within [0, 0.99] to prevent values from completely resetting or exploding
+        self.effective_decay_rate = np.clip(self.decay_base + self.decay_stai_mod * self.stai, 0, 0.99)
+        self.initial_q_value = 0.5 # Q-values are initialized to 0.5 in base class
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, decay Q-values towards their initial state.
+        """
+        # Decay stage 1 Q-values
+        self.q_stage1 = (1 - self.effective_decay_rate) * self.q_stage1 + self.effective_decay_rate * self.initial_q_value
+        
+        # Decay stage 2 Q-values
+        self.q_stage2 = (1 - self.effective_decay_rate) * self.q_stage2 + self.effective_decay_rate * self.initial_q_value
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome using standard Q-learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

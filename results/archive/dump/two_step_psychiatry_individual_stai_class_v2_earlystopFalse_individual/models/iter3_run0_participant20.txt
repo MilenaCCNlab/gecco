@@ -1,0 +1,148 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Eligibility Traces (TD-Lambda).
+    
+    This model hypothesizes that anxiety impairs the ability to assign credit 
+    to past actions based on current outcomes (distal credit assignment). 
+    
+    In a two-step task, the Stage 1 choice can be updated based on the 
+    immediate estimation of the Stage 2 value (TD-0) or the final reward (TD-1).
+    An eligibility trace parameter (lambda) controls this mix.
+    
+    We hypothesize that high anxiety reduces `lambda`, making the participant 
+    rely more on the immediate transition (Stage 2 value) rather than the 
+    final reward outcome for updating Stage 1 values.
+    
+    lambda_effective = lambda_base * (1 - stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    lambda_base: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 values (Standard Q-Learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Stage 1 values with Anxiety-Modulated Lambda
+        # Calculate effective lambda based on STAI (High Anxiety -> Low Lambda)
+        # If STAI is high (approx 1), lambda approaches 0 (Pure TD-0 / Bootstrapping)
+        # If STAI is low (approx 0), lambda approaches lambda_base
+        lambda_eff = self.lambda_base * (1.0 - self.stai)
+        
+        # The target is a mixture of the Reward (Monte Carlo) and the Stage 2 Value (Bootstrap)
+        target = (lambda_eff * reward) + ((1 - lambda_eff) * self.q_stage2[state, action_2])
+        
+        delta_1 = target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Model-Based/Model-Free Hybrid.
+    
+    This model hypothesizes that anxiety shifts the balance of control between 
+    Model-Based (planning) and Model-Free (habitual) systems. Specifically, 
+    high anxiety is hypothesized to impair Model-Based planning resources, 
+    leading to a dominance of Model-Free control.
+    
+    The weight `w` determines the contribution of the Model-Based system.
+    w = w_max * (1 - stai)
+    
+    High Anxiety -> Low w -> Mostly Model-Free.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_max: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Values (from self.q_stage1)
+        q_mf = self.q_stage1
+        
+        # 2. Model-Based Values
+        # V(State) = max_a Q(State, a)
+        v_stage2 = np.max(self.q_stage2, axis=1) 
+        # Q_MB(Action) = Sum_State [ P(State|Action) * V(State) ]
+        # self.T is shape (2, 2) -> (Action, State)
+        q_mb = self.T @ v_stage2
+        
+        # 3. Arbitration
+        # Calculate weight based on STAI
+        w = self.w_max * (1.0 - self.stai)
+        
+        # Net Q-values
+        q_net = (w * q_mb) + ((1 - w) * q_mf)
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Choice Trace (Habitual Perseveration).
+    
+    This model hypothesizes that anxiety exacerbates "cognitive rigidity" not just 
+    as a one-trial repetition bias (stickiness), but as a deeper habit formation 
+    process. 
+    
+    The model maintains a "Choice Trace" that accumulates over time when an action 
+    is repeated and decays slowly when it is not. This explains long streaks of 
+    behavior (like the participant's choice of spaceship 1 in the latter half).
+    
+    The influence of this trace on the current choice is scaled by STAI.
+    
+    Trace(t) = decay * Trace(t-1) + (1-decay) * I(Choice(t-1))
+    Q_net = Q_learned + (trace_weight * stai * Trace)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    trace_weight: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.trace_weight = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize choice trace for the two spaceships
+        self.choice_trace = np.zeros(self.n_choices)
+        self.trace_decay = 0.7 # Fixed decay rate to reduce free parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Add the trace bias to the learned Q-values
+        # The bias is proportional to the accumulated trace and the anxiety level
+        bias = self.trace_weight * self.stai * self.choice_trace
+        q_biased = self.q_stage1 + bias
+        
+        return self.softmax(q_biased, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update Choice Trace
+        # Decay existing traces
+        self.choice_trace *= self.trace_decay
+        
+        # Reinforce the chosen action
+        # We add (1-decay) to keep the trace bounded roughly between 0 and 1
+        self.choice_trace[action_1] += (1.0 - self.trace_decay)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

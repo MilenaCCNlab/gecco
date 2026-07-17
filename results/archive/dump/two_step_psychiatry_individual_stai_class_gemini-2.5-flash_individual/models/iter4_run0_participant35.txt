@@ -1,0 +1,247 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, with particular attention to how their high anxiety (STAI score = 0.725) modulates their behavior.
+
+### Model 1: Anxiety-Modulated Exploration Penalty
+
+This model posits that high anxiety makes participants more risk-averse or uncomfortable with uncertainty, leading them to penalize less-explored options. This penalty is amplified by their anxiety level, discouraging exploration and promoting exploitation of familiar choices.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety makes participants more
+    averse to exploring less-known options. This is modeled as a penalty applied
+    to the Q-values of choices that have been visited less frequently, with the
+    magnitude of this penalty amplified by the participant's anxiety level. This
+    encourages exploitation of well-known options and discourages exploration
+    under high anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    exploration_penalty_base: [0, 1] - Baseline penalty applied to Q-values of
+                                       options with low visit counts.
+    anxiety_exploration_amplification: [0, 1] - Factor by which STAI score
+                                                additively amplifies this penalty.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.exploration_penalty_base, self.anxiety_exploration_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize visit counts for both stages
+        self.visit_counts_stage1 = np.zeros(self.n_choices)
+        self.visit_counts_stage2 = np.zeros((self.n_states, self.n_choices))
+        
+        # Calculate effective exploration penalty based on STAI
+        # Clipped to a reasonable range for penalty magnitude
+        self.effective_exploration_penalty = np.clip(
+            self.exploration_penalty_base + self.stai * self.anxiety_exploration_amplification, 0.0, 2.0
+        )
+        # Ensure alpha is within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying an exploration penalty
+        to less-visited options.
+        """
+        biased_q_stage1 = np.copy(self.q_stage1)
+        for a1 in range(self.n_choices):
+            # Apply penalty inversely proportional to visit count.
+            # Adding 1 to denominator to avoid division by zero and provide an initial penalty.
+            biased_q_stage1[a1] -= self.effective_exploration_penalty / (self.visit_counts_stage1[a1] + 1)
+            
+        return self.softmax(biased_q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities, applying an exploration penalty
+        to less-visited options within the current state.
+        """
+        biased_q_stage2 = np.copy(self.q_stage2[state])
+        for a2 in range(self.n_choices):
+            # Apply penalty inversely proportional to visit count for stage 2
+            biased_q_stage2[a2] -= self.effective_exploration_penalty / (self.visit_counts_stage2[state, a2] + 1)
+            
+        return self.softmax(biased_q_stage2, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome using standard TD learning.
+        Visit counts are updated in post_trial.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update visit counts after each trial.
+        """
+        super().post_trial(action_1, state, action_2, reward) # Call base class post_trial
+        self.visit_counts_stage1[action_1] += 1
+        self.visit_counts_stage2[state, action_2] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: State-Dependent Anxious Exploitation
+
+This model proposes that high anxiety generally increases the participant's tendency to exploit known options (higher softmax inverse temperature, `beta`). Furthermore, this exploitative drive is intensified when the participant is in a "bad" state (a planet with low expected reward), pushing them towards more deterministic choices to quickly secure the best available option in an unfavorable context.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety generally increases
+    exploitative behavior (higher softmax beta). Crucially, this exploitative
+    tendency is further amplified when the participant finds themselves in a
+    "bad" state (a planet with low expected reward). This drives them to make
+    more deterministic choices to quickly exploit the best known option in
+    potentially adverse situations.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_base: [0, 10] - Baseline softmax inverse temperature.
+    anxiety_beta_amplification: [0, 10] - Factor by which STAI score additively
+                                          amplifies the softmax beta.
+    bad_state_threshold: [0, 1] - The maximum Q-value for a state to be
+                                  considered "bad" (e.g., 0.5 for neutral).
+    bad_state_beta_multiplier: [1, 5] - Multiplier applied to beta when in a bad state.
+                                        Must be >= 1 to amplify.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.anxiety_beta_amplification, \
+            self.bad_state_threshold, self.bad_state_beta_multiplier = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the general anxiety-modulated beta
+        self.general_effective_beta = np.clip(
+            self.beta_base + self.stai * self.anxiety_beta_amplification, 0.0, 20.0 # Clip beta to a reasonable maximum
+        )
+        # Ensure alpha is within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using the general anxiety-modulated beta.
+        """
+        return self.softmax(self.q_stage1, self.general_effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities, with beta further amplified
+        if the current state is considered "bad".
+        """
+        current_state_max_q = np.max(self.q_stage2[state, :])
+        
+        if current_state_max_q < self.bad_state_threshold:
+            # Amplify beta if in a bad state
+            final_beta_for_state = self.general_effective_beta * self.bad_state_beta_multiplier
+        else:
+            final_beta_for_state = self.general_effective_beta
+        
+        return self.softmax(self.q_stage2[state], final_beta_for_state)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome (standard TD learning)."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Model-Based Control with Anxiety-Impaired Transition Learning
+
+This model assumes participants utilize both model-free and model-based control. However, it hypothesizes that high anxiety impairs the participant's ability to accurately learn and update the task's transition probabilities (which planet follows which spaceship). This leads to a less accurate and thus less effective model-based component, even if the participant attempts to use goal-directed planning.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model assumes participants combine model-free and model-based
+    control. However, high anxiety impairs the learning of the task's transition
+    probabilities (T matrix). This leads to a less accurate model-based component,
+    even if the participant attempts to use planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for model-free Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    w_mb: [0, 1] - Fixed weight given to the model-based component
+                   (0 for pure MF, 1 for pure MB).
+    alpha_T_base: [0, 1] - Baseline learning rate for transition probabilities.
+    anxiety_T_impairment: [0, 1] - Factor by which STAI score reduces the
+                                   transition learning rate (alpha_T).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb, self.alpha_T_base, self.anxiety_T_impairment = model_parameters
+        
+    def init_model(self) -> None:
+        # Initialize model-free Q-values (self.q_stage1 and self.q_stage2 are already MF)
+        # Initialize learnable transition probabilities. Use base class T as initial prior knowledge.
+        self.learned_T = np.copy(self.T) 
+        
+        # Calculate effective transition learning rate based on STAI
+        # Higher STAI reduces alpha_T, impairing transition learning. Clipped to ensure non-negative.
+        self.effective_alpha_T = np.clip(self.alpha_T_base - self.stai * self.anxiety_T_impairment, 0.0, 1.0)
+        
+        # Ensure alpha and w_mb are within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.w_mb = np.clip(self.w_mb, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a weighted combination
+        of model-free and model-based Q-values, where MB uses learned T.
+        """
+        # Model-free Q-values for stage 1 are self.q_stage1
+        
+        # Calculate Model-Based Q-values for stage 1 using the learned_T
+        q_stage1_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_next_value = 0
+            for s in range(self.n_states):
+                # Use self.learned_T for transition probabilities
+                expected_next_value += self.learned_T[a1, s] * np.max(self.q_stage2[s, :])
+            q_stage1_mb[a1] = expected_next_value
+        
+        # Combine MF and MB Q-values
+        q_stage1_combined = (self.w_mb * q_stage1_mb +
+                             (1 - self.w_mb) * self.q_stage1)
+        
+        return self.softmax(q_stage1_combined, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update model-free values after observing outcome (standard TD learning)."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update transition probabilities after each trial.
+        """
+        super().post_trial(action_1, state, action_2, reward) # Call base class post_trial
+
+        # Update learned_T using a simple TD-like update for observed transitions
+        for s_idx in range(self.n_states):
+            target_T_value = 1.0 if s_idx == state else 0.0 # 1 for observed transition, 0 for others
+            delta_T = target_T_value - self.learned_T[action_1, s_idx]
+            self.learned_T[action_1, s_idx] += self.effective_alpha_T * delta_T
+        
+        # Renormalize the row to ensure probabilities sum to 1
+        self.learned_T[action_1, :] /= np.sum(self.learned_T[action_1, :])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

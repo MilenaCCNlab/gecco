@@ -1,0 +1,178 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant's decision-making is influenced by their medium anxiety level (STAI score of 0.35).
+
+### Model 1: Asymmetric Learning Rates for Rewards and Punishments, Modulated by STAI (Stage 1 specific)
+
+This model proposes that the participant learns differently from obtaining rewards (1 coin) versus punishments (0 coins). Specifically, at the first stage of decision-making, their sensitivity to negative outcomes (punishments) is amplified by their anxiety level. A medium-anxiety participant might exhibit heightened vigilance towards potential losses, leading to faster updates of first-stage values when a chosen path leads to 0 coins. This could make them more cautious and quicker to devalue paths that have previously yielded no reward.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant learns differently from obtaining
+    rewards (1 coin) versus punishments (0 coins). Specifically, at the first stage
+    of decision-making, their sensitivity to negative outcomes (punishments) is amplified
+    by their anxiety level (STAI score). A medium-anxiety participant (STAI 0.35) might
+    exhibit heightened vigilance towards potential losses, leading to faster updates
+    of first-stage values when a chosen path leads to 0 coins. This could make them
+    more cautious and quicker to devalue paths that have previously yielded no reward.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage2: [0, 1] - Learning rate for second-stage Q-values.
+    alpha_stage1_reward_base: [0, 1] - Base learning rate for positive RPEs at stage 1.
+    alpha_stage1_punish_base: [0, 1] - Base learning rate for negative RPEs at stage 1.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stai_punish_sensitivity_factor: [-2, 2] - Factor by which STAI score modulates alpha_stage1_punish.
+                                              A positive value means higher anxiety increases sensitivity to punishment.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage2, self.alpha_stage1_reward_base, self.alpha_stage1_punish_base, \
+        self.beta, self.stai_punish_sensitivity_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 Q-value
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2 * delta_2
+
+        # Calculate effective alpha for Stage 1 punishment learning, modulated by STAI
+        alpha_stage1_punish = np.clip(
+            self.alpha_stage1_punish_base * (1 + self.stai_punish_sensitivity_factor * self.stai),
+            0.0, 1.0
+        )
+        
+        # Update Stage 1 Q-value
+        # The target for Stage 1 is the updated Q-value of the chosen Stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+
+        if delta_1 >= 0: # Positive RPE for stage 1
+            self.q_stage1[action_1] += self.alpha_stage1_reward_base * delta_1
+        else: # Negative RPE for stage 1
+            self.q_stage1[action_1] += alpha_stage1_punish * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Switch Cost after Rare Transitions (First Stage)
+
+This model proposes that participants exhibit a general tendency to stick with their previously chosen first-stage action (perseveration). However, this stickiness is critically modulated by whether the *previous transition* from the first to the second stage was common or rare, and this modulation is influenced by anxiety. For a medium-anxiety participant, encountering a rare transition might lead to a *reduction* in stickiness to the previous action, making them more likely to switch to avoid the path associated with an unexpected outcome. This reduction is amplified by higher anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants exhibit a general tendency to
+    stick with their previously chosen first-stage action (perseveration).
+    However, this stickiness is critically modulated by whether the *previous transition*
+    from the first to the second stage was common or rare, and this modulation
+    is influenced by anxiety. For a medium-anxiety participant, encountering a rare
+    transition might lead to a *reduction* in stickiness to the previous action,
+    making them more likely to switch to avoid the path associated with an unexpected outcome.
+    This reduction is amplified by higher anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stickiness_base: [0, 5] - Base bonus added to the Q-value of the previous action.
+    rare_trans_switch_factor_base: [0, 5] - Base amount by which stickiness is reduced after a rare transition.
+    stai_rare_switch_factor: [-2, 2] - Factor by which STAI score modulates the rare transition switch factor.
+                                      A positive value means higher anxiety increases the reduction in stickiness
+                                      after a rare transition (i.e., makes switching more likely).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_base, \
+        self.rare_trans_switch_factor_base, self.stai_rare_switch_factor = model_parameters
+        
+        # self.alpha is used by the default value_update method.
+
+    def init_model(self) -> None:
+        self.last_action1 = -1 # No previous action on first trial
+        self.last_transition_was_rare = False # No previous transition on first trial
+
+    def policy_stage1(self) -> np.ndarray:
+        q_values_with_stickiness = np.copy(self.q_stage1)
+        
+        if self.last_action1 != -1: # Apply stickiness only if a previous action exists
+            # Calculate the effective stickiness bonus
+            # If last transition was rare, reduce stickiness by an anxiety-modulated factor
+            reduction_from_rare = (self.rare_trans_switch_factor_base + self.stai_rare_switch_factor * self.stai) \
+                                  * self.last_transition_was_rare
+            
+            # Ensure reduction is non-negative and does not make the effective stickiness bonus negative
+            effective_stickiness_bonus = np.clip(self.stickiness_base - reduction_from_rare, 0.0, self.stickiness_base)
+            
+            q_values_with_stickiness[self.last_action1] += effective_stickiness_bonus
+            
+        return self.softmax(q_values_with_stickiness, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Update whether the last transition was rare
+        # Spaceship 0 (A) commonly to Planet 0 (X), rarely to Planet 1 (Y)
+        # Spaceship 1 (U) commonly to Planet 1 (Y), rarely to Planet 0 (X)
+        
+        # Common transitions: (0,0), (1,1)
+        # Rare transitions: (0,1), (1,0)
+        self.last_transition_was_rare = (action_1 == 0 and state == 1) or \
+                                        (action_1 == 1 and state == 0)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Learning Rate for Unchosen Options (Stage 1)
+
+This model posits that participants not only learn from the outcomes of their chosen actions but also, to some extent, from the *unchosen* alternatives. However, the learning rate for these unchosen options at the first stage is modulated by anxiety. For a medium-anxiety participant, their anxiety might *decrease* the learning rate for unchosen first-stage options. This would lead to slower updates for alternative paths, reinforcing their tendency to stick with familiar choices (e.g., spaceship 0.0 initially) and delaying exploration, as they pay less attention to the potential values of what they are not currently doing.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that participants not only learn from the outcomes
+    of their chosen actions but also, to some extent, from the *unchosen* alternatives.
+    However, the learning rate for these unchosen options at the first stage is
+    modulated by anxiety. For a medium-anxiety participant, their anxiety might
+    *decrease* the learning rate for unchosen first-stage options. This would lead
+    to slower updates for alternative paths, reinforcing their tendency to stick
+    with familiar choices (e.g., spaceship 0.0 initially) and delaying exploration,
+    as they pay less attention to the potential values of what they are not currently doing.
+
+    Parameter Bounds:
+    -----------------
+    alpha_chosen: [0, 1] - Learning rate for chosen first-stage options (and stage 2).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    alpha_unchosen_base: [0, 1] - Base learning rate for unchosen first-stage options.
+    stai_unchosen_reduction_factor: [-2, 2] - Factor by which STAI score reduces alpha_unchosen.
+                                              A positive value means higher anxiety leads to less learning
+                                              for unchosen options.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_chosen, self.beta, self.alpha_unchosen_base, \
+        self.stai_unchosen_reduction_factor = model_parameters
+        
+        # The default self.alpha from CognitiveModelBase is not directly used by this model's value_update.
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 Q-value (using alpha_chosen for consistency)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_chosen * delta_2
+
+        # Calculate effective alpha for unchosen Stage 1 option, modulated by STAI
+        alpha_unchosen = np.clip(
+            self.alpha_unchosen_base * (1 - self.stai_unchosen_reduction_factor * self.stai),
+            0.0, 1.0
+        )
+        
+        # Update Stage 1 Q-values
+        # Chosen action update
+        delta_1_chosen = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_chosen * delta_1_chosen
+
+        # Unchosen action update
+        unchosen_action = 1 - action_1
+        # For unchosen options, we update towards a neutral baseline (e.g., 0.5, representing average reward)
+        # with the anxiety-modulated unchosen learning rate.
+        delta_1_unchosen = 0.5 - self.q_stage1[unchosen_action] # Decay towards neutral value
+        self.q_stage1[unchosen_action] += alpha_unchosen * delta_1_unchosen
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

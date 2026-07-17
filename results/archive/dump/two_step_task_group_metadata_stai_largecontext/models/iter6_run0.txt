@@ -1,0 +1,223 @@
+Here are the 3 new cognitive models based on the hypotheses that anxiety distorts the internal model, alters reward perception, or accelerates memory decay.
+
+### Model 1: The "Foggy Map" Model (Distorted Transition Matrix)
+This model tests the hypothesis that anxiety degrades the participant's internal model of the environment. While a standard agent knows the transition probabilities (0.7/0.3) perfectly, an anxious agent perceives a "foggy" map where the transitions feel more random (closer to 0.5/0.5) as anxiety increases.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety degrades the accuracy of the internal transition model ("Foggy Map").
+    High anxiety blends the true transition matrix with a uniform (random) matrix,
+    making Model-Based control less effective.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - inverse_temperature: [0, 10] Softmax beta.
+    - w: [0, 1] Weight between Model-Based (1) and Model-Free (0) control.
+    - distortion_sensitivity: [0, 1] How strongly STAI distorts the transition matrix.
+      0 = STAI has no effect (perfect model). 1 = High STAI creates a random model.
+
+    """
+    learning_rate, inverse_temperature, w, distortion_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+
+    # True transition matrix (Common=0.7, Rare=0.3)
+    true_transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    # Random transition matrix (0.5, 0.5) - maximum entropy/confusion
+    flat_transition_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+
+    # Calculate the subjective transition matrix based on anxiety
+    # As distortion increases, the matrix moves from True -> Flat
+    distortion_level = np.clip(stai * distortion_sensitivity, 0, 1)
+    subjective_transition_matrix = (1 - distortion_level) * true_transition_matrix + \
+                                   (distortion_level) * flat_transition_matrix
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values
+    q_stage1_mf = np.zeros(2)      # Model-Free values for Spaceships (A, U)
+    q_stage2_mf = np.zeros((2, 2)) # Model-Free values for Aliens (State X: W,S; State Y: P,H)
+
+    for trial in range(n_trials):
+        # --- STAGE 1 CHOICE ---
+        # Model-Based Value: Uses the SUBJECTIVE (distorted) transition matrix
+        # Max value of next stage states
+        max_q_stage2 = np.max(q_stage2_mf, axis=1) 
+        q_stage1_mb = subjective_transition_matrix @ max_q_stage2
+
+        # Integrated Value
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        # Softmax Policy Stage 1
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial] # 0 for Planet X, 1 for Planet Y
+
+        # --- STAGE 2 CHOICE ---
+        # Standard Model-Free choice at the second stage
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- UPDATES ---
+        # Stage 1 MF Update (TD(1) - direct reinforcement from outcome)
+        # Note: Standard two-step often uses TD(1) for stage 1 MF to distinguish from MB
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        # Stage 2 MF Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: The "Punish Omission" Model (Asymmetric Reward Perception)
+This model tests the hypothesis that anxiety alters the perception of outcomes. Specifically, it posits that anxious individuals interpret the *absence* of a reward (0 coins) not as a neutral event, but as a punishment (negative value).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety causes asymmetric reward perception ("Punish Omission").
+    Instead of treating 0 coins as neutral, anxious agents perceive it as a loss.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - inverse_temperature: [0, 10] Softmax beta.
+    - w: [0, 1] Weight between Model-Based and Model-Free.
+    - punishment_sensitivity: [0, 5] Scaling factor for how much STAI turns 
+      omission into punishment.
+      
+    """
+    learning_rate, inverse_temperature, w, punishment_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- STAGE 1 CHOICE ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- STAGE 2 CHOICE ---
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- CALCULATE SUBJECTIVE REWARD ---
+        # If reward is 1, it is perceived as 1.
+        # If reward is 0, it is perceived as negative proportional to anxiety.
+        r_obj = reward[trial]
+        if r_obj > 0:
+            r_subjective = r_obj
+        else:
+            # Omission is painful for anxious agents
+            r_subjective = 0.0 - (stai * punishment_sensitivity)
+
+        # --- UPDATES ---
+        # Stage 1 MF Update
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        # Stage 2 MF Update (Using Subjective Reward)
+        delta_stage2 = r_subjective - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: The "Anxious Decay" Model (Memory Forgetting)
+This model tests the hypothesis that anxiety consumes cognitive resources, leading to faster decay of value estimates for unchosen options. While the chosen option is updated via learning, the unchosen options "rot" back to zero, and this rot is faster for high-anxiety participants.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety accelerates the decay of value memory for unchosen options.
+    High anxiety leads to faster forgetting of the values of aliens not visited.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - inverse_temperature: [0, 10] Softmax beta.
+    - w: [0, 1] Weight between Model-Based and Model-Free.
+    - decay_sensitivity: [0, 1] Scaling factor for decay. 
+      Effective decay rate = STAI * decay_sensitivity.
+    """
+    learning_rate, inverse_temperature, w, decay_sensitivity = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    # Calculate effective decay rate based on anxiety
+    # If STAI is high, decay is high.
+    effective_decay = np.clip(stai * decay_sensitivity, 0, 1)
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- STAGE 1 CHOICE ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- STAGE 2 CHOICE ---
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- UPDATES ---
+        
+        # 1. Standard Learning Updates for CHOSEN options
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        # 2. Decay Updates for UNCHOSEN options (Stage 2)
+        # We iterate over both planets (s) and both aliens (a)
+        for s in range(2):
+            for a in range(2):
+                # If this specific alien was NOT the one chosen on this trial
+                if not (s == state_idx and a == action_2[trial]):
+                    # Decay the value toward 0
+                    q_stage2_mf[s, a] *= (1.0 - effective_decay)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

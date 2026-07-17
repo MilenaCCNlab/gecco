@@ -1,0 +1,203 @@
+Here are three new cognitive models that incorporate the STAI anxiety score to explain individual variability in the two-step task.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 1: Anxiety-Modulated Choice Stochasticity.
+    
+    This model assumes a hybrid RL agent where the inverse temperature (beta),
+    which controls the exploration-exploitation trade-off, is modulated by anxiety.
+    High anxiety might lead to more erratic choices (low beta) or more rigid 
+    exploitation (high beta), depending on the sign of the sensitivity parameter.
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate for Q-values.
+    - w: [0, 1] Weighting for Model-Based (vs Model-Free) control.
+    - beta_base: [0, 10] Baseline inverse temperature.
+    - beta_stai_sens: [-5, 5] Sensitivity of beta to STAI score. 
+    """
+    learning_rate, w, beta_base, beta_stai_sens = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Modulate beta based on STAI. 
+    beta = beta_base + (beta_stai_sens * stai_score)
+    # Ensure beta stays within a valid positive range for softmax
+    beta = np.clip(beta, 0.0, 10.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Hybrid valuation
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        # Action value updating for choice 1 (SARSA-style)
+        delta_stage1 = q_stage2_mf[state_idx, int(action_2[trial])] - q_stage1_mf[int(action_1[trial])]
+        q_stage1_mf[int(action_1[trial])] += learning_rate * delta_stage1
+        
+        # Action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, int(action_2[trial])]
+        q_stage2_mf[state_idx, int(action_2[trial])] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 2: Anxiety-Modulated Perseveration.
+    
+    This model introduces a "stickiness" parameter that biases the agent 
+    to repeat the previous first-stage choice regardless of the outcome. 
+    The magnitude of this perseveration is modulated by the STAI anxiety score,
+    hypothesizing that anxious individuals may exhibit safety behaviors (repetition).
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based weight.
+    - pers_base: [0, 2] Baseline perseveration bonus.
+    - pers_stai_sens: [0, 2] Increase in perseveration per unit of STAI.
+    """
+    learning_rate, beta, w, pers_base, pers_stai_sens = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate perseveration bonus
+    pers = pers_base + (pers_stai_sens * stai_score)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply perseveration bonus to the previously chosen action
+        if last_action_1 != -1:
+            q_net[last_action_1] += pers
+            
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        # Record action for next trial
+        last_action_1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        # Action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, int(action_2[trial])] - q_stage1_mf[int(action_1[trial])]
+        q_stage1_mf[int(action_1[trial])] += learning_rate * delta_stage1
+        
+        # Action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, int(action_2[trial])]
+        q_stage2_mf[state_idx, int(action_2[trial])] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 3: Anxiety-Modulated Asymmetric Learning (Safety Learning).
+    
+    This model hypothesizes that anxiety specifically alters how the agent learns 
+    from negative outcomes (reward omissions). The learning rate for unrewarded 
+    trials (lr_neg) is modulated by STAI, while the reward learning rate (lr_pos) 
+    is fixed. This reflects a bias towards learning from potential threats/losses.
+    
+    Parameters:
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based weight.
+    - lr_pos: [0, 1] Learning rate for rewarded trials (Gain).
+    - lr_neg_base: [0, 1] Baseline learning rate for unrewarded trials (Loss).
+    - lr_neg_stai_slope: [0, 1] Modulation of negative learning rate by STAI.
+    """
+    beta, w, lr_pos, lr_neg_base, lr_neg_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate negative learning rate (for reward = 0)
+    lr_neg = lr_neg_base + (lr_neg_stai_slope * stai_score)
+    lr_neg = np.clip(lr_neg, 0.0, 1.0)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        # Determine learning rate based on outcome
+        current_reward = reward[trial]
+        if current_reward > 0.5: # Rewarded (Positive)
+            current_lr = lr_pos
+        else: # Unrewarded (Negative/Omission)
+            current_lr = lr_neg
+        
+        # Action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, int(action_2[trial])] - q_stage1_mf[int(action_1[trial])]
+        q_stage1_mf[int(action_1[trial])] += current_lr * delta_stage1
+        
+        # Action value updating for choice 2
+        delta_stage2 = current_reward - q_stage2_mf[state_idx, int(action_2[trial])]
+        q_stage2_mf[state_idx, int(action_2[trial])] += current_lr * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

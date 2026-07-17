@@ -1,0 +1,191 @@
+Here are three new cognitive models that explore different mechanisms for how anxiety (STAI) might influence decision-making in this task, specifically focusing on risk sensitivity, model-based arbitration, and uncertainty-driven learning rates.
+
+### Model 1: Anxiety-Modulated Risk Aversion (Variance Penalty)
+This model hypothesizes that high anxiety leads to risk aversion. Instead of just tracking the mean value (Q), the agent also tracks the variance (uncertainty/risk) of the rewards. High anxiety participants will penalize options with high variance, preferring "safer" (more predictable) options even if their mean value is slightly lower.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces risk aversion. The participant tracks both the expected value (Q)
+    and the variance (V) of rewards. The utility of an action is Q - rho * V, where rho is a 
+    risk-aversion parameter scaled by STAI. High anxiety = higher penalty for variable outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for both mean and variance
+    beta: [0, 10]       # Inverse temperature
+    rho_base: [0, 5]    # Base risk aversion parameter
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rho_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance tracking for stage 2 (where rewards happen)
+        # We assume initial variance is low but non-zero to prevent division errors if used elsewhere
+        self.var_stage2 = np.zeros((self.n_states, self.n_choices))
+        
+        # We also need to propagate this risk to stage 1. 
+        # For simplicity, we'll track a "riskiness" value for stage 1 actions directly.
+        self.risk_stage1 = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Effective risk aversion scales with STAI
+        rho_eff = self.rho_base * (1.0 + self.stai)
+        
+        # Utility = Value - Risk_Penalty
+        utility = self.q_stage1 - (rho_eff * self.risk_stage1)
+        return self.softmax(utility, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        rho_eff = self.rho_base * (1.0 + self.stai)
+        
+        # Utility = Value - Risk_Penalty
+        utility = self.q_stage2[state] - (rho_eff * self.var_stage2[state])
+        return self.softmax(utility, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 Mean and Variance
+        # Standard Q update
+        q_err = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * q_err
+        
+        # Variance update: V_new = V_old + alpha * ((Reward - Q_old)^2 - V_old)
+        # This approximates the running variance of the prediction error
+        var_err = (q_err ** 2) - self.var_stage2[state, action_2]
+        self.var_stage2[state, action_2] += self.alpha * var_err
+        
+        # 2. Update Stage 1 Mean and Risk
+        # Stage 1 value update (TD)
+        td_error_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * td_error_1
+        
+        # Stage 1 risk update
+        # We treat the "risk" of stage 1 as the variance encountered in stage 2
+        # This is a simplification: risk of A1 is the risk of the state it leads to
+        current_risk_signal = self.var_stage2[state, action_2]
+        risk_err = current_risk_signal - self.risk_stage1[action_1]
+        self.risk_stage1[action_1] += self.alpha * risk_err
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Model-Based Inhibition
+This model tests the hypothesis that anxiety consumes cognitive resources (working memory), thereby inhibiting complex Model-Based (MB) planning. The agent uses a hybrid Model-Based/Model-Free strategy. The weighting parameter `w` determines the balance. Here, `w` is not static but is inversely proportional to STAI: higher anxiety reduces the contribution of the Model-Based system, forcing reliance on the simpler Model-Free system.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety impairs Model-Based (MB) reasoning due to cognitive load.
+    The agent mixes MB and Model-Free (MF) values. The mixing weight 'w' (0=MF, 1=MB)
+    is reduced by STAI.
+    
+    w_eff = w_max * (1 - stai)
+    
+    If STAI is high, w_eff approaches 0 (pure MF). If STAI is low, w_eff is higher (more MB).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_max: [0, 1]       # Maximum model-based weight (achieved at STAI=0)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values for Stage 1
+        # Q_MB(a1) = Sum_s [ P(s|a1) * Max_a2 Q_stage2(s, a2) ]
+        # We use the fixed transition matrix self.T defined in base class
+        # self.T[action, state] is prob of transitioning to state given action
+        
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_val = 0
+            for s_prime in range(self.n_states):
+                # Max value of next state
+                max_q2 = np.max(self.q_stage2[s_prime])
+                expected_val += self.T[a1, s_prime] * max_q2
+            q_mb[a1] = expected_val
+            
+        # 2. Calculate Effective Weight w
+        # High STAI reduces w, pushing towards MF
+        # We clamp STAI effect to ensure w stays in [0, 1]
+        stai_factor = np.clip(self.stai, 0, 1)
+        w_eff = self.w_max * (1.0 - stai_factor)
+        
+        # 3. Integrate Values
+        q_net = (1 - w_eff) * self.q_stage1 + w_eff * q_mb
+        
+        return self.softmax(q_net, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Stage 2 is purely model-free in standard MB/MF hybrids
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning for MF values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Learning Rate (Volatility Sensitivity)
+This model hypothesizes that anxiety affects how quickly an individual updates their beliefs (learning rate). Specifically, anxious individuals might be hyper-sensitive to errors (high learning rate) or "freeze" and under-update (low learning rate). This model posits a linear relationship between STAI and learning rate `alpha`.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the learning rate directly.
+    Instead of a fixed alpha, the effective alpha is a function of STAI.
+    alpha_eff = alpha_base + (slope * stai)
+    
+    If slope is positive, anxiety increases learning speed (hyper-reactivity).
+    If slope is negative, anxiety decreases learning speed (rigidity).
+    
+    We use a sigmoid transform to keep alpha_eff strictly within [0, 1].
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]  # Base learning rate parameter (pre-sigmoid)
+    beta: [0, 10]       # Inverse temperature
+    stai_slope: [-5, 5] # Sensitivity of alpha to STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.stai_slope = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the static effective alpha for this participant
+        # We use a logistic function to bound alpha between 0 and 1
+        # x = alpha_base_logit + slope * stai
+        # alpha = 1 / (1 + exp(-x))
+        # To make alpha_base intuitive (0-1), we treat the input param as the center point
+        
+        # Map alpha_base [0,1] to logit space [-inf, inf] roughly
+        # We'll use a simpler linear scaling with clipping for robustness and interpretability
+        
+        raw_alpha = self.alpha_base + (self.stai_slope * self.stai)
+        self.alpha_eff = np.clip(raw_alpha, 0.01, 0.99)
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Use the anxiety-modulated alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_eff * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_eff * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

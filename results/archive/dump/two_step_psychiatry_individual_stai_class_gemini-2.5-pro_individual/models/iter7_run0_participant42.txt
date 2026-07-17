@@ -1,0 +1,169 @@
+As a cognitive scientist and Python programmer, I will propose three distinct models to explain this participant's decision-making process. Given the participant's high anxiety score (0.6875) and their stark behavioral pattern—long periods of sticking to one choice before abruptly switching—the models will explore different hypotheses about how anxiety impacts learning, choice strategy, and cognitive biases.
+
+### Model 1: Anxiety-Modulated Regret-Driven Switching
+
+This model hypothesizes that high anxiety doesn't necessarily cause rigid perseveration, but rather an acute sensitivity to regret. The participant sticks with a choice until a negative outcome occurs, which triggers a comparison with the unchosen option. If the unchosen option was better, a powerful, anxiety-amplified "regret" signal strongly encourages a switch on the next trial. This explains the long periods of stability followed by a decisive switch.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety makes the participant highly sensitive to regret. 
+    After a non-rewarded trial, if the value of the unchosen spaceship was higher 
+    than the chosen one, an anxiety-amplified "regret" bonus is added to the 
+    unchosen spaceship's value for the next decision. This promotes switching 
+    away from options that prove to be suboptimal.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate)
+    beta: [0, 10]    (Inverse temperature for choice stochasticity)
+    rho: [0, 5]       (Regret sensitivity)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rho = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes policy with a potential regret-driven bonus."""
+        q_policy = self.q_stage1.copy()
+        
+        # Regret is only calculated after the first trial and on non-rewarded trials
+        if self.trial > 0 and self.last_reward == 0.0:
+            unchosen_action = 1 - self.last_action1
+            
+            chosen_q = self.q_stage1[self.last_action1]
+            unchosen_q = self.q_stage1[unchosen_action]
+            
+            # If the unchosen option had a higher value, feel regret
+            if unchosen_q > chosen_q:
+                regret_signal = unchosen_q - chosen_q
+                # Anxiety amplifies the motivational impact of regret
+                regret_bonus = self.rho * self.stai * regret_signal
+                q_policy[unchosen_action] += regret_bonus
+                
+        return self.softmax(q_policy, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        A standard model-based TD update. The Q-value of the first stage is the
+        expected value of the best second-stage action from the resulting state.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # Update is based on the best possible outcome from the arrived state
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Shift to Heuristic Control
+
+This model proposes that high anxiety impairs complex, model-based planning. Instead of carefully calculating which spaceship leads to the best planet, the participant defaults to a simpler, "model-free" heuristic. They learn a direct association between a spaceship and the final reward, ignoring the intermediate planet stage. Anxiety controls the balance, pushing this high-anxiety participant toward this simpler, but less optimal, strategy.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs deliberative, model-based planning, causing a
+    shift towards simpler, heuristic-based (model-free) control. The participant
+    learns a direct, cached value for each spaceship based on rewards received,
+    largely ignoring the transition structure of the task. Anxiety determines the
+    degree of reliance on this simpler system.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]  (Inverse temperature)
+    w_mb: [0, 1]    (Weight on model-based vs. model-free control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize separate model-free Q-values."""
+        self.q_stage1_mf = np.zeros(self.n_choices)
+        # Anxiety reduces reliance on the computationally demanding model-based system
+        self.w_mb_effective = self.w_mb * (1 - self.stai)
+
+    def pre_trial(self) -> None:
+        """Combine model-based and model-free values before making a choice."""
+        # Model-based value: expected value of the next state
+        q_stage1_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Q_MB(a) = P(s0|a)*max(Q2(s0)) + P(s1|a)*max(Q2(s1))
+            q_stage1_mb[a] = self.T[a, 0] * np.max(self.q_stage2[0]) + \
+                             self.T[a, 1] * np.max(self.q_stage2[1])
+
+        # Final Q-value is a weighted average of the two systems
+        self.q_stage1 = self.w_mb_effective * q_stage1_mb + \
+                        (1 - self.w_mb_effective) * self.q_stage1_mf
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update both the stage-2 values and the crude model-free values."""
+        # Standard update for stage-2 Q-values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-free update: directly associate stage-1 action with final reward
+        delta_mf = reward - self.q_stage1_mf[action_1]
+        self.q_stage1_mf[action_1] += self.alpha * delta_mf
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Pessimism and Forgetfulness
+
+This model posits that anxiety induces a pessimistic cognitive bias. The participant learns more from negative outcomes (not getting a coin) than from positive ones. Furthermore, anxiety creates a sense that the world is unstable, causing the value of unchosen options to "decay" or be forgotten over time. This combination can lead to sticking with a "safe" option, as exploring and finding a negative outcome is heavily penalized, and the value of the alternative option is mentally discounted.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety fosters a pessimistic worldview, causing the
+    participant to learn more from negative outcomes than positive ones.
+    Anxiety also makes the participant believe reward contingencies are unstable,
+    causing the value of unchosen options to decay over time. This combination
+    promotes sticking with a known option for fear of worse outcomes elsewhere.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]  (Learning rate for positive outcomes)
+    alpha_neg: [0, 1]  (Base learning rate for negative outcomes)
+    beta: [0, 10]     (Inverse temperature)
+    decay: [0, 1]      (Decay rate for value of unchosen options)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.beta, self.decay = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate anxiety-modulated parameters."""
+        # Anxiety increases learning from negative prediction errors
+        self.alpha_neg_effective = self.alpha_neg * (1 + self.stai)
+        # Anxiety increases the decay/forgetting of unchosen options' values
+        self.decay_effective = self.decay * self.stai
+
+    def pre_trial(self) -> None:
+        """Apply value decay to the unchosen option before the decision."""
+        if self.trial > 0:
+            unchosen_action = 1 - self.last_action1
+            # Decay towards the initial value of 0 (or neutral)
+            self.q_stage1[unchosen_action] *= (1 - self.decay_effective)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values using separate learning rates for positive/negative PEs."""
+        # Stage 2 update with asymmetric learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 > 0 else self.alpha_neg_effective
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update with asymmetric learning
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 > 0 else self.alpha_neg_effective
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

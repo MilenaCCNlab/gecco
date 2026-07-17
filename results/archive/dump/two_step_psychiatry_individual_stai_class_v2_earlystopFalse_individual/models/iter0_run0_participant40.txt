@@ -1,0 +1,267 @@
+Here are three cognitive models designed to capture different hypotheses about how a low-anxiety participant (STAI = 0.2625) might solve this two-step decision task.
+
+### Model 1: Model-Based/Model-Free Hybrid with Anxiety-Modulated Mixing
+**Hypothesis:** This model tests the classic hybrid reinforcement learning theory where behavior is a mix of Model-Based (MB) planning and Model-Free (MF) learning. Since the participant has low anxiety, they might rely more heavily on the computationally expensive but flexible Model-Based system compared to high-anxiety individuals who often revert to Model-Free habits under stress. The mixing weight `w` is modulated by the STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Behavior is a hybrid of Model-Based (MB) and Model-Free (MF) reinforcement learning.
+    The balance between these systems (w) is modulated by anxiety (STAI).
+    Low anxiety participants (like this one) are hypothesized to have a higher 'w', favoring
+    goal-directed (MB) control over habitual (MF) control.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Base mixing weight (0=MF, 1=MB)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # MF values
+        self.q_mf_stage1 = np.zeros(self.n_choices)
+        self.q_mf_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # MB values (computed on the fly, but we need transition matrix)
+        # We use the fixed transition matrix provided in base class self.T
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        # Compute Model-Based values for Stage 1
+        # Q_MB(s1, a) = sum(P(s2|s1, a) * max(Q_stage2(s2, :)))
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Transition probabilities for action a
+            # Action 0 -> mostly Planet 0 (row 0 of T)
+            # Action 1 -> mostly Planet 1 (row 1 of T)
+            # The base class T is [[0.7, 0.3], [0.3, 0.7]]. 
+            # We map action 0 to row 0, action 1 to row 1.
+            probs = self.T[a] 
+            
+            # Expected value of best action in next state
+            max_q_s2 = np.max(self.q_mf_stage2, axis=1) # Max value for each state
+            q_mb[a] = np.dot(probs, max_q_s2)
+
+        # Modulate mixing weight w by STAI
+        # Hypothesis: Lower anxiety -> Higher w (more MB)
+        # We model w = w_base * (1 - stai) to enforce this relationship
+        # If stai is low (~0.26), w is closer to w_base.
+        w = self.w_base * (1.0 - self.stai)
+        w = np.clip(w, 0.0, 1.0)
+
+        # Combined value
+        q_net = w * q_mb + (1 - w) * self.q_mf_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Stage 2 is purely model-free (no further states to plan over)
+        return self.softmax(self.q_mf_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard SARSA / TD(1) updates for MF values
+        
+        # Stage 2 update
+        delta_2 = reward - self.q_mf_stage2[state, action_2]
+        self.q_mf_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (TD(1) - using the reward directly)
+        # Note: In pure MF, we often use TD(1) or TD(0). Here we use TD(1) for simplicity
+        # linking stage 1 choice to final reward.
+        delta_1 = reward - self.q_mf_stage1[action_1]
+        self.q_mf_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Win-Stay Lose-Shift with Anxiety-Driven Perseveration
+**Hypothesis:** This model posits a simpler heuristic strategy often observed in decision tasks: Win-Stay Lose-Shift (WSLS). However, it incorporates "perseveration" (stickiness) which is modulated by anxiety. Even though the participant has low anxiety, this model tests if their low anxiety leads to *less* perseveration (more flexibility) compared to a baseline, allowing them to switch strategies more effectively after losses.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: The participant uses a Win-Stay Lose-Shift strategy augmented by choice perseveration.
+    Anxiety (STAI) modulates the perseveration parameter 'p'.
+    Low anxiety is hypothesized to reduce perseveration (stickiness), allowing for more 
+    flexible switching (lower 'p_eff').
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for value tracking (used to define 'Win' vs 'Loss')
+    beta: [0, 10]       # Inverse temperature
+    p_base: [0, 5]      # Base perseveration bonus
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.p_base = model_parameters
+
+    def init_model(self) -> None:
+        # We track simple values to determine if a result was a "Win" or "Loss" relative to expectation
+        self.q_values = np.zeros(self.n_choices) 
+        self.prev_choice = -1
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate perseveration bonus
+        # Effective perseveration increases with anxiety. 
+        # p_eff = p_base * (1 + stai)
+        # Low anxiety -> p_eff is closer to p_base.
+        p_eff = self.p_base * (1.0 + self.stai)
+        
+        logits = np.copy(self.q_values)
+        
+        # Add stickiness to the previous choice
+        if self.prev_choice != -1:
+            logits[self.prev_choice] += p_eff
+            
+        return self.softmax(logits, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Stage 2 is treated as random/exploration in this heuristic model 
+        # or simple value tracking. We'll use simple value tracking from base class q_stage2
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 values (standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Heuristic Update for Stage 1:
+        # If Reward > Expectation (Win), increase value of chosen action.
+        # If Reward < Expectation (Loss), decrease value.
+        # We use the Stage 1 Q-value as the "Expectation".
+        
+        delta_1 = reward - self.q_values[action_1]
+        
+        # WSLS logic implemented via learning rate:
+        # If delta is positive (Win), we reinforce.
+        # If delta is negative (Loss), we devalue.
+        self.q_values[action_1] += self.alpha * delta_1
+        
+        self.prev_choice = action_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Successor Representation with Anxiety-Modulated Horizon
+**Hypothesis:** This model assumes the participant builds a "cognitive map" of the task using Successor Representation (SR). SR learns the expected future occupancy of states. The key hypothesis here is that anxiety affects the planning horizon (gamma). Low anxiety participants are hypothesized to have a longer planning horizon (higher gamma), allowing them to better integrate the long-term structure of the task (spaceship -> planet -> reward) rather than being myopic.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: The participant uses Successor Representation (SR) to estimate values.
+    Anxiety (STAI) modulates the discount factor (gamma), representing the planning horizon.
+    Low anxiety -> Higher gamma (longer horizon, better integration of transition structure).
+    
+    Parameter Bounds:
+    -----------------
+    alpha_sr: [0, 1]    # Learning rate for the successor matrix M
+    alpha_w: [0, 1]     # Learning rate for reward weights w
+    beta: [0, 10]       # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_sr, self.alpha_w, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # 4 total states: 
+        # 0: Start (Stage 1)
+        # 1: Planet X (Stage 2, State 0)
+        # 2: Planet Y (Stage 2, State 1)
+        # 3: Terminal
+        self.n_total_states = 3 
+        
+        # M matrix: Expected discounted future occupancy
+        # Initialize as identity (you are at least in the current state)
+        self.M = np.eye(self.n_total_states)
+        
+        # Reward weights vector (estimated reward at each state)
+        self.w = np.zeros(self.n_total_states)
+        
+        # Map task states to internal indices
+        # Stage 1 is implicit context for action selection, but we track occupancy of planets.
+        # Planet 0 -> Index 1
+        # Planet 1 -> Index 2
+
+    def get_gamma(self):
+        # Modulate gamma by STAI.
+        # Low anxiety (low STAI) -> High Gamma (Long horizon).
+        # Range: 0.5 to 0.95
+        return 0.95 - (0.45 * self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Value of action = sum(Transition(s1, a, s') * Value(s'))
+        # Value(s') = M(s', :) * w
+        
+        gamma = self.get_gamma()
+        
+        # Calculate values for Planet X (idx 1) and Planet Y (idx 2)
+        v_planet_x = np.dot(self.M[1, :], self.w)
+        v_planet_y = np.dot(self.M[2, :], self.w)
+        
+        # Expected value of actions based on transition probabilities T
+        # Action 0 -> T[0,0]*X + T[0,1]*Y
+        # Action 1 -> T[1,0]*X + T[1,1]*Y
+        q_vals = np.zeros(self.n_choices)
+        q_vals[0] = self.T[0, 0] * v_planet_x + self.T[0, 1] * v_planet_y
+        q_vals[1] = self.T[1, 0] * v_planet_x + self.T[1, 1] * v_planet_y
+        
+        return self.softmax(q_vals, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # In this simplified SR model, we assume stage 2 choice is driven by 
+        # immediate reward learning which we track in self.w implicitly or 
+        # via a separate mechanism. To keep it consistent with SR, we'll assume
+        # the 'state' here (Planet X or Y) has a value derived from M*w, 
+        # but the choice between aliens is local.
+        # For simplicity, we fall back to standard Q-learning for the specific alien choice
+        # inside the planet, as SR is usually for state-state prediction.
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Map task state to internal index
+        # state 0 -> index 1, state 1 -> index 2
+        current_state_idx = state + 1
+        
+        # 1. Update Reward Weights (w)
+        # Simple delta rule: w(s) <- w(s) + alpha * (r - w(s))
+        # We attribute the reward to the planet state
+        self.w[current_state_idx] += self.alpha_w * (reward - self.w[current_state_idx])
+        
+        # 2. Update Successor Matrix (M)
+        # SR TD Error: one-hot(s_t) + gamma * M(s_{t+1}) - M(s_t)
+        # Here, we transition from Start -> Planet.
+        # Since we don't explicitly model the 'Start' row in M for value calc (we use T),
+        # we mainly update the Planet rows if there were subsequent states.
+        # But this task is 2-step. Planet is terminal-ish regarding state transitions.
+        # So M[planet] should just point to itself.
+        
+        # However, to make SR useful, we can view the transition from Stage 1 choice to Planet.
+        # But standard SR is S->S'.
+        
+        # Let's refine: We update the Q-values for the aliens (Stage 2) normally.
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_w * delta_2 # Reuse alpha_w
+        
+        # The SR part is mostly static here because the map (Spaceship -> Planet) is fixed 
+        # in the participant's head or learned slowly. 
+        # We will implement a "Sensory Prediction Error" update for the transition matrix T
+        # instead of full SR, as T is the "Model" in Model-Based.
+        # This is a variation where we learn T based on alpha_sr.
+        
+        # Update T (Transition probabilities)
+        # We observed transition: action_1 -> state
+        # T[action_1] is a probability distribution.
+        # We nudge it towards the observed outcome.
+        target = np.zeros(2)
+        target[state] = 1.0
+        self.T[action_1] += self.alpha_sr * (target - self.T[action_1])
+        
+        # Normalize to ensure valid probabilities
+        self.T[action_1] /= np.sum(self.T[action_1])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

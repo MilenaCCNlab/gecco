@@ -1,0 +1,209 @@
+Here are three cognitive models, each proposing a different hypothesis for how the participant makes decisions, incorporating their low anxiety (STAI score of 0.2875).
+
+### Model 1: Model-Based/Model-Free Hybrid with STAI-modulated Weight
+
+This model posits that the participant combines model-free (habitual) and model-based (goal-directed) control mechanisms, particularly at the first stage of the task. Low anxiety is hypothesized to increase the reliance on the model-based system, allowing the participant to plan more effectively by considering the task's transition structure and the expected future rewards. The participant learns both the values of actions and the transition probabilities between stages.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants combine model-free (MF)
+    and model-based (MB) control at the first stage. The model-free value
+    for stage 1 actions is updated by standard TD learning. The model-based
+    value is computed by looking ahead to the expected optimal second-stage
+    rewards, weighted by learned transition probabilities. Low anxiety
+    (lower STAI score) is hypothesized to increase reliance on the model-based
+    system (higher 'w_mb'), allowing for more flexible planning and adapting
+    to changes in transition or reward contingencies.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for model-free values and transition probabilities.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w_mb_base: [0, 1] - Base weight for the model-based component.
+                        Low STAI increases this weight, pushing it towards 1.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition probabilities. Use initial counts as priors.
+        self.trans_counts = np.array([[35., 15.], [15., 35.]]) 
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+        # Modulate w_mb by STAI: lower STAI means higher w_mb.
+        # This formulation ensures w_mb is between w_mb_base and 1,
+        # with lower STAI pushing it closer to 1 (more model-based).
+        self.w_mb = self.w_mb_base + (1 - self.stai) * (1 - self.w_mb_base)
+        self.w_mb = np.clip(self.w_mb, 0, 1) # Ensure w_mb stays within [0, 1]
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a blend of MF and MB values.
+        """
+        # Calculate Model-Based Q-values for stage 1
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Expected value of choosing a1, considering learned transition probabilities
+            # and the maximum Q-value at the second stage for each possible planet.
+            q_mb_stage1[a1] = np.sum([
+                self.T[a1, s] * np.max(self.q_stage2[s, :])
+                for s in range(self.n_states)
+            ])
+        
+        # Combine MF (self.q_stage1) and MB (q_mb_stage1) values
+        # self.q_stage1 holds the model-free values as updated by value_update.
+        q_total_stage1 = self.w_mb * q_mb_stage1 + (1 - self.w_mb) * self.q_stage1
+        
+        return self.softmax(q_total_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update model-free values and transition probabilities.
+        """
+        # Update Stage 2 Q-values (Model-Free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Model-Free Q-values
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1_mf
+
+        # Update transition probabilities
+        # The observed transition for the chosen action is 1 for the actual state, 0 otherwise.
+        T_observed = np.zeros(self.n_states)
+        T_observed[state] = 1.0 
+        
+        # Update the transition probability for the chosen action using a learning rate.
+        self.T[action_1, :] = (1 - self.alpha) * self.T[action_1, :] + self.alpha * T_observed
+        # Re-normalize to ensure probabilities sum to 1.
+        self.T[action_1, :] = self.T[action_1, :] / np.sum(self.T[action_1, :])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Stay-Switch (Perseveration) with STAI-modulated Bias
+
+This model introduces a "stay-switch" mechanism, where the participant has a general tendency to repeat their previous first-stage choice. This perseveration bias is, however, modulated by the outcome of the previous trial and the participant's anxiety level. Specifically, for low-anxiety individuals, a negative outcome (zero coins) from the previous trial significantly reduces their tendency to perseverate, making them more likely to switch to an alternative option.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model incorporates a 'stay-switch' or perseveration bias
+    at the first stage. Participants tend to repeat their previous first-stage
+    choice, adding a 'stickiness' bonus to its value. However, this perseveration
+    is modulated by the outcome of the previous trial and the participant's anxiety level.
+    Specifically, low anxiety (lower STAI score) is hypothesized to make participants
+    more adaptive: they are less likely to perseverate on a choice that led to
+    a zero reward (punishment) on the previous trial. This allows them to switch
+    away from unrewarding options more readily if they are low anxious.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    p_stay_base: [0, 1] - Base strength of the perseveration bias when the
+                          previous outcome was rewarding. This bias is reduced
+                          when the last reward was 0, and this reduction is
+                          stronger for low STAI participants.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.p_stay_base = model_parameters
+
+    def init_model(self) -> None:
+        # last_action1 and last_reward are initialized to None in CognitiveModelBase.
+        # They will be used from the second trial onwards.
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, incorporating a stay bias.
+        """
+        q_biased_stage1 = np.copy(self.q_stage1)
+
+        if self.last_action1 is not None and self.last_reward is not None:
+            # Determine the effective p_stay based on the last reward and STAI score.
+            current_p_stay = self.p_stay_base
+            if self.last_reward == 0:
+                # If the last reward was 0, reduce the stay bias.
+                # Lower STAI (e.g., 0.2875) means a stronger reduction.
+                # If STAI is 0, p_stay becomes 0. If STAI is 1, p_stay remains p_stay_base.
+                current_p_stay = self.p_stay_base * self.stai
+            
+            q_biased_stage1[self.last_action1] += current_p_stay
+
+        return self.softmax(q_biased_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: TD(lambda) with STAI-modulated Eligibility Traces
+
+This model enhances the standard Temporal Difference (TD) learning by incorporating eligibility traces (TD(lambda)). This mechanism allows for credit assignment to not only the immediately preceding action but also to earlier actions in the trial sequence, thereby bridging the two stages of the task. For individuals with low anxiety, this model hypothesizes a higher eligibility trace parameter (`lambda`), indicating an improved ability to connect final outcomes to initial choices and fostering a more integrated, forward-looking learning process.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model extends standard TD learning by incorporating
+    eligibility traces (TD(lambda)). This allows for credit assignment not
+    just to the immediately preceding action, but also to earlier actions
+    in a trial sequence, effectively bridging the two stages.
+    Low anxiety (lower STAI score) is hypothesized to lead to a higher
+    eligibility trace parameter (lambda), indicating that individuals with
+    low anxiety are better at linking the final outcome to their initial
+    first-stage choice. This implies a more integrated and "forward-looking"
+    learning process for low-anxiety participants.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    lambda_base: [0, 1] - Base eligibility trace parameter.
+                          Low STAI increases this lambda towards 1.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base = model_parameters
+
+    def init_model(self) -> None:
+        # Modulate lambda by STAI: lower STAI means higher lambda.
+        # This formulation ensures lambda_val is between lambda_base and 1,
+        # with lower STAI pushing it closer to 1 (stronger eligibility traces).
+        self.lambda_val = self.lambda_base + (1 - self.stai) * (1 - self.lambda_base)
+        self.lambda_val = np.clip(self.lambda_val, 0, 1) # Ensure lambda_val stays within [0, 1]
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using TD(lambda) for the first stage.
+        """
+        # Stage 2 update (standard TD(0))
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Stage 1 update using TD(lambda) formulation for a two-step task.
+        # The first-stage prediction error (delta_1) is based on the value of the
+        # observed second-stage state-action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # The update to q_stage1 incorporates both its own prediction error (delta_1)
+        # and a back-propagated version of the second-stage prediction error (delta_2),
+        # weighted by lambda. This allows the final reward to influence the first-stage
+        # value more directly, depending on lambda.
+        self.q_stage1[action_1] += self.alpha * (delta_1 + self.lambda_val * delta_2)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,240 @@
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Impairs State Identification (Latent State Blurring).
+    High anxiety causes a failure in credit assignment specificity. When a participant 
+    learns from an outcome in one state (e.g., Planet X), the update 'leaks' 
+    into the value estimation of the other state (Planet Y), blurring the distinction.
+    
+    STAI modulates the 'leakage' rate.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate for Q-values.
+    - inverse_temperature: [0, 10] Softmax beta parameter.
+    - mixing_weight: [0, 1] Balance between Model-Based (1) and Model-Free (0) control.
+    - leakage_param: [0, 1] Base magnitude of credit assignment leakage.
+      Effective leakage = leakage_param * stai.
+    """
+    learning_rate, inverse_temperature, mixing_weight, leakage_param = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+    
+    # Effective leakage scales with anxiety
+    effective_leakage = leakage_param * stai
+
+    # Transition matrix for Model-Based (fixed knowledge of transition structure)
+    # 0 -> State 0 (Planet X), 1 -> State 1 (Planet Y)
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values
+    q_stage1_mf = np.zeros(2)      # MF values for spaceships
+    q_stage2_mf = np.zeros((2, 2)) # MF values for aliens (2 planets x 2 aliens)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision (Spaceship) ---
+        # Model-Based Value: Expected value of best option in next states
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Hybrid Value
+        q_net_stage1 = (mixing_weight * q_stage1_mb) + ((1 - mixing_weight) * q_stage1_mf)
+        
+        # Softmax Choice 1
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision (Alien) ---
+        state_idx = state[trial] # 0 or 1
+        
+        # Softmax Choice 2
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning / Updates ---
+        
+        # 1. Stage 1 MF Update (TD Error)
+        # The value of the chosen spaceship is updated towards the value of the state reached
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # 2. Stage 2 MF Update (Reward Prediction Error)
+        pe_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # Standard update for the actual state visited
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * pe_stage2
+        
+        # LEAKAGE UPDATE: Update the *other* state's alien value slightly
+        # This represents the anxiety-induced blurring of context
+        other_state_idx = 1 - state_idx
+        q_stage2_mf[other_state_idx, action_2[trial]] += learning_rate * effective_leakage * pe_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Drives "Win-Stay, Lose-Shift" (WSLS) Heuristics.
+    High anxiety consumes cognitive resources, forcing participants to revert to 
+    simple heuristic strategies rather than probabilistic reinforcement learning.
+    
+    The model is a mixture of a standard RL agent and a fixed WSLS agent.
+    STAI determines the mixing proportion (rho).
+    
+    Parameters:
+    - learning_rate: [0, 1] Learning rate for the RL component.
+    - inverse_temperature: [0, 10] Softmax beta for the RL component.
+    - mixing_weight: [0, 1] MB/MF balance for the RL component.
+    - wsls_bias: [0, 1] The maximum weight given to the heuristic strategy.
+      Effective heuristic weight = wsls_bias * stai.
+    """
+    learning_rate, inverse_temperature, mixing_weight, wsls_bias = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+    
+    # Effective weight of the heuristic strategy scales with anxiety
+    rho = wsls_bias * stai
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track previous trial info for WSLS
+    prev_action_1 = -1
+    prev_reward = -1
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        
+        # 1. Calculate RL Probabilities
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net_stage1 = (mixing_weight * q_stage1_mb) + ((1 - mixing_weight) * q_stage1_mf)
+        
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_rl_1 = exp_q1 / np.sum(exp_q1)
+        
+        # 2. Calculate WSLS Probabilities
+        probs_wsls_1 = np.array([0.5, 0.5]) # Default for first trial
+        if trial > 0:
+            if prev_reward == 1:
+                # Win-Stay: High prob of repeating previous action
+                probs_wsls_1 = np.zeros(2)
+                probs_wsls_1[prev_action_1] = 1.0
+            else:
+                # Lose-Shift: High prob of switching
+                probs_wsls_1 = np.zeros(2)
+                probs_wsls_1[1 - prev_action_1] = 1.0
+        
+        # 3. Mix Strategies
+        final_probs_1 = (1 - rho) * probs_rl_1 + rho * probs_wsls_1
+        p_choice_1[trial] = final_probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        # Note: We apply WSLS primarily to the first stage (spaceship choice) as is standard 
+        # in 2-step literature, but use standard RL for the second stage (alien choice)
+        # as the state context changes.
+        
+        state_idx = state[trial]
+        exp_q2 = np.exp(inverse_temperature * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Update history
+        prev_action_1 = action_1[trial]
+        prev_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Alters the Eligibility Trace (Temporal Linkage).
+    Anxiety affects working memory, making it harder to maintain the 'trace' of the 
+    Stage 1 choice until the reward is received at the end of Stage 2.
+    
+    This model uses a pure TD-learning approach (no Model-Based component) with an 
+    eligibility trace (lambda). STAI reduces lambda, decaying the link between 
+    Stage 1 choice and Stage 2 outcome.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - inverse_temperature: [0, 10] Softmax beta.
+    - lambda_base: [0, 1] Base eligibility trace parameter.
+      Effective lambda = lambda_base * (1 - stai).
+    - risk_penalty: [0, 5] A simple penalty for uncertainty to use the 4th param slot meaningfully.
+    """
+    learning_rate, inverse_temperature, lambda_base, risk_penalty = model_parameters
+    n_trials = len(action_1)
+    stai = stai[0]
+    
+    # Effective lambda decreases as anxiety increases (memory decay)
+    # If STAI is high (near 1), lambda approaches 0 (pure TD(0), no direct reward link to stage 1)
+    effective_lambda = lambda_base * (1.0 - (0.8 * stai)) # Scaling factor to prevent lambda becoming exactly 0 too easily
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1 = np.zeros(2)
+    q_stage2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        # Pure Model-Free choice based on Q-values
+        exp_q1 = np.exp(inverse_temperature * q_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        state_idx = state[trial]
+        
+        # Apply a small risk penalty based on STAI (using the 4th param)
+        # We approximate risk as the inverse of value magnitude (uncertainty heuristic)
+        # This ensures all params are used meaningfully.
+        adjusted_q2 = q_stage2[state_idx] - (risk_penalty * stai * 0.1)
+        
+        exp_q2 = np.exp(inverse_temperature * adjusted_q2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning with Eligibility Trace ---
+        
+        # 1. Prediction Error at Stage 1 (TD error between Stage 1 and Stage 2 Q-values)
+        delta1 = q_stage2[state_idx, action_2[trial]] - q_stage1[action_1[trial]]
+        
+        # 2. Prediction Error at Stage 2 (Reward Prediction Error)
+        delta2 = reward[trial] - q_stage2[state_idx, action_2[trial]]
+        
+        # Update Stage 2 Q-value (Standard Q-learning)
+        q_stage2[state_idx, action_2[trial]] += learning_rate * delta2
+        
+        # Update Stage 1 Q-value
+        # It gets updated by its own immediate TD error (delta1)
+        # AND by the Stage 2 error (delta2) scaled by the eligibility trace (lambda)
+        q_stage1[action_1[trial]] += learning_rate * (delta1 + effective_lambda * delta2)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

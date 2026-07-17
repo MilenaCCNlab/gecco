@@ -1,0 +1,240 @@
+Here are 3 new cognitive models implemented as Python functions.
+
+### Model 1: Dynamic Belief Updating (Hyper-vigilance)
+**Hypothesis:** Standard models assume participants know the transition matrix (70/30) is fixed. Anxious individuals, characterized by hyper-vigilance, may treat "rare" transitions not as noise, but as evidence that the world structure has changed. This model allows the participant to learn the transition matrix trial-by-trial, with anxiety scaling the learning rate of these structural updates.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Dynamic Belief Updating Model.
+    
+    Hypothesis: Anxiety scales the learning rate for the transition matrix itself.
+    High anxiety leads to rapid rewriting of the internal model of the spaceship-planet 
+    transitions (hyper-vigilance to structural change), making the Model-Based 
+    component unstable.
+
+    Parameters:
+    - lr_reward: [0, 1] Learning rate for Stage 2 reward values (Q-values).
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - lr_trans_scale: [0, 1] Scales how much STAI affects transition learning.
+      (Effective transition LR = lr_trans_scale * STAI).
+    """
+    lr_reward, beta, w, lr_trans_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Anxiety determines how fast they update their belief about spaceship transitions
+    lr_transition = lr_trans_scale * stai_score
+
+    # Initialize beliefs about transitions: P(State X | Action A) and P(State Y | Action U)
+    # We start with the true prior, but it will drift based on anxiety-driven learning
+    # Row 0: Action A -> [Prob X, Prob Y]
+    # Row 1: Action U -> [Prob X, Prob Y]
+    trans_belief = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # MB Value calculated using the *current dynamic belief* of transitions
+        q_stage1_mb = trans_belief @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial] # 0 for X, 1 for Y
+        a1 = action_1[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        
+        # 1. Update Transition Beliefs (The core mechanism)
+        # If we took action A (0) and ended up in state X (0), target is 1.0 for index 0
+        # If we took action A (0) and ended up in state Y (1), target is 0.0 for index 0
+        # We update the probability of reaching State X given the action taken.
+        is_state_x = 1 if state_idx == 0 else 0
+        
+        # Prediction error for the transition structure
+        trans_pe = is_state_x - trans_belief[a1, 0]
+        
+        # Update P(X|Action)
+        trans_belief[a1, 0] += lr_transition * trans_pe
+        # Ensure P(Y|Action) is 1 - P(X|Action)
+        trans_belief[a1, 1] = 1.0 - trans_belief[a1, 0]
+
+        # 2. Standard Value Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += lr_reward * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += lr_reward * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Loss Sensitivity
+**Hypothesis:** Anxiety is often associated with a negativity bias. This model posits that anxious participants learn differently from failures (0 coins) than successes (1 coin). Specifically, anxiety amplifies the learning rate when a reward is omitted (a "loss" in this context), causing them to abandon strategies faster than low-anxiety individuals after a failure.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Asymmetric Loss Sensitivity Model.
+    
+    Hypothesis: Anxiety amplifies learning from negative outcomes (omission of reward).
+    While the learning rate for rewards is constant, the learning rate for 
+    non-rewards (0 coins) is boosted by the STAI score.
+    
+    Parameters:
+    - lr_base: [0, 1] Base learning rate for positive outcomes (Reward=1).
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - loss_amp: [0, 5] Amplification factor for learning from zero-rewards based on STAI.
+    """
+    lr_base, beta, w, loss_amp = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        
+        # Determine Learning Rate for this trial
+        # If reward is 0, we treat it as a "loss" signal.
+        # Anxious people react stronger to this signal.
+        if reward[trial] == 0:
+            # LR = Base * (1 + Anxiety * Amplifier)
+            # We clip at 1.0 to maintain mathematical stability
+            current_lr = min(1.0, lr_base * (1.0 + (loss_amp * stai_score)))
+        else:
+            current_lr = lr_base
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += current_lr * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Outcome-Dependent Control Collapse
+**Hypothesis:** Anxiety doesn't just statically reduce Model-Based control. Instead, it makes cognitive control fragile. This model suggests that after a successful trial, anxious participants can plan (high $w$), but after a failure (0 coins), they experience a "panic" response that collapses their planning horizon, forcing a reversion to Model-Free habits on the subsequent trial.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Outcome-Dependent Control Collapse Model.
+    
+    Hypothesis: Anxiety makes Model-Based control fragile to negative feedback.
+    If the previous trial was unrewarded, the 'w' parameter (MB weight) is 
+    suppressed for the current trial, proportional to anxiety. 
+    Success restores planning capacity.
+    
+    Parameters:
+    - lr: [0, 1] Learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w_base: [0, 1] Baseline Model-Based weight (when calm/successful).
+    - panic_collapse: [0, 1] How much 'w' is reduced after a loss, scaled by STAI.
+    """
+    lr, beta, w_base, panic_collapse = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_reward = 1 # Assume start with confidence/success state
+
+    for trial in range(n_trials):
+
+        # --- Calculate Dynamic w ---
+        if last_reward == 1:
+            # Success: Full cognitive capacity available
+            w_eff = w_base
+        else:
+            # Failure: Anxiety induces collapse of MB control
+            # w_eff = w_base * (1 - (CollapseFactor * Anxiety))
+            suppression = panic_collapse * stai_score
+            # Ensure suppression doesn't go below 0 (invert w) or above 1
+            suppression = np.clip(suppression, 0, 1)
+            w_eff = w_base * (1.0 - suppression)
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w_eff * q_stage1_mb + (1 - w_eff) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += lr * delta_stage2
+        
+        # Store reward for next trial's control calculation
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

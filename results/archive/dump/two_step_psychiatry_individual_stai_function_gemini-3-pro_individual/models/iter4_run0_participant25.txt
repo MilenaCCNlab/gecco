@@ -1,0 +1,228 @@
+Here are 3 new cognitive models that introduce STAI-based modulations into the two-step decision process.
+
+### Model 1: STAI-Modulated Reward Sensitivity
+This model hypothesizes that anxiety alters the subjective valuation of the reward (the gold coin). While the objective reward is 1 or 0, anxious participants may perceive the gain as more valuable (relief) or less valuable (anhedonia), scaling the prediction error accordingly.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    STAI-Modulated Reward Sensitivity.
+    
+    This model posits that anxiety (STAI) affects the subjective utility of the 
+    reward. Instead of learning from R (0 or 1), the agent learns from 
+    R_eff = R * (sensitivity_base + mod * STAI).
+    
+    Parameters:
+    learning_rate: [0, 1] - Standard learning rate.
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - Model-based weight.
+    sens_base: [0, 2] - Baseline reward sensitivity (1.0 = objective).
+    stai_sens_mod: [-1, 1] - How STAI modulates sensitivity.
+    """
+    learning_rate, beta, w, sens_base, stai_sens_mod = model_parameters
+    n_trials = len(action_1)
+    participant_stai = stai[0]
+  
+    # Calculate subjective reward scalar
+    # We clip to ensure it doesn't become negative or absurdly high
+    reward_sensitivity = sens_base + (stai_sens_mod * participant_stai)
+    reward_sensitivity = np.clip(reward_sensitivity, 0.1, 5.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Weighted mixture of MB and MF
+        q_net_1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Standard TD error for stage 1 (Q2 - Q1)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        # Standard TD update for stage 1
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        # Calculate subjective Prediction Error for Stage 2
+        # Note: We ignore the pre-calculated delta_stage2 variable to apply sensitivity
+        subjective_reward = reward[trial] * reward_sensitivity
+        delta_stage2_subjective = subjective_reward - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2_subjective
+        
+        # Eligibility trace update for stage 1 based on stage 2 outcome (assuming lambda=1 for simplicity here)
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage2_subjective
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: STAI-Dependent Failure Over-learning
+This model tests the hypothesis that anxious individuals react more strongly to negative outcomes (omission of reward) than positive ones. It implements a "Failure Boost" where the learning rate is amplified specifically when the reward is 0.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    STAI-Dependent Failure Over-learning.
+    
+    This model assumes that anxiety modulates learning specifically from 
+    unrewarded trials (Reward = 0). Anxious participants may have a higher 
+    learning rate for failures ("I must avoid this") compared to successes.
+    
+    Parameters:
+    learning_rate: [0, 1] - Base learning rate for rewarded trials.
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - Model-based weight.
+    fail_boost_base: [0, 5] - Base multiplier for learning rate when Reward=0.
+    stai_fail_mod: [-1, 1] - How STAI increases the failure boost.
+    """
+    learning_rate, beta, w, fail_boost_base, stai_fail_mod = model_parameters
+    n_trials = len(action_1)
+    participant_stai = stai[0]
+
+    # Calculate the multiplier for learning rate on failure trials
+    fail_multiplier = fail_boost_base + (stai_fail_mod * participant_stai)
+    fail_multiplier = np.clip(fail_multiplier, 0.5, 5.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        # Determine effective learning rate for this trial
+        if reward[trial] == 0:
+            current_lr = learning_rate * fail_multiplier
+            # Clip to keep it stable
+            current_lr = np.clip(current_lr, 0, 1.0)
+        else:
+            current_lr = learning_rate
+            
+        q_stage2_mf[state_idx, action_2[trial]] += current_lr * delta_stage2
+        
+        # Stage 1 also learns from Stage 2 RPE (MF path)
+        q_stage1_mf[action_1[trial]] += current_lr * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: STAI-Modulated Stage 1 Learning Rate
+This model separates the learning process into "Planning" (Stage 1) and "Outcome" (Stage 2). It hypothesizes that anxiety specifically disrupts (or enhances) the learning of the first-stage values (Spaceships), potentially due to the cognitive load of integrating the transition structure, while second-stage learning (Aliens) remains more reflexive.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    STAI-Modulated Stage 1 Learning Rate.
+    
+    This model decouples the learning rates for Stage 1 (Spaceships) and 
+    Stage 2 (Aliens). It hypothesizes that STAI specifically modulates 
+    how quickly participants update values for the first stage choices, 
+    independent of how they learn about the aliens.
+    
+    Parameters:
+    lr_stage2: [0, 1] - Fixed learning rate for the second stage (Aliens).
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - Model-based weight.
+    lr_stage1_base: [0, 1] - Base learning rate for Stage 1.
+    stai_lr1_mod: [-1, 1] - How STAI modulates Stage 1 learning rate.
+    """
+    lr_stage2, beta, w, lr_stage1_base, stai_lr1_mod = model_parameters
+    n_trials = len(action_1)
+    participant_stai = stai[0]
+
+    # Calculate specific Stage 1 Learning Rate
+    lr_stage1 = lr_stage1_base + (stai_lr1_mod * participant_stai)
+    lr_stage1 = np.clip(lr_stage1, 0.0, 1.0)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        # Use the STAI-modulated learning rate here
+        q_stage1_mf[action_1[trial]] += lr_stage1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        # Use the fixed Stage 2 learning rate here
+        q_stage2_mf[state_idx, action_2[trial]] += lr_stage2 * delta_stage2
+        
+        # For the eligibility trace (updating Stage 1 based on Stage 2 result),
+        # we also use the Stage 1 specific learning rate.
+        q_stage1_mf[action_1[trial]] += lr_stage1 * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

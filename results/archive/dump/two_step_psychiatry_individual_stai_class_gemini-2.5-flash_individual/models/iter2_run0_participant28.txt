@@ -1,0 +1,188 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, particularly considering their high anxiety score (0.6625).
+
+### Model 1: Model-Based RL with Anxiety-Modulated Transition Learning
+
+This model proposes that participants learn both second-stage Q-values (model-free) and an explicit model of the environment's transition probabilities (model-based). High anxiety is hypothesized to increase the general learning rate for these transition probabilities. This could reflect a heightened vigilance or sensitivity to environmental dynamics under stress, leading participants to more rapidly update their beliefs about how their first-stage choices lead to specific planets. First-stage choices are then made by combining the learned transition model with the expected values of the second-stage options.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Model-Based RL with Anxiety-Modulated Transition Learning.
+    This model assumes participants learn both second-stage Q-values (model-free)
+    and an explicit model of the environment's transition probabilities.
+    High anxiety is hypothesized to increase the general learning rate for these
+    transition probabilities, making the participant more sensitive to how spaceships
+    lead to planets. Stage-1 choices are then based on the expected value derived
+    from this learned transition model and the current second-stage Q-values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for second-stage Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    alpha_trans_base: [0, 1] - Base learning rate for transition probabilities.
+    alpha_trans_stai_mod: [0, 1] - Modulatory parameter for STAI on transition learning rate.
+                                   A positive value means higher anxiety increases transition learning.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_trans_base, self.alpha_trans_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective transition learning rate, modulated by STAI
+        self.eff_alpha_trans = np.clip(self.alpha_trans_base + self.alpha_trans_stai_mod * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values: Q2 is model-free TD, T is learned, Q1 is model-based.
+        """
+        # 1. Update second-stage Q-values (model-free TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # 2. Update transition probabilities (model learning)
+        # Update the observed transition
+        self.T[action_1, state] = (1 - self.eff_alpha_trans) * self.T[action_1, state] + self.eff_alpha_trans * 1.0
+        # For other states from the same action, their probability should decrease
+        other_state = 1 - state
+        self.T[action_1, other_state] = (1 - self.eff_alpha_trans) * self.T[action_1, other_state] + self.eff_alpha_trans * 0.0
+        
+        # Ensure probabilities sum to 1 (renormalize)
+        self.T[action_1] /= np.sum(self.T[action_1])
+
+        # 3. Update first-stage Q-values (model-based)
+        # Q1(a1) = sum_s (T(s|a1) * max_a2(Q2(s, a2)))
+        for a1_idx in range(self.n_choices):
+            expected_future_value = 0
+            for s_idx in range(self.n_states):
+                # Maximize over second-stage actions for the given state
+                max_q2_s = np.max(self.q_stage2[s_idx, :])
+                expected_future_value += self.T[a1_idx, s_idx] * max_q2_s
+            self.q_stage1[a1_idx] = expected_future_value # Direct assignment for model-based
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Asymmetric Learning Rates with Anxiety-Modulated Negative Learning
+
+This model proposes that participants update their value estimates with different learning rates depending on whether the outcome was better or worse than expected (positive or negative reward prediction error, RPE). Specifically, high anxiety is hypothesized to increase the learning rate for negative RPEs. This makes participants more sensitive to worse-than-expected outcomes, leading to faster adjustments away from options that yield failures, consistent with an anxiety-driven avoidance strategy.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Asymmetric Learning Rates with Anxiety-Modulated Negative Learning.
+    This model posits that participants learn from positive and negative reward
+    prediction errors (RPEs) with different learning rates. High anxiety is
+    hypothesized to specifically increase the learning rate for negative RPEs,
+    making participants more sensitive to worse-than-expected outcomes and
+    leading to faster adjustments away from options that yield failures.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive RPEs.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    alpha_neg_base: [0, 1] - Base learning rate for negative RPEs.
+    alpha_neg_stai_mod: [0, 1] - Modulatory parameter for STAI on negative learning rate.
+                                 A positive value means higher anxiety increases negative learning.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.beta, self.alpha_neg_base, self.alpha_neg_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective negative learning rate, modulated by STAI
+        self.eff_alpha_neg = np.clip(self.alpha_neg_base + self.alpha_neg_stai_mod * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using asymmetric learning rates for positive and negative RPEs.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.eff_alpha_neg * delta_2
+        
+        # Stage 1 update
+        # For stage 1, the RPE is the difference between the observed value (Q2) and the expected value (Q1)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += self.eff_alpha_neg * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Differential Transition Learning Rates Modulated by Anxiety for Rare Events
+
+This model posits that participants build an explicit model of the environment's transition probabilities, but they distinguish between common transitions (e.g., Spaceship A to Planet X) and rare transitions (e.g., Spaceship A to Planet Y). High anxiety is hypothesized to specifically increase the learning rate for *rare* transitions. This makes participants hypervigilant and quicker to update their beliefs about unexpected paths, a common finding in anxiety research (hyper-attention to novelty or threat). Stage 1 choices are then purely model-based, leveraging these differentially learned transition probabilities and the second-stage Q-values.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Differential Transition Learning Rates Modulated by Anxiety for Rare Events.
+    This model proposes that participants build an explicit model of the environment's
+    transition probabilities, distinguishing between common and rare transitions.
+    High anxiety is hypothesized to specifically increase the learning rate for *rare*
+    transitions, making participants hypervigilant and quicker to update their beliefs
+    about unexpected paths. Stage 1 choices are purely model-based, using these
+    learned, differentially updated transition probabilities and stage 2 Q-values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for second-stage Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    alpha_trans_common: [0, 1] - Learning rate for common transitions (A->X, U->Y).
+    alpha_rare_base: [0, 1] - Base learning rate for rare transitions (A->Y, U->X).
+    alpha_rare_stai_mod: [0, 1] - Modulatory parameter for STAI on rare transition learning rate.
+                                  A positive value means higher anxiety increases rare transition learning.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_trans_common, self.alpha_rare_base, self.alpha_rare_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective rare transition learning rate, modulated by STAI
+        self.eff_alpha_rare = np.clip(self.alpha_rare_base + self.alpha_rare_stai_mod * self.stai, 0, 1)
+        
+        # Define common and rare transition types for easy lookup
+        # (action_1, state) -> is_common_transition
+        self.is_common_trans = {
+            (0, 0): True,   # Spaceship A (0) to Planet X (0)
+            (0, 1): False,  # Spaceship A (0) to Planet Y (1)
+            (1, 0): False,  # Spaceship U (1) to Planet X (0)
+            (1, 1): True    # Spaceship U (1) to Planet Y (1)
+        }
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values: Q2 is model-free TD, T is learned with differential rates, Q1 is model-based.
+        """
+        # 1. Update second-stage Q-values (model-free TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # 2. Update transition probabilities (model learning with differential rates)
+        alpha_trans_current = self.eff_alpha_rare if not self.is_common_trans[(action_1, state)] else self.alpha_trans_common
+
+        # Update the observed transition
+        self.T[action_1, state] = (1 - alpha_trans_current) * self.T[action_1, state] + alpha_trans_current * 1.0
+        # For other states from the same action, their probability should decrease
+        other_state = 1 - state
+        self.T[action_1, other_state] = (1 - alpha_trans_current) * self.T[action_1, other_state] + alpha_trans_current * 0.0
+        
+        # Ensure probabilities sum to 1 (renormalize)
+        self.T[action_1] /= np.sum(self.T[action_1])
+
+        # 3. Update first-stage Q-values (purely model-based)
+        # Q1(a1) = sum_s (T(s|a1) * max_a2(Q2(s, a2)))
+        for a1_idx in range(self.n_choices):
+            expected_future_value = 0
+            for s_idx in range(self.n_states):
+                max_q2_s = np.max(self.q_stage2[s_idx, :]) # Maximize over second-stage actions
+                expected_future_value += self.T[a1_idx, s_idx] * max_q2_s
+            self.q_stage1[a1_idx] = expected_future_value # Direct assignment for model-based
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

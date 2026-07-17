@@ -1,0 +1,212 @@
+Here are 3 new cognitive models implemented as Python functions.
+
+### Model 1: Anxiety-Modulated Surprise Reaction
+This model hypothesizes that anxiety modulates how participants react to "surprising" (rare) transitions. While a standard agent might maintain a stable balance between Model-Based (MB) and Model-Free (MF) control, this model suggests that when an anxious participant experiences a rare transition (a prediction error in the transition structure), they lose confidence in their internal model and temporarily revert to Model-Free (habitual) control on the subsequent trial.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Surprise Reaction Model.
+    
+    Hypothesis: High anxiety leads to a 'reactive' shift away from Model-Based (MB) control 
+    following a rare transition (surprise). The agent reverts to Model-Free (MF) habits 
+    when the internal model's predictions fail.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w_base: [0, 1] Baseline mixing weight (0=MF, 1=MB).
+    - surprise_reactivity: [0, 1] How strongly STAI reduces 'w' after a rare transition.
+    """
+    learning_rate, beta, w_base, surprise_reactivity = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track if the previous trial was a rare transition
+    last_trial_was_rare = False
+
+    for trial in range(n_trials):
+        
+        # Calculate dynamic w based on previous surprise and anxiety
+        current_w = w_base
+        if last_trial_was_rare:
+            # Reduce MB weight proportional to anxiety
+            current_w = w_base * (1.0 - (stai_score * surprise_reactivity))
+            # Ensure w stays in bounds
+            if current_w < 0: current_w = 0
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Combine MB and MF using the dynamic w
+        q_net = current_w * q_stage1_mb + (1 - current_w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Determine if this trial was rare for the next iteration
+        # Common: Action 0 -> State 0, Action 1 -> State 1
+        # Rare: Action 0 -> State 1, Action 1 -> State 0
+        if action_1[trial] == state_idx:
+            last_trial_was_rare = False
+        else:
+            last_trial_was_rare = True
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Pessimistic Planning Model
+This model modifies the Model-Based planning step. Standard MB learning assumes the agent will choose the best option at Stage 2 (`max(Q_stage2)`). This model hypothesizes that anxious individuals engage in "worst-case scenario" simulation. Instead of planning based solely on the maximum potential reward, they incorporate the minimum potential reward of the destination state, effectively devaluing planets that have high variance (one good alien, one bad alien).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Pessimistic Planning Model.
+    
+    Hypothesis: Anxiety introduces pessimism into the Model-Based valuation. 
+    Instead of assuming they will optimally choose the best alien (max Q) at Stage 2, 
+    anxious agents partially weight the worst alien (min Q), devaluing risky states.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Mixing weight.
+    - pessimism_factor: [0, 1] Weight of the 'worst-case' outcome in planning, scaled by STAI.
+    """
+    learning_rate, beta, w, pessimism_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    # Calculate the effective pessimism weight for this participant
+    rho = pessimism_factor * stai_score
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        # Standard MB uses max(Q), here we use a weighted average of max and min
+        max_vals = np.max(q_stage2_mf, axis=1)
+        min_vals = np.min(q_stage2_mf, axis=1)
+        
+        # The value of the state is a mix of the best case and worst case
+        pessimistic_values = (1 - rho) * max_vals + rho * min_vals
+        
+        q_stage1_mb = transition_matrix @ pessimistic_values
+        
+        # Standard mixing
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Induced Failure Suppression
+This model focuses on how anxiety affects learning from negative outcomes. While some theories suggest anxiety increases sensitivity to loss, others suggest it causes "freezing" or "learned helplessness" where the agent fails to update their beliefs effectively after a failure (Reward = 0). This model implements the latter: anxiety dampens the learning rate specifically when no gold is received.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Failure Suppression Model.
+    
+    Hypothesis: Anxiety causes a 'freezing' of belief updates in the face of negative outcomes 
+    (Reward = 0). Anxious participants update their Q-values less when they fail compared 
+    to when they succeed, exhibiting a form of information avoidance or helplessness.
+    
+    Parameters:
+    - lr_base: [0, 1] Base learning rate for positive outcomes.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Mixing weight.
+    - failure_suppression: [0, 1] Percentage reduction of learning rate on failure, scaled by STAI.
+    """
+    lr_base, beta, w, failure_suppression = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Determine effective learning rate for this trial
+        current_lr = lr_base
+        if reward[trial] == 0:
+            # Reduce learning rate if outcome was negative, based on anxiety
+            suppression = failure_suppression * stai_score
+            current_lr = lr_base * (1.0 - suppression)
+            if current_lr < 0: current_lr = 0
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += current_lr * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

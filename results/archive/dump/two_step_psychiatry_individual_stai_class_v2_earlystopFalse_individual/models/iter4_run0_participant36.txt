@@ -1,0 +1,147 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in the two-step task.
+
+### Model 1: Anxiety-Modulated Credit Assignment Deficit
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety impairs "Credit Assignment" to the first stage.
+    High anxiety individuals may struggle to propagate information from the outcome (Stage 2) 
+    back to the initial choice (Stage 1), effectively decoupling the two stages. 
+    This model posits that the learning rate for Stage 1 is attenuated by STAI, 
+    while Stage 2 learning (bandit task) remains intact.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Base learning rate (for Stage 2)
+    beta: [0, 10]        # Inverse temperature
+    atten_k: [0, 10]     # Attenuation factor for Stage 1 learning
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.atten_k = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate Stage 1 specific learning rate
+        # As STAI increases, alpha_stage1 decreases relative to alpha
+        self.alpha_stage1 = self.alpha / (1.0 + self.atten_k * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (Standard)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (Attenuated by Anxiety)
+        # We use the value of the chosen stage 2 state/action as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Attentional Lapses
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases "Attentional Lapses" (Noise).
+    Instead of simply changing the softmax temperature (which preserves rank ordering), 
+    anxiety might cause momentary lapses in attention where the participant chooses 
+    randomly. This is modeled as an epsilon-greedy mixture where the epsilon (lapse rate) 
+    scales with STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature for non-random choices
+    lapse_k: [0, 1]     # Scaling factor for lapse rate (epsilon = lapse_k * STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lapse_k = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate lapse rate epsilon
+        self.epsilon = np.clip(self.lapse_k * self.stai, 0.0, 1.0)
+
+    def mixture_policy(self, values: np.ndarray) -> np.ndarray:
+        # Standard Softmax probability
+        softmax_probs = self.softmax(values, self.beta)
+        
+        # Uniform random probability
+        random_probs = np.ones_like(values) / len(values)
+        
+        # Mixture
+        return (1 - self.epsilon) * softmax_probs + self.epsilon * random_probs
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.mixture_policy(self.q_stage1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.mixture_policy(self.q_stage2[state])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Hyper-Vigilant Model-Based Learning
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety drives hyper-vigilant updating of the transition model.
+    While standard Model-Based (MB) agents might use a fixed transition matrix, 
+    anxious individuals might constantly update their internal model of the 
+    spaceship-planet transitions, reacting strongly to rare transitions as if 
+    the rules have changed. This model implements a Model-Based controller where 
+    the transition learning rate scales with STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate for Stage 2 values (aliens)
+    beta: [0, 10]        # Inverse temperature
+    trans_lr_k: [0, 1]   # Transition learning rate scaler
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.trans_lr_k = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize estimated transition matrix from the prior counts provided in base
+        # Shape: (n_choices_stage1, n_states_stage2)
+        self.T_est = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+        
+        # Transition learning rate
+        self.lr_trans = np.clip(self.trans_lr_k * self.stai, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based Calculation:
+        # Q_MB(a1) = Sum_s2 [ P(s2|a1) * max_a2 Q_stage2(s2, a2) ]
+        
+        # Compute max value for each state (V_stage2)
+        # q_stage2 shape is (n_states, n_choices_stage2)
+        v_stage2 = np.max(self.q_stage2, axis=1) 
+        
+        # Compute MB values for stage 1
+        # T_est shape is (n_choices_stage1, n_states)
+        q_mb = self.T_est @ v_stage2
+        
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 Values (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Transition Matrix (Hyper-vigilance)
+        # We observed transition: action_1 -> state
+        # Update row for action_1
+        # One-hot encoding of the observed state
+        observed_trans = np.zeros(self.n_states)
+        observed_trans[state] = 1.0
+        
+        # Delta rule for transitions
+        # T_new = T_old + lr * (Observed - T_old)
+        self.T_est[action_1] += self.lr_trans * (observed_trans - self.T_est[action_1])
+        
+        # Ensure probabilities sum to 1 (numerical stability)
+        self.T_est[action_1] /= np.sum(self.T_est[action_1])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

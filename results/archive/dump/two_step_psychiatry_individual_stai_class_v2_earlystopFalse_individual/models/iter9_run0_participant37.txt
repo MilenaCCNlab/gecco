@@ -1,0 +1,140 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Modulated Cumulative Habit (Stage 2)
+This model hypothesizes that anxious participants rely on simple, long-term frequency heuristics ("habits") to guide decisions in the second stage, reducing the cognitive load of value estimation. Unlike "stickiness" which usually refers to repeating the very last choice, this model tracks the cumulative history of choices and biases the participant towards the most familiar aliens.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Cumulative Habit (Stage 2).
+    Anxious participants may rely on simple, long-term frequency heuristics ("habits") 
+    to guide decisions in the second stage, reducing the cognitive load of value estimation.
+    This model tracks the cumulative count of choices for each alien and adds a bias 
+    proportional to these counts, modulated by anxiety.
+    
+    Mechanism:
+    Track N(s, a) = number of times action a was chosen in state s.
+    Policy S2: Softmax(Q_S2(s, :) + w * STAI * (N(s, :) / sum(N(s, :))))
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    habit_w: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.habit_w = model_parameters
+
+    def init_model(self) -> None:
+        # Track cumulative counts of choices in stage 2
+        self.habit_counts = np.zeros((self.n_states, self.n_choices))
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Calculate normalized habit strength
+        total_counts = np.sum(self.habit_counts[state])
+        if total_counts > 0:
+            habit_bias = self.habit_counts[state] / total_counts
+        else:
+            habit_bias = np.zeros(self.n_choices)
+            
+        # Add habit bias to Q-values for selection, scaled by anxiety
+        biased_values = self.q_stage2[state] + (self.habit_w * self.stai * habit_bias)
+        return self.softmax(biased_values, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Update habit counts
+        self.habit_counts[state, action_2] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Reference Point Shift
+This model hypothesizes that anxiety shifts the internal reference point for evaluating rewards. Instead of viewing 0 coins as neutral and 1 coin as a gain, high anxiety might shift the baseline upwards, causing 0 coins to be perceived as a loss (negative value) and 1 coin as a smaller gain. This fundamentally changes the asymptotic values the model learns.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Reference Point Shift.
+    Anxious participants may perceive outcomes relative to a shifted internal reference point.
+    Instead of viewing 0 coins as neutral and 1 coin as a gain, anxiety might shift the 
+    baseline up, making 0 coins perceived as a loss (negative value) and 1 coin as a smaller gain.
+    This effectively changes the asymptote of learned Q-values.
+    
+    Mechanism:
+    Effective Reward R_eff = Reward - (ref_shift * STAI)
+    Update Q-values using R_eff.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    ref_shift: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.ref_shift = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective reward based on anxiety-shifted reference point
+        r_eff = reward - (self.ref_shift * self.stai)
+        
+        # Update Stage 2 with effective reward
+        delta_2 = r_eff - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Stage 1 Generalization
+This model extends the "generalization" hypothesis to the first stage of the task. It proposes that anxious participants blur the distinction between the two spaceships. When they observe a value outcome from one path, they partially update the unchosen spaceship in the same direction, assuming a global correlation in environmental quality (e.g., "it's a lucky/unlucky day").
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Stage 1 Generalization.
+    Anxious participants may blur the distinction between the two spaceships (Stage 1 options). 
+    When they observe a reward outcome, they update the value of the chosen spaceship, 
+    but also "leak" some of that update to the unchosen spaceship, assuming a correlation 
+    in spaceship quality.
+    
+    Mechanism:
+    Update Q_S1(chosen) normally.
+    Update Q_S1(unchosen) += alpha * (gen_s1 * STAI) * (Q_S2(chosen_path) - Q_S1(unchosen))
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    gen_s1: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gen_s1 = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update for chosen action
+        val_s2 = self.q_stage2[state, action_2]
+        delta_1 = val_s2 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Generalization update for unchosen Stage 1 action
+        unchosen_a1 = 1 - action_1
+        gen_rate = self.gen_s1 * self.stai
+        
+        # We update the unchosen action towards the SAME outcome value observed
+        # This implies the participant believes the other spaceship would have yielded a similar result
+        delta_gen = val_s2 - self.q_stage1[unchosen_a1]
+        self.q_stage1[unchosen_a1] += self.alpha * gen_rate * delta_gen
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

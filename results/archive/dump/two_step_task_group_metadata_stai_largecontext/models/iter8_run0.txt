@@ -1,0 +1,227 @@
+Here are the 3 cognitive models based on the hypotheses of Valence Asymmetry, Subjective Model Corruption, and Stage-Specific Noise.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Alters Reward Perception (Valence Asymmetry).
+    
+    This model posits that anxious individuals learn differently from positive outcomes (coins)
+    versus negative outcomes (omissions). Specifically, STAI modulates the learning rate 
+    for negative outcomes (reward=0), reflecting a hypersensitivity to failure.
+    
+    Parameters:
+    learning_rate: [0, 1] - Base learning rate for positive rewards.
+    inverse_temperature: [0, 10] - Softmax parameter (beta).
+    mixing_weight: [0, 1] - Balance between Model-Based (1) and Model-Free (0).
+    neg_learning_bias: [0, 1] - How much STAI amplifies learning from negative outcomes.
+    
+    Mechanism:
+    alpha_pos = learning_rate
+    alpha_neg = learning_rate + (stai * neg_learning_bias)
+    (alpha_neg is clipped at 1.0)
+    """
+    learning_rate, inverse_temperature, mixing_weight, neg_learning_bias = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Define asymmetric learning rates
+    alpha_pos = learning_rate
+    # High anxiety increases the learning rate for negative outcomes (hypersensitivity to loss)
+    alpha_neg = min(1.0, learning_rate + (stai_score * neg_learning_bias))
+
+    # Transition matrix (fixed objective reality)
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values
+    q_stage1_mf = np.zeros(2) # Model-free values for stage 1
+    q_stage2_mf = np.zeros((2, 2)) # Model-free values for stage 2 (State x Action)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        # Model-Based Calculation
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Hybrid Value
+        q_net_stage1 = (mixing_weight * q_stage1_mb) + ((1 - mixing_weight) * q_stage1_mf)
+        
+        # Softmax Stage 1
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        state_idx = state[trial]
+        q_current_stage2 = q_stage2_mf[state_idx]
+        
+        # Softmax Stage 2
+        exp_q2 = np.exp(inverse_temperature * q_current_stage2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        # Determine effective learning rate based on valence
+        r = reward[trial]
+        effective_alpha = alpha_pos if r > 0 else alpha_neg
+        
+        # Update Stage 1 (TD-0)
+        # Note: Standard TD uses the value of the next state, here we use Q-value of chosen stage 2 action
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += effective_alpha * delta_stage1
+        
+        # Update Stage 2
+        delta_stage2 = r - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += effective_alpha * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Degrades State Representation (Transition Uncertainty).
+    
+    This model assumes that anxiety corrupts the internal model of the environment.
+    While the objective transition probability is 0.7, anxious individuals perceive 
+    the world as more volatile or uncertain, flattening their subjective transition 
+    matrix toward 0.5 (randomness).
+    
+    Parameters:
+    learning_rate: [0, 1] - Standard Q-learning rate.
+    inverse_temperature: [0, 10] - Softmax parameter.
+    mixing_weight: [0, 1] - Weight for Model-Based system.
+    uncertainty_factor: [0, 0.2] - How much STAI flattens the transition matrix.
+                                   Max 0.2 ensures prob doesn't drop below 0.5.
+    
+    Mechanism:
+    subjective_prob = 0.7 - (stai * uncertainty_factor)
+    The MB system uses this corrupted matrix, while the MF system learns from experience.
+    """
+    learning_rate, inverse_temperature, mixing_weight, uncertainty_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate Subjective Transition Matrix
+    # If STAI is high, the agent believes transitions are more random (closer to 0.5)
+    # Base is 0.7. If STAI=1 and factor=0.2, subjective_p becomes 0.5.
+    subjective_p = 0.7 - (stai_score * uncertainty_factor)
+    subjective_matrix = np.array([[subjective_p, 1-subjective_p], 
+                                  [1-subjective_p, subjective_p]])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        # Model-Based Calculation using SUBJECTIVE matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = subjective_matrix @ max_q_stage2
+        
+        # Hybrid Value
+        q_net_stage1 = (mixing_weight * q_stage1_mb) + ((1 - mixing_weight) * q_stage1_mf)
+        
+        # Softmax Stage 1
+        exp_q1 = np.exp(inverse_temperature * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        state_idx = state[trial]
+        q_current_stage2 = q_stage2_mf[state_idx]
+        
+        # Softmax Stage 2
+        exp_q2 = np.exp(inverse_temperature * q_current_stage2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        # Standard TD updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hypothesis: Anxiety Induces Stage-Specific Noise (Panic).
+    
+    This model posits that anxiety affects the two stages differently. While the agent
+    may plan deliberately in Stage 1, high anxiety causes "panic" or reduced precision
+    in Stage 2 (the reaction phase).
+    
+    Parameters:
+    learning_rate: [0, 1] - Standard Q-learning rate.
+    beta_stage1: [0, 10] - Inverse temperature for the first choice (planning).
+    mixing_weight: [0, 1] - Weight for Model-Based system.
+    panic_scale: [0, 5] - How much STAI reduces precision (beta) at Stage 2.
+    
+    Mechanism:
+    beta_stage2 = beta_stage1 / (1 + (stai * panic_scale))
+    High anxiety leads to a lower beta_stage2 (more random/noisy choices at the alien step),
+    while Stage 1 remains precise.
+    """
+    learning_rate, beta_stage1, mixing_weight, panic_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate Stage 2 Beta
+    # As STAI increases, the denominator increases, reducing beta_stage2 (more noise)
+    beta_stage2 = beta_stage1 / (1.0 + (stai_score * panic_scale))
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Decision ---
+        # Model-Based Calculation
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Hybrid Value
+        q_net_stage1 = (mixing_weight * q_stage1_mb) + ((1 - mixing_weight) * q_stage1_mf)
+        
+        # Softmax Stage 1 (Uses beta_stage1)
+        exp_q1 = np.exp(beta_stage1 * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # --- Stage 2 Decision ---
+        state_idx = state[trial]
+        q_current_stage2 = q_stage2_mf[state_idx]
+        
+        # Softmax Stage 2 (Uses beta_stage2 - the "Panic" beta)
+        exp_q2 = np.exp(beta_stage2 * q_current_stage2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # --- Learning ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

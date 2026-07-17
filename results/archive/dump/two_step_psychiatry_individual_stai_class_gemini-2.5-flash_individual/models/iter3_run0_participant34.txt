@@ -1,0 +1,166 @@
+Here are three new cognitive models, each proposing a different hypothesis about how the participant makes decisions, especially considering their high anxiety (STAI score of 0.9625).
+
+---
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Model-Based vs. Model-Free Arbitration.
+    This model proposes that participants arbitrate between model-based
+    (planning using knowledge of transitions) and model-free (habitual,
+    Q-value-driven) control for Stage 1 decisions. High anxiety (STAI score)
+    shifts this arbitration towards increased reliance on model-free,
+    habitual control by reducing the weight given to model-based values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    w_base: [0, 1] (Base weight for model-based control)
+    stai_w_mod: [0, 1] (Factor by which STAI reduces model-based weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_w_mod = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # self.T (transition probabilities) is already available from CognitiveModelBase
+        # self.q_stage1 is the model-free value for stage 1 actions
+        # self.q_stage2 is the model-free value for stage 2 actions
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities by arbitrating between model-based
+        and model-free values, with the arbitration weight modulated by STAI.
+        """
+        # 1. Compute Model-Based Q-values for Stage 1
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Q_MB(a1) = sum_s T(s|a1) * max_a2 Q_MF(s, a2)
+            # max_a2 Q_MF(s, a2) is the expected value of the best action at stage 2 for state s
+            expected_next_state_values = np.max(self.q_stage2, axis=1)
+            
+            # self.T[a1] gives the probabilities of transitioning to states (planets) from action a1 (spaceship)
+            q_mb[a1] = np.sum(self.T[a1] * expected_next_state_values)
+
+        # 2. Determine the arbitration weight 'w' based on STAI
+        # Higher STAI reduces 'w', favoring model-free control
+        w_modulated = self.w_base - (self.stai * self.stai_w_mod)
+        # Clip w to be within [0, 1] to ensure valid weighting
+        w_final = np.clip(w_modulated, 0, 1)
+
+        # 3. Combine Model-Based and Model-Free Q-values
+        # self.q_stage1 holds the model-free values
+        q_stage1_combined = w_final * q_mb + (1 - w_final) * self.q_stage1
+        
+        return self.softmax(q_stage1_combined, self.beta)
+
+    # The value_update and policy_stage2 methods from the base class are used,
+    # as the arbitration only affects the stage 1 policy, not the underlying learning of Q-values.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Loss Aversion in Learning.
+    This model proposes that participants exhibit loss aversion, meaning
+    negative prediction errors (when outcomes are worse than expected)
+    have a stronger impact on value updates than positive prediction errors.
+    High anxiety (STAI score) amplifies this loss aversion, making the
+    participant more sensitive to unexpected non-rewards.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Softmax inverse temperature)
+    lambda_loss_base: [1, 5] (Base loss aversion factor, must be >= 1)
+    stai_lambda_loss_boost: [0, 2] (Factor by which STAI increases loss aversion)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_loss_base, self.stai_lambda_loss_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using TD learning, incorporating anxiety-modulated loss aversion.
+        Negative prediction errors are amplified by lambda_loss.
+        """
+        # Calculate anxiety-modulated loss aversion factor
+        lambda_loss = self.lambda_loss_base + (self.stai * self.stai_lambda_loss_boost)
+        # Ensure lambda_loss is at least 1 (no less aversion than neutral)
+        lambda_loss = max(1.0, lambda_loss)
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 < 0: # If it's a negative prediction error (a "loss")
+            delta_2 *= lambda_loss # Amplify its magnitude
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # The delta for stage 1 is based on the updated value of the next state/action
+        # This delta_1 can also be negative.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 < 0: # If it's a negative prediction error
+            delta_1 *= lambda_loss # Amplify its magnitude
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Predictability Seeking.
+    This model proposes that participants with high anxiety exhibit a stronger
+    preference for predictable outcomes. In the two-step task, choosing a
+    spaceship that commonly leads to a specific planet (e.g., Spaceship A to Planet X)
+    offers higher predictability. High anxiety (STAI score) amplifies a bonus
+    added to the Q-value of such predictable first-stage actions, making them
+    more attractive.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Softmax inverse temperature)
+    predictability_bonus_base: [0, 1] (Base bonus for choosing a predictable first-stage action)
+    stai_predictability_boost: [0, 1] (Factor by which STAI amplifies predictability bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.predictability_bonus_base, self.stai_predictability_boost = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # The base class's self.T provides transition probabilities.
+        # self.T[action, state] > 0.5 indicates a common transition.
+        # For this task, spaceship 0 (A) commonly travels to planet 0 (X),
+        # and spaceship 1 (U) commonly travels to planet 1 (Y).
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, adding a predictability bonus
+        to actions that commonly lead to a specific planet, amplified by STAI.
+        """
+        q_stage1_biased = np.copy(self.q_stage1)
+
+        # Calculate the anxiety-amplified predictability bonus
+        predictability_bonus = self.predictability_bonus_base + (self.stai * self.stai_predictability_boost)
+        predictability_bonus = max(0.0, predictability_bonus) # Ensure bonus is non-negative
+
+        # Apply bonus to actions that lead to their common state
+        # Action 0 commonly leads to State 0 (Planet X) based on task description and self.T[0,0]
+        if self.T[0, 0] > 0.5: # Explicitly check for commonality
+            q_stage1_biased[0] += predictability_bonus
+        
+        # Action 1 commonly leads to State 1 (Planet Y) based on task description and self.T[1,1]
+        if self.T[1, 1] > 0.5: # Explicitly check for commonality
+            q_stage1_biased[1] += predictability_bonus
+        
+        return self.softmax(q_stage1_biased, self.beta)
+
+    # The value_update and policy_stage2 methods from the base class are used,
+    # as the predictability bonus only affects the stage 1 policy.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

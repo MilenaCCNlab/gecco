@@ -1,0 +1,173 @@
+As a cognitive scientist and Python programmer, I will propose three distinct cognitive models to explain this participant's decision-making process. Given the participant's medium anxiety score (STAI = 0.325), each model will incorporate anxiety as a key modulator of a specific cognitive function, building upon the observation that simple heuristics like perseveration might play a role, but exploring alternative mechanisms.
+
+### Model 1: Anxiety-Biased Arbitration between Planning and Habit
+
+This model tests the hypothesis that anxiety arbitrates the balance between two distinct decision systems: a goal-directed, "model-based" system that uses an internal model of the task to plan, and a simpler, "model-free" habitual system that learns direct action-reward associations. The literature suggests that stress and anxiety can impair the computationally demanding model-based system, leading to a greater reliance on habits.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that decision-making arises from a mix of 
+    a goal-directed (model-based) and a habitual (model-free) system. 
+    Anxiety impairs the computationally expensive model-based system, leading 
+    to more habitual, model-free choices. The weighting parameter `w_base` 
+    controls the baseline reliance on model-based planning, which is then 
+    down-weighted by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for model-free values)
+    beta: [0, 10]      (Softmax inverse temperature)
+    w_base: [0, 1]     (Baseline weight on model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a weighted average of
+        model-based and model-free Q-values.
+        """
+        # 1. Calculate pure model-based values (planning)
+        q_stage1_mb = np.zeros(self.n_choices)
+        # Expected value of each spaceship = sum over planets of [P(planet|spaceship) * V(planet)]
+        q_stage1_mb[0] = self.T[0, 0] * np.max(self.q_stage2[0]) + self.T[0, 1] * np.max(self.q_stage2[1])
+        q_stage1_mb[1] = self.T[1, 0] * np.max(self.q_stage2[0]) + self.T[1, 1] * np.max(self.q_stage2[1])
+
+        # 2. Retrieve model-free values (habitual)
+        # self.q_stage1 is treated as the model-free value, updated by TD learning
+        q_stage1_mf = self.q_stage1
+
+        # 3. Anxiety modulates the weighting between systems
+        # Higher STAI score reduces the weight on the model-based system
+        w_effective = self.w_base * (1 - self.stai)
+        
+        # 4. Combine values and apply softmax
+        q_hybrid = w_effective * q_stage1_mb + (1 - w_effective) * q_stage1_mf
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates the model-free and second-stage values using standard TD learning.
+        Model-based values are computed dynamically from q_stage2 and do not require updates here.
+        """
+        # Stage 2 update (same for both systems)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 model-free update
+        # The value of the first action is updated towards the value of the resulting state
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Enhanced Sensitivity to Negative Outcomes
+
+This model explores the idea that anxiety is associated with a cognitive bias towards negative information. Specifically, it proposes that the participant learns more readily from outcomes that are worse than expected (negative prediction errors) than from those that are better than expected (positive prediction errors). The participant's anxiety level directly amplifies this learning asymmetry.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model assumes anxiety enhances learning from negative events.
+    It uses separate learning rates for positive and negative prediction errors.
+    The learning rate for negative errors (`alpha_neg`) is a sum of a baseline
+    rate (`alpha_pos`) and an additional gain (`alpha_neg_gain`) that is scaled
+    by the participant's STAI score. This makes the individual more sensitive to
+    disappointing outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]       (Learning rate for positive prediction errors)
+    beta: [0, 10]           (Softmax inverse temperature)
+    alpha_neg_gain: [0, 2]  (Anxiety-driven gain for negative learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.beta, self.alpha_neg_gain = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values using different learning rates for positive vs. negative
+        prediction errors, with the negative learning rate modulated by anxiety.
+        """
+        # Determine the effective learning rate for negative prediction errors
+        alpha_neg = self.alpha_pos + self.alpha_neg_gain * self.stai
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update
+        # Using the updated Q-value for the TD target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Aversion to Choice Uncertainty
+
+This model tests the hypothesis that anxiety fosters an aversion to uncertainty, leading to less strategic or "directed" exploration. While random exploration (captured by `beta`) is one strategy, another is to preferentially choose options whose values are most uncertain. This model proposes that anxious individuals are less likely to engage in such uncertainty-driven exploration, preferring known (even if suboptimal) options.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that anxiety reduces directed exploration
+    by making the participant averse to choosing options with uncertain outcomes.
+    It adds an "uncertainty bonus" to each first-stage option, encouraging
+    exploration of less-frequently chosen actions. The magnitude of this bonus,
+    controlled by `epsilon`, is inversely scaled by the STAI score. Higher
+    anxiety leads to a lower bonus and thus less exploration of the unknown.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]      (Softmax inverse temperature for exploitation)
+    epsilon: [0, 5]    (Base exploration bonus parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.epsilon = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a counter for tracking action choices."""
+        # This tracks how many trials it has been since an action was chosen
+        self.trials_since_chosen = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 policy by adding an anxiety-modulated uncertainty
+        bonus to the learned Q-values before applying softmax.
+        """
+        q_effective = self.q_stage1.copy()
+        
+        # Anxiety reduces the tendency to explore uncertain options
+        epsilon_effective = self.epsilon * (1 - self.stai)
+        
+        # Calculate UCB-style exploration bonus
+        # Bonus is proportional to how long it's been since an option was picked
+        # Add 1 to trial to avoid log(0); add 1e-6 to denominator for stability
+        bonus = epsilon_effective * np.sqrt(
+            np.log(self.trial + 1) / (self.trials_since_chosen + 1e-6)
+        )
+        
+        q_effective += bonus
+        return self.softmax(q_effective, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update the trial counters after a choice has been made.
+        """
+        super().post_trial(action_1, state, action_2, reward)
+        # Increment counter for the action NOT chosen
+        self.trials_since_chosen[1 - action_1] += 1
+        # Reset counter for the action that WAS chosen
+        self.trials_since_chosen[action_1] = 0
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

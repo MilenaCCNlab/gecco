@@ -1,0 +1,257 @@
+The participant, scoring 0.2875 on the STAI (low anxiety), exhibits a strong initial preference for spaceship 0.0, often sticking with it even after receiving zero rewards. They eventually explore spaceship 1.0 but quickly revert to 0.0 after mostly unrewarding outcomes. This behavior suggests a combination of factors: potentially a default bias, outcome-dependent persistence, and how they learn about the task's structure. Low anxiety might modulate their sensitivity to negative outcomes, their propensity for exploration, or their ability to learn complex task features like transition probabilities.
+
+Here are three cognitive models proposing different hypotheses for this participant's decision-making, each incorporating their low anxiety level:
+
+### ParticipantModel1: Model-Based Revaluation with STAI-modulated Rare Transition Utility
+
+**HYPOTHESIS:** This model proposes that participants combine model-free (MF) and model-based (MB) learning strategies. The model-based system evaluates the expected future value of stage-1 actions by considering transition probabilities to planets and the best available options on those planets. For this low-anxiety participant, we hypothesize that their low anxiety makes them less averse to or more open to exploiting rare transitions (e.g., Spaceship A going to Planet Y). Specifically, low anxiety boosts the perceived utility or likelihood of a rare transition path when calculating the model-based value of the first-stage choice. This could lead to a more balanced consideration of all potential outcomes, including less common ones, when planning.
+
+**Parameter Bounds:**
+-----------------
+alpha: [0, 1] - Learning rate for Q-values.
+beta: [0, 10] - Inverse temperature for softmax action selection.
+w_mb: [0, 1] - Weight given to the model-based component (0 for pure MF, 1 for pure MB).
+stai_rare_utility_boost: [0, 1] - How much low STAI (1-STAI) boosts the effective utility/likelihood of rare transitions in the model-based calculation.
+
+```python
+import numpy as np
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants combine model-free (MF) and model-based (MB)
+    learning strategies. The model-based system evaluates the expected future value of stage-1 actions.
+    For this low-anxiety participant, low anxiety makes them less averse to or more open to exploiting
+    rare transitions. Specifically, low anxiety boosts the perceived utility or likelihood of a rare
+    transition path when calculating the model-based value of the first-stage choice. This could lead
+    to a more balanced consideration of all potential outcomes, including less common ones, when planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w_mb: [0, 1] - Weight given to the model-based component (0 for pure MF, 1 for pure MB).
+    stai_rare_utility_boost: [0, 1] - How much low STAI (1-STAI) boosts the effective utility/likelihood
+                                       of rare transitions in the model-based calculation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb, self.stai_rare_utility_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using a blend of Model-Free and Model-Based learning.
+        The Model-Based component's transition probabilities are adjusted by STAI for rare transitions.
+        """
+        # Stage 2 update (Model-Free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Blended Model-Free and Model-Based)
+        # Model-Free (MF) value: the reward from the actual state reached
+        mf_value = self.q_stage2[state, action_2]
+
+        # Model-Based (MB) value: expected future value considering all possible transitions
+        mb_expected_future_value = np.zeros(self.n_choices)
+        
+        for a1_idx in range(self.n_choices):
+            # Get the base transition probabilities for this action
+            base_p_common = self.T[a1_idx, a1_idx] # e.g., P(X|A) for A, P(Y|U) for U
+            base_p_rare = self.T[a1_idx, 1 - a1_idx] # e.g., P(Y|A) for A, P(X|U) for U
+
+            # Determine which is the rare transition for this action
+            rare_state_idx = 1 - a1_idx
+
+            # Apply STAI-modulated boost to the rare transition probability
+            # Low STAI (1 - self.stai) increases the boost
+            boost_factor = 1 + (1 - self.stai) * self.stai_rare_utility_boost
+            
+            # Create effective transition probabilities
+            # Boost the rare component, then re-normalize
+            p_eff_common = base_p_common
+            p_eff_rare = base_p_rare * boost_factor
+            
+            # Ensure probabilities don't go negative or sum to more than 1 (before normalization)
+            # Clip boost factor to prevent p_eff_rare from becoming excessively large or small
+            p_eff_rare = np.clip(p_eff_rare, 0, 1) # Max 1 for a single probability
+            
+            # Re-normalize the effective probabilities
+            sum_eff_p = p_eff_common + p_eff_rare
+            if sum_eff_p > 0: # Avoid division by zero
+                p_eff_common /= sum_eff_p
+                p_eff_rare /= sum_eff_p
+            else: # If both are zero, fallback to uniform or original
+                p_eff_common = base_p_common
+                p_eff_rare = base_p_rare
+                if base_p_common + base_p_rare > 0:
+                    p_eff_common /= (base_p_common + base_p_rare)
+                    p_eff_rare /= (base_p_common + base_p_rare)
+                else: # Fallback to uniform if all are zero
+                    p_eff_common = 0.5
+                    p_eff_rare = 0.5
+
+
+            # Calculate MB expected value
+            mb_expected_future_value[a1_idx] = (
+                p_eff_common * np.max(self.q_stage2[a1_idx, :]) +  # Value from common path
+                p_eff_rare * np.max(self.q_stage2[rare_state_idx, :]) # Value from rare path
+            )
+        
+        # Blended Q1 update
+        # Q1 target is a blend of MF (actual outcome) and MB (expected outcome)
+        blended_target = (1 - self.w_mb) * mf_value + self.w_mb * mb_expected_future_value[action_1]
+        delta_1 = blended_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### ParticipantModel2: Reward-Driven Stickiness with STAI-modulated Strength
+
+**HYPOTHESIS:** This model posits that participants develop a "stickiness" or positive bias towards first-stage actions that have recently yielded a reward. This stickiness makes them more likely to repeat that action on subsequent trials. For low-anxiety individuals, this model suggests that this reward-driven stickiness is amplified. This could explain the participant's tendency to persist with Spaceship 0.0, especially after receiving rewards, even if it occasionally leads to zero rewards or rare transitions.
+
+**Parameter Bounds:**
+-----------------
+alpha: [0, 1] - Learning rate for Q-values.
+beta: [0, 10] - Inverse temperature for softmax action selection.
+reward_stickiness_base: [0, 1] - Base strength of the stickiness bias, applied after a reward.
+stai_stickiness_boost: [0, 1] - How much low STAI (1-STAI) increases the reward-driven stickiness.
+
+```python
+import numpy as np
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that participants develop a "stickiness" or positive bias
+    towards first-stage actions that have recently yielded a reward. This stickiness makes
+    them more likely to repeat that action on subsequent trials. For low-anxiety individuals,
+    this model suggests that this reward-driven stickiness is amplified. This could explain
+    the participant's tendency to persist with Spaceship 0.0, especially after receiving
+    rewards, even if it occasionally leads to zero rewards or rare transitions.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    reward_stickiness_base: [0, 1] - Base strength of the stickiness bias, applied after a reward.
+    stai_stickiness_boost: [0, 1] - How much low STAI (1-STAI) increases the reward-driven stickiness.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.reward_stickiness_base, self.stai_stickiness_boost = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, incorporating a reward-driven stickiness bias.
+        """
+        q_biased_stage1 = np.copy(self.q_stage1)
+
+        if self.last_action1 is not None and self.last_reward is not None:
+            if self.last_reward == 1: # Only apply stickiness if the last trial was rewarding
+                # Low STAI (1 - self.stai) boosts the stickiness strength
+                current_stickiness_strength = self.reward_stickiness_base + (1 - self.stai) * self.stai_stickiness_boost
+                current_stickiness_strength = np.clip(current_stickiness_strength, 0, 1) # Ensure within bounds
+                q_biased_stage1[self.last_action1] += current_stickiness_strength
+
+        return self.softmax(q_biased_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### ParticipantModel3: Dynamic Transition Learning with STAI-modulated Rate and Blended Control
+
+**HYPOTHESIS:** This model proposes that participants actively learn and update their understanding of the transition probabilities between the first and second stages. This learned transition model then informs a model-based component of their stage-1 decision-making. Low anxiety, for this participant, is hypothesized to facilitate faster and more accurate learning of these transition dynamics, making their internal model of the environment more adaptable to changes. This improved transition learning, combined with a blend of model-free and model-based control, allows them to better anticipate outcomes.
+
+**Parameter Bounds:**
+-----------------
+alpha_q: [0, 1] - Learning rate for Q-values.
+beta: [0, 10] - Inverse temperature for softmax action selection.
+alpha_trans_base: [0, 1] - Base learning rate for updating transition probabilities.
+stai_trans_learning_boost: [0, 1] - How much low STAI (1-STAI) boosts the transition learning rate.
+w_mb: [0, 1] - Weight given to the model-based component in stage-1 value update.
+
+```python
+import numpy as np
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants actively learn and update their understanding
+    of the transition probabilities between the first and second stages. This learned transition
+    model then informs a model-based component of their stage-1 decision-making. Low anxiety, for
+    this participant, is hypothesized to facilitate faster and more accurate learning of these
+    transition dynamics, making their internal model of the environment more adaptable to changes.
+    This improved transition learning, combined with a blend of model-free and model-based control,
+    allows them to better anticipate outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_q: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    alpha_trans_base: [0, 1] - Base learning rate for updating transition probabilities.
+    stai_trans_learning_boost: [0, 1] - How much low STAI (1-STAI) boosts the transition learning rate.
+    w_mb: [0, 1] - Weight given to the model-based component in stage-1 value update.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_q, self.beta, self.alpha_trans_base, self.stai_trans_learning_boost, self.w_mb = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize learned transition probabilities (T_learned) from the base class's T
+        self.T_learned = np.copy(self.T)
+        
+        # Calculate the effective transition learning rate, boosted by low STAI
+        self.alpha_trans = self.alpha_trans_base + (1 - self.stai) * self.stai_trans_learning_boost
+        self.alpha_trans = np.clip(self.alpha_trans, 0, 1) # Ensure alpha_trans is within [0,1]
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values: Stage 2 Q-values, learned transition probabilities, and then
+        Stage 1 Q-values using a blend of model-free and model-based (with learned T).
+        """
+        # 1. Update Stage 2 Q-values (Model-Free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_q * delta_2
+
+        # 2. Update Learned Transition Probabilities (T_learned)
+        # Create a one-hot vector for the observed transition outcome
+        observed_transition_vector = np.zeros(self.n_states)
+        observed_transition_vector[state] = 1
+
+        # Update the learned transition probabilities for the chosen action
+        # This is a delta-rule like update for probabilities
+        self.T_learned[action_1, :] = (1 - self.alpha_trans) * self.T_learned[action_1, :] + self.alpha_trans * observed_transition_vector
+        
+        # Re-normalize the probabilities for the chosen action to ensure they sum to 1
+        sum_probs = self.T_learned[action_1, :].sum()
+        if sum_probs > 0:
+            self.T_learned[action_1, :] /= sum_probs
+        else: # Fallback if sum is 0 (should not happen with alpha_trans > 0)
+            self.T_learned[action_1, :] = 1.0 / self.n_states # Uniform distribution
+
+        # 3. Update Stage 1 Q-values (Blended Model-Free and Model-Based)
+        # Model-Free (MF) value: the Q-value of the actual outcome state
+        mf_value = self.q_stage2[state, action_2]
+
+        # Model-Based (MB) value: expected future value from action_1, using learned transitions
+        mb_expected_future_value = 0
+        for s_prime_idx in range(self.n_states):
+            # The value of reaching state s_prime is the maximum Q-value achievable from that state
+            mb_expected_future_value += self.T_learned[action_1, s_prime_idx] * np.max(self.q_stage2[s_prime_idx, :])
+        
+        # Blended Q1 target: weighted average of MF and MB values
+        blended_target = (1 - self.w_mb) * mf_value + self.w_mb * mb_expected_future_value
+        
+        # Update Stage 1 Q-value towards the blended target
+        delta_1 = blended_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_q * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

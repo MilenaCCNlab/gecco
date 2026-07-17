@@ -1,0 +1,158 @@
+Here are three new cognitive models to explain the participant's decision-making process.
+
+### Model 1: Anxiety-Amplified Aversive Learning
+
+This model hypothesizes that high anxiety, as indicated by the STAI score, leads to a heightened sensitivity to negative outcomes. Computationally, this is expressed as an increased learning rate specifically for negative prediction errors (when outcomes are worse than expected). This hypersensitivity could cause the participant to overreact to punishments or lack of reward, leading to more volatile value estimates and potentially rigid behavior to avoid previously punished options. The strength of this aversive learning amplification is directly scaled by the participant's anxiety level.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases learning from negative outcomes. This model
+    proposes that the learning rate is asymmetric, with a higher rate for negative
+    prediction errors (aversive events). The degree of this learning amplification
+    for negative events is directly proportional to the participant's STAI score,
+    capturing the idea that anxiety makes one hypersensitive to bad news.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]      (Learning rate for positive prediction errors)
+    beta: [0, 10]         (Inverse temperature for choice stochasticity)
+    stai_sensitivity: [0, 2] (Factor scaling anxiety's effect on aversive learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.beta, self.stai_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values using separate learning rates for positive and negative
+        prediction errors, where the negative learning rate is modulated by anxiety.
+        """
+        # Define an anxiety-modulated learning rate for negative prediction errors
+        alpha_neg = np.clip(self.alpha_pos + self.stai_sensitivity * self.stai, 0, 1)
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Select learning rate based on the sign of the prediction error
+        alpha_for_trial = self.alpha_pos if delta_2 >= 0 else alpha_neg
+        
+        self.q_stage2[state, action_2] += alpha_for_trial * delta_2
+        
+        # Stage 1 update
+        # The same trial-wide learning rate is applied to the stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_for_trial * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Impaired Model-Based Control
+
+This model is based on the well-established finding that stress and anxiety can impair deliberative, goal-directed planning (model-based control) and promote reliance on simpler, habitual actions (model-free control). The model assumes the participant uses a hybrid of both strategies. The weight given to the computationally demanding model-based strategy is inversely proportional to their STAI score. For this high-anxiety participant, the model predicts a strong reliance on simple, stamped-in stimulus-response values, which could explain the long streak of choosing one spaceship without apparent regard for its downstream consequences.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety impairs goal-directed planning, leading to a greater
+    reliance on habitual, model-free behavior. This model implements a hybrid
+    controller where the balance between model-based (planning) and model-free
+    (habitual) control is determined by anxiety. Higher STAI scores reduce the
+    weight on the model-based system, making choices more reflexive and less
+    sensitive to the task's transition structure.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate for MF and stage-2 values)
+    beta: [0, 10]       (Inverse temperature for choice stochasticity)
+    w_base: [0, 1]       (Base weight on model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a separate value table for model-free learning."""
+        self.q_mf_stage1 = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a weighted average of
+        model-based and model-free values, where the weight is modulated by anxiety.
+        """
+        # Model-based values are computed by planning over the transition structure
+        q_mb_stage1 = np.zeros(self.n_choices)
+        max_q_stage2 = np.max(self.q_stage2, axis=1)
+        for a in range(self.n_choices):
+            q_mb_stage1[a] = np.dot(self.T[a, :], max_q_stage2)
+
+        # Anxiety reduces the weight on the model-based system
+        w = self.w_base * (1 - self.stai)
+        
+        # Combine MF and MB values to get the final action values
+        q_hybrid = w * q_mb_stage1 + (1 - w) * self.q_mf_stage1
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates stage-2 values and the model-free component of stage-1 values.
+        The model-based component is derived, not learned directly.
+        """
+        # Standard TD update for stage 2 values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update only the model-free stage 1 values
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf_stage1[action_1]
+        self.q_mf_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Negative Value Generalization
+
+This model proposes that anxiety leads to an overgeneralization of negative experiences. When a participant receives a bad outcome from a specific choice (e.g., asking a particular alien for gold), the negative value "spreads" to other, related options in the same context (e.g., the other alien on the same planet). This means a single negative event has a broader cooling effect on the perceived value of that entire state. The extent of this generalization is scaled by the participant's STAI score, suggesting that more anxious individuals are more likely to broadly devalue an environment after a single negative event.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety causes an overgeneralization of negative outcomes. When a
+    choice leads to a worse-than-expected outcome, the negative sentiment "spreads"
+    to devalue other available options within the same state (i.e., the other
+    alien on the same planet). The strength of this value generalization is scaled
+    by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                (Learning rate)
+    beta: [0, 10]               (Inverse temperature for choice stochasticity)
+    generalization_base: [0, 1]   (Base factor for negative value spreading)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.generalization_base = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values with an anxiety-driven generalization mechanism for
+        negative prediction errors at the second stage.
+        """
+        # Standard stage 2 update for the chosen action
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # If the outcome was worse than expected, generalize the negative update
+        if delta_2 < 0:
+            generalization_strength = self.generalization_base * self.stai
+            unchosen_action_2 = 1 - action_2
+            
+            # The unchosen action's value is also reduced by a fraction of the PE
+            self.q_stage2[state, unchosen_action_2] += self.alpha * delta_2 * generalization_strength
+            
+        # Standard stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

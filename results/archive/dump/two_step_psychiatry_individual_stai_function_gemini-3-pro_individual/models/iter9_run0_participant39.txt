@@ -1,0 +1,217 @@
+Here are 3 new cognitive models that incorporate the STAI (anxiety) score into the decision-making process in novel ways, distinct from the parameter combinations previously attempted.
+
+### Model 1: Anxiety-Modulated Working Memory Decay
+**Hypothesis:** High anxiety consumes cognitive resources (working memory load), leading to a faster decay of learned values (Q-values) for all options. The participant "forgets" the value of options they haven't chosen recently more quickly if they are anxious.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Working Memory Decay Model.
+    
+    Hypothesis: Anxiety consumes cognitive resources, causing value representations
+    (Q-values) to decay toward zero over time. Higher STAI increases this decay rate.
+    
+    Parameters:
+    learning_rate: [0, 1] - Standard Q-learning rate.
+    beta: [0, 10] - Inverse temperature for softmax.
+    w: [0, 1] - Weighting between MB and MF values.
+    decay_base: [0, 1] - Baseline decay rate per trial.
+    decay_stai_slope: [0, 1] - Sensitivity of decay to anxiety.
+    """
+    learning_rate, beta, w, decay_base, decay_stai_slope = model_parameters
+    n_trials = len(action_1)
+    participant_stai = stai[0]
+    
+    # Calculate effective decay rate bounded between 0 and 1
+    # Decay represents how much value is lost per trial (0 = no forgetting)
+    decay_rate = decay_base + (participant_stai * decay_stai_slope)
+    decay_rate = np.clip(decay_rate, 0.0, 1.0)
+    retention = 1.0 - decay_rate
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # 1. Decay all Q-values before choice (simulating time passing/memory load)
+        q_stage1_mf *= retention
+        q_stage2_mf *= retention
+
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # Value Updating
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Surprise Reactivity
+**Hypothesis:** Anxious individuals are hyper-vigilant to environmental volatility. When a "Rare" transition occurs (a violation of the internal model), anxious participants react by increasing their learning rate significantly for that specific trial, over-updating their values based on the "surprise."
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Surprise Reactivity Model.
+    
+    Hypothesis: Higher anxiety leads to hyper-vigilance. When a rare transition 
+    occurs (a prediction error in the transition structure), the participant 
+    boosts their learning rate, assuming the world has changed.
+    
+    Parameters:
+    lr_base: [0, 1] - Baseline learning rate for common transitions.
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - MB/MF weighting.
+    rare_boost_stai: [0, 5] - Multiplier for learning rate on rare trials based on STAI.
+    """
+    lr_base, beta, w, rare_boost_stai = model_parameters
+    n_trials = len(action_1)
+    participant_stai = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # Determine if transition was rare
+        # Common: (A->X, U->Y) implies (0->0, 1->1)
+        # Rare: (0->1, 1->0)
+        is_rare = (a1 != state_idx)
+        
+        # Modulate learning rate based on surprise (rarity) and anxiety
+        current_lr = lr_base
+        if is_rare:
+            # Boost LR if anxious and surprised
+            current_lr = lr_base * (1.0 + (participant_stai * rare_boost_stai))
+            current_lr = np.clip(current_lr, 0.0, 1.0)
+
+        # Value Updating
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += current_lr * delta_stage2
+
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += current_lr * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Reward Dampening
+**Hypothesis:** Anxiety is often co-morbid with anhedonia or a general dampening of positive affect. This model posits that higher STAI scores reduce the subjective valuation of the reward (gold coin). Even if they receive a coin (1.0), they perceive it as less valuable, leading to smaller positive prediction errors and slower reinforcement.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Reward Dampening Model.
+    
+    Hypothesis: High anxiety reduces the subjective utility of the reward.
+    Instead of updating with the objective reward (0 or 1), the agent updates
+    with a dampened value.
+    
+    Parameters:
+    learning_rate: [0, 1] - Standard learning rate.
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - MB/MF weighting.
+    dampening_stai: [0, 1] - How much STAI reduces perceived reward magnitude.
+    """
+    learning_rate, beta, w, dampening_stai = model_parameters
+    n_trials = len(action_1)
+    participant_stai = stai[0]
+    
+    # Calculate subjective reward scalar
+    # If dampening_stai is high, effective reward drops below 1.0
+    subjective_scaler = 1.0 - (participant_stai * dampening_stai)
+    subjective_scaler = np.clip(subjective_scaler, 0.0, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # Policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+        
+        # Apply subjective dampening to the reward
+        effective_reward = r * subjective_scaler
+
+        # Value Updating using effective_reward
+        delta_stage2 = effective_reward - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

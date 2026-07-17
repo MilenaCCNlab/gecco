@@ -1,0 +1,140 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) influences decision-making in this task.
+
+### Model 1: Anxiety-Modulated Rare Transition Dampening
+This model tests the hypothesis that anxious individuals distrust "surprising" or unreliable information. In this task, rare transitions (e.g., Spaceship A going to Planet Y) are unexpected. The model proposes that high anxiety leads to a dampening of the learning signal from these rare trials, effectively treating them more as noise than signal.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Rare Transition Dampening.
+    High anxiety participants may distrust the outcome of 'rare' or unexpected 
+    transitions, treating them as unreliable or noise. Consequently, they 
+    reduce the learning rate (credit assignment) for the first-stage action 
+    when a rare transition occurs.
+
+    Mechanism:
+    If a transition is rare (Spaceship A -> Planet Y or Spaceship U -> Planet X),
+    the Stage 1 learning rate is scaled down by a factor proportional to STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          # Base learning rate
+    beta: [0, 10]          # Inverse temperature
+    dampening_scale: [0, 1] # Scaling factor for anxiety-based dampening
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.dampening_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if transition was rare
+        # Action 0 -> State 0 (Common), State 1 (Rare)
+        # Action 1 -> State 1 (Common), State 0 (Rare)
+        is_rare = (action_1 == 0 and state == 1) or (action_1 == 1 and state == 0)
+        
+        # Calculate effective alpha for Stage 1
+        if is_rare:
+            # Dampen learning based on anxiety
+            # If stai is high and dampening_scale is high, effective_alpha drops
+            factor = 1.0 - (self.dampening_scale * self.stai)
+            factor = max(0.0, factor) # Ensure non-negative
+            alpha_s1 = self.alpha * factor
+        else:
+            alpha_s1 = self.alpha
+
+        # Stage 2 Update (Standard)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (Modulated)
+        # TD(0) style: update towards Q_stage2
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_s1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Uncertainty Decay
+This model hypothesizes that anxiety correlates with a higher perceived volatility or uncertainty about the world. To represent this, the model implements a decay mechanism where the values of *unchosen* options drift towards a neutral point (0.5) over time. The rate of this decay is determined by the participant's anxiety level, reflecting a "forgetting" or loss of confidence in options that aren't constantly verified.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Induced Uncertainty Decay.
+    Anxious individuals may have higher uncertainty about the stability of the 
+    environment. This is modeled as a decay of the value of unchosen options 
+    towards a neutral prior (0.5), representing a 'forgetting' or loss of 
+    confidence in old information. The rate of decay is modulated by STAI.
+
+    Mechanism:
+    Before each choice, the Q-value of the unchosen Stage 1 option decays 
+    towards 0.5.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    decay_rate: [0, 1]  # Base decay rate, scaled by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate = model_parameters
+
+    def pre_trial(self) -> None:
+        # If this is not the first trial, decay the unchosen option from previous trial
+        if self.last_action1 is not None:
+            unchosen_action = 1 - self.last_action1
+            
+            # Decay towards 0.5 (neutral value)
+            # Rate depends on anxiety
+            rate = self.decay_rate * self.stai
+            # Clip rate to [0, 1] just in case
+            rate = min(max(rate, 0.0), 1.0)
+            
+            current_val = self.q_stage1[unchosen_action]
+            self.q_stage1[unchosen_action] = current_val + rate * (0.5 - current_val)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Lose-Shift Bias
+This model focuses on the behavioral reaction to negative outcomes. It hypothesizes that high anxiety increases sensitivity to failure, manifesting as a heuristic "Lose-Shift" bias. If a participant receives no reward (0 coins), they are penalized for repeating that action on the next trial. The magnitude of this penalty is scaled by their STAI score.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Lose-Shift Bias.
+    High anxiety is associated with increased sensitivity to negative outcomes.
+    This model implements a heuristic 'Lose-Shift' bias that is added to the 
+    reinforcement learning values. If the previous trial resulted in no reward,
+    the participant is less likely to repeat that action, with the magnitude 
+    of this aversion scaled by their anxiety level.
+
+    Mechanism:
+    If the last reward was 0, a penalty is temporarily subtracted from the 
+    Q-value of the previously chosen action during selection.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate
+    beta: [0, 10]        # Inverse temperature
+    shift_penalty: [0, 5] # Magnitude of penalty for repeating a loss
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.shift_penalty = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_modified = self.q_stage1.copy()
+        
+        # Apply Lose-Shift bias
+        if self.last_reward is not None and self.last_reward == 0.0:
+            if self.last_action1 is not None:
+                # Penalty scales with anxiety
+                penalty = self.shift_penalty * self.stai
+                q_modified[self.last_action1] -= penalty
+        
+        return self.softmax(q_modified, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

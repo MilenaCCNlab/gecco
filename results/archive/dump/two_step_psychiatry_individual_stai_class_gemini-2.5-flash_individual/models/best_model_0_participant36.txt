@@ -1,0 +1,58 @@
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs cognitive control and planning, leading to a reduced reliance
+    on model-based strategies and an increased tendency to repeat previous first-stage choices (action perseveration).
+    This model combines model-based and model-free control, with anxiety modulating the balance between them
+    and adding a perseveration bias.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for both model-free and stage-2 values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    w_base: [0, 1] - Base weight for model-based control (1=pure MB, 0=pure MF).
+    w_stai_slope: [0, 1] - How much anxiety reduces the model-based weight.
+    stickiness_base: [0, 5] - Base perseveration bonus for repeating the last stage-1 action.
+    stickiness_stai_slope: [0, 5] - How much anxiety increases the perseveration bonus.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.w_stai_slope, self.stickiness_base, self.stickiness_stai_slope = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize model-free Q-values for stage 1 (q_stage1 from base class serves this)
+        # Initialize model-based Q-values for stage 1 (will be computed on the fly)
+        # Modulate w: higher STAI reduces model-based weight
+        self.w = self.w_base * (1 - self.w_stai_slope * self.stai)
+        self.w = np.clip(self.w, 0, 1) # Ensure w is between 0 and 1
+
+        # Modulate stickiness: higher STAI increases perseveration
+        self.stickiness = self.stickiness_base + self.stickiness_stai_slope * self.stai
+        self.stickiness = np.clip(self.stickiness, 0, 10) # Ensure stickiness is non-negative
+
+    def policy_stage1(self) -> np.ndarray:
+        # Compute model-based Q-values for stage 1
+        # Q_MB(a1) = Sum_s' [ T(a1, s') * Max_a2' Q_MF(s', a2') ]
+        expected_q_stage2 = np.max(self.q_stage2, axis=1)
+        q_mb_stage1 = np.dot(self.T, expected_q_stage2) # T is (n_choices, n_states)
+
+        # Combine model-free and model-based Q-values
+        # q_stage1 in base class acts as q_mf_stage1
+        q_combined_stage1 = self.w * q_mb_stage1 + (1 - self.w) * self.q_stage1
+
+        # Add perseveration bonus
+        if self.last_action1 is not None:
+            q_combined_stage1[self.last_action1] += self.stickiness
+
+        return self.softmax(q_combined_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update stage-2 values (model-free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update stage-1 model-free values (q_stage1 from base class)
+        # Uses the updated stage 2 value as the target for the chosen path
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1_mf
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)

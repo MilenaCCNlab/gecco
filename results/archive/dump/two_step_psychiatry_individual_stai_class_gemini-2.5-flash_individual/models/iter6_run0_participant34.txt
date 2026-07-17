@@ -1,0 +1,178 @@
+Here are three cognitive models proposing different hypotheses about how the participant's high anxiety (STAI score of 0.9625) might influence their decision-making in the two-step task.
+
+### Cognitive Model 1: Anxiety-Amplified Loss Aversion
+
+This model proposes that high anxiety makes participants more sensitive to negative outcomes (receiving 0 coins) compared to positive outcomes (receiving 1 coin). This is implemented by using separate learning rates for positive and negative prediction errors, with the learning rate for negative prediction errors being amplified by the participant's STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Amplified Loss Aversion.
+    High anxiety increases sensitivity to negative outcomes (losses), leading to
+    a stronger update of Q-values when rewards are 0 compared to when they are 1.
+    This model uses separate learning rates for positive and negative prediction errors,
+    with the negative learning rate being boosted by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] (Learning rate for positive prediction errors)
+    alpha_neg_base: [0, 1] (Base learning rate for negative prediction errors)
+    stai_neg_boost: [0, 1] (Factor by which STAI amplifies the negative learning rate)
+    beta: [0, 10] (Softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_neg_boost, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values with separate learning rates for positive/negative prediction errors,
+        where the negative learning rate is modulated by STAI.
+        """
+        # Calculate the anxiety-modulated negative learning rate
+        alpha_neg_modulated = self.alpha_neg_base + (self.stai * self.stai_neg_boost)
+        # Ensure alpha_neg_modulated stays within reasonable bounds, e.g., [0, 1]
+        alpha_neg_modulated = np.clip(alpha_neg_modulated, 0, 1)
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += alpha_neg_modulated * delta_2
+        
+        # Stage 1 update
+        # The target for stage 1 is the updated value of the chosen stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += alpha_neg_modulated * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Cognitive Model 2: Anxiety-Reduced Stage 1 Determinism
+
+This model hypothesizes that high anxiety leads to more erratic or random choices at the first stage of the task. This is implemented by making the softmax inverse temperature (`beta`) for Stage 1 decisions inversely proportional to the STAI score. Higher anxiety results in a lower effective `beta`, leading to more random choices, while Stage 2 choices maintain a constant `beta`.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Reduced Stage 1 Determinism.
+    High anxiety leads to less deterministic choices at Stage 1, effectively
+    reducing the influence of Q-values on Stage 1 decisions. This is modeled
+    by making the Stage 1 inverse temperature (beta) inversely proportional
+    to the STAI score, meaning higher anxiety results in a lower beta (more random choices).
+    Stage 2 choices maintain a constant beta.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta_stage1_max: [0, 10] (Maximum Stage 1 softmax inverse temperature, when STAI is low)
+    stai_beta_reduction_factor: [0, 10] (Factor by which STAI reduces Stage 1 beta)
+    beta_stage2: [0, 10] (Constant Stage 2 softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_stage1_max, self.stai_beta_reduction_factor, self.beta_stage2 = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities with anxiety-modulated beta.
+        Higher STAI leads to a lower effective beta for Stage 1.
+        """
+        # Calculate anxiety-modulated beta for Stage 1
+        # Ensure beta doesn't go below a small positive number to avoid division by zero or overly random choices
+        effective_beta_stage1 = self.beta_stage1_max - (self.stai * self.stai_beta_reduction_factor)
+        effective_beta_stage1 = max(0.1, effective_beta_stage1) # Clamp at a minimum value
+
+        return self.softmax(self.q_stage1, effective_beta_stage1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities with a constant beta.
+        """
+        return self.softmax(self.q_stage2[state], self.beta_stage2)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome using a single learning rate 'alpha'."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Cognitive Model 3: Anxiety-Reduced Model-Based Control
+
+This model proposes that high anxiety impairs the participant's ability to engage in goal-directed (model-based) planning, leading to a greater reliance on habitual (model-free) control for Stage 1 decisions. The Stage 1 decision value is a weighted average of a model-free Q-value and a model-based Q-value, where the weight given to the model-based component decreases with increasing STAI score.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Reduced Model-Based Control.
+    High anxiety impairs goal-directed (model-based) planning, leading to a
+    greater reliance on habitual (model-free) control for Stage 1 decisions.
+    The Stage 1 decision value is a weighted average of a model-free Q-value
+    and a model-based Q-value, where the weight given to the model-based
+    component decreases with increasing STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for model-free Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    w_mb_base: [0, 1] (Base weight for model-based control, when STAI is low)
+    stai_mb_reduction_factor: [0, 1] (Factor by which STAI reduces model-based weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb_base, self.stai_mb_reduction_factor = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # No extra initialization needed for q_mb_stage1, it's computed on the fly
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a weighted combination of
+        model-free and model-based values, where the model-based weight is
+        modulated by anxiety.
+        """
+        # Calculate anxiety-modulated weight for model-based control
+        w_mb = self.w_mb_base - (self.stai * self.stai_mb_reduction_factor)
+        # Clamp w_mb between 0 and 1 to ensure valid weighting
+        w_mb = np.clip(w_mb, 0, 1)
+
+        # Model-free Q-values (self.q_stage1 is updated using TD learning)
+        q_mf_stage1 = self.q_stage1
+
+        # Model-based Q-values
+        # For each action a1 in Stage 1, calculate the expected maximum value
+        # from Stage 2 by considering transition probabilities.
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_future_value = 0
+            for s in range(self.n_states):
+                # T[a1, s] is the probability of going to state s given action a1
+                # np.max(self.q_stage2[s, :]) is the optimal expected value from state s
+                expected_future_value += self.T[a1, s] * np.max(self.q_stage2[s, :])
+            q_mb_stage1[a1] = expected_future_value
+
+        # Combined Q-values for Stage 1 decision
+        q_combined_stage1 = w_mb * q_mb_stage1 + (1 - w_mb) * q_mf_stage1
+        
+        return self.softmax(q_combined_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome using a single learning rate 'alpha'."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

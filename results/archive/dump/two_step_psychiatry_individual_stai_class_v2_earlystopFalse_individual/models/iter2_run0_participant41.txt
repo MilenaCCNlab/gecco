@@ -1,0 +1,134 @@
+Here are three new cognitive models based on different hypotheses regarding how anxiety (STAI) modulates decision-making processes.
+
+### Model 1: Anxiety-Modulated Subjective Utility (Loss Aversion)
+This model tests the hypothesis that anxious individuals perceive the absence of reward (0 coins) not as a neutral event, but as a subjective loss or punishment. The magnitude of this "pain of missing out" is driven by their anxiety level.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces Loss Aversion (Subjective Punishment).
+    For anxious individuals, receiving 0 coins is perceived as a negative outcome 
+    rather than a neutral one. The magnitude of this subjective penalty is 
+    proportional to their STAI score.
+    
+    Effective Reward Calculation:
+    - If Reward = 1: R_eff = 1
+    - If Reward = 0: R_eff = -1 * loss_sensitivity * stai
+    
+    This mechanism drives Q-values for unrewarding options below zero, potentially 
+    leading to faster switching away from unrewarding options (or avoidance).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    loss_sensitivity: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective reward based on anxiety-modulated loss aversion
+        # Using < 0.5 to safely catch the 0.0 reward case
+        if reward < 0.5:
+            r_eff = -1.0 * self.loss_sensitivity * self.stai
+        else:
+            r_eff = reward
+            
+        # Standard TD update using the effective reward
+        # Stage 2 update
+        delta_2 = r_eff - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Inverse Temperature (Decision Noise)
+This model tests the hypothesis that anxiety acts as a physiological constraint on the exploration-exploitation trade-off. It posits that anxiety scales the inverse temperature ($\beta$) parameter, leading to either increased rigidity (freezing/safety behavior) or increased randomness (panic/confusion).
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the exploration-exploitation trade-off.
+    Anxiety scales the inverse temperature (beta), altering decision noise.
+    
+    beta_effective = beta_base * exp(stai_mod * stai)
+    
+    - If stai_mod > 0: Anxiety increases beta, leading to rigidity (exploitation/freezing).
+    - If stai_mod < 0: Anxiety decreases beta, leading to randomness (exploration/panic).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    stai_mod: [-5, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stai_mod = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta modulated by STAI
+        beta_eff = self.beta_base * np.exp(self.stai_mod * self.stai)
+        # Clip to prevent numerical overflow in softmax
+        beta_eff = np.clip(beta_eff, 0, 50) 
+        return self.softmax(self.q_stage1, beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        beta_eff = self.beta_base * np.exp(self.stai_mod * self.stai)
+        beta_eff = np.clip(beta_eff, 0, 50)
+        return self.softmax(self.q_stage2[state], beta_eff)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Memory Decay (Pessimism Bias)
+This model tests the hypothesis that anxiety consumes cognitive resources, leading to faster decay of value representations for options that are not currently being chosen. Specifically, unchosen options decay towards zero (pessimism), which might explain perseveration on a "good enough" current option.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety accelerates memory decay for unchosen options.
+    High anxiety leads to a 'tunnel vision' effect where the value of unvisited 
+    states or unchosen actions decays towards zero (pessimism) faster than in 
+    low anxiety individuals.
+    
+    Decay rule: Q_unchosen = Q_unchosen * (1 - decay_rate * stai)
+    
+    This promotes sticking to the current choice if the alternative is 'forgotten' 
+    and assumed to be valueless.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    decay_rate: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate = model_parameters
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Call base method to update last_* variables
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Calculate decay factor
+        decay_factor = 1.0 - (self.decay_rate * self.stai)
+        decay_factor = np.clip(decay_factor, 0.0, 1.0)
+        
+        # Decay Stage 1 unchosen option
+        unchosen_a1 = 1 - action_1
+        self.q_stage1[unchosen_a1] *= decay_factor
+        
+        # Decay Stage 2 unchosen option (only for the visited state)
+        # We assume the participant forgets the value of the alien they didn't ask.
+        unchosen_a2 = 1 - action_2
+        self.q_stage2[state, unchosen_a2] *= decay_factor
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,146 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) influences decision-making in this task.
+
+### Model 1: Anxiety-Induced Cognitive Fatigue
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Cognitive Fatigue (MB to MF Shift)
+    
+    This model hypothesizes that high anxiety consumes cognitive resources, leading 
+    to "cognitive fatigue" over the course of the task. The participant starts with 
+    a Model-Based (planning) strategy but progressively shifts towards a simpler 
+    Model-Free (habitual) strategy. The rate of this decay from MB to MF control 
+    is proportional to their anxiety level.
+    
+    w_t = exp(- trial * fatigue_scale * stai)
+    Q_net = w_t * Q_MB + (1 - w_t) * Q_MF
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    fatigue_scale: [0, 0.1] (Controls how fast MB reasoning decays based on anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.fatigue_scale = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values (Planning)
+        # Q_MB(a) = Sum(T(a, s') * max(Q_stage2(s')))
+        # self.T is shape (2, 2) -> [action, state]
+        # self.q_stage2 is shape (2, 2) -> [state, action_2]
+        
+        # Value of the best action at each state in stage 2
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # MB values for stage 1 actions based on transition matrix
+        q_mb = self.T @ v_stage2 # (2,2) @ (2,) -> (2,)
+        
+        # 2. Calculate Dynamic Mixing Weight
+        # Weight starts at 1.0 (Pure MB) and decays towards 0.0 (Pure MF)
+        # The decay rate is modulated by STAI.
+        decay_rate = self.fatigue_scale * self.stai
+        w = np.exp(-self.trial * decay_rate)
+        
+        # 3. Mix MB and MF values
+        # self.q_stage1 represents the MF values (learned via TD in value_update)
+        q_net = w * q_mb + (1 - w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Tunnel Vision
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Tunnel Vision (Transition Pruning)
+    
+    This model hypothesizes that anxious participants simplify the decision tree 
+    by ignoring low-probability outcomes ("Tunnel Vision"). In the Model-Based 
+    planning calculation, if a transition probability is below a threshold 
+    determined by their anxiety level, it is treated as zero. This creates a 
+    simplified, but biased, internal model of the world where rare events are 
+    ignored.
+    
+    Pruning Threshold = prune_scale * stai
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    prune_scale: [0, 1] (Scales the pruning threshold relative to STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.prune_scale = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate dynamic pruning threshold based on anxiety
+        threshold = self.prune_scale * self.stai
+        
+        # Get base transition probabilities
+        T_pruned = self.T.copy()
+        
+        # Prune transitions below the threshold (set to 0)
+        T_pruned[T_pruned < threshold] = 0.0
+        
+        # Renormalize rows to ensure they sum to 1 (handling cases where all might be pruned)
+        row_sums = T_pruned.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0 # Prevent division by zero
+        T_pruned = T_pruned / row_sums
+        
+        # Calculate MB values using the pruned (simplified) model
+        v_stage2 = np.max(self.q_stage2, axis=1)
+        q_mb = T_pruned @ v_stage2
+        
+        # Action selection based on pruned MB values
+        return self.softmax(q_mb, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Impaired Credit Assignment
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Impaired Credit Assignment
+    
+    This model hypothesizes that high anxiety interferes with the cognitive 
+    process of back-propagating reward information from the second stage to 
+    the first stage. While the immediate reward at Stage 2 is learned normally, 
+    the update of Stage 1 values is dampened by anxiety. This leads to "frozen" 
+    preferences at Stage 1, as the agent fails to update the value of spaceships 
+    based on the outcomes of the aliens.
+    
+    alpha_stage1 = alpha * (1 - damp_scale * stai)
+    alpha_stage2 = alpha
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    damp_scale: [0, 1] (Factor by which anxiety reduces Stage 1 learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.damp_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Normal learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Dampened by Anxiety)
+        # Calculate effective alpha for stage 1
+        dampening = self.damp_scale * self.stai
+        # Ensure alpha doesn't go below 0
+        alpha_1 = self.alpha * max(0.0, (1.0 - dampening))
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,191 @@
+Here are three new cognitive models that explore different mechanisms for how high anxiety (STAI = 0.5375) might influence decision-making in this two-step task.
+
+### Model 1: Anxiety-Driven Model-Based Suppression
+**Hypothesis:** High anxiety often impairs complex cognitive processing, such as the "model-based" planning required to use the transition structure (knowing which spaceship goes to which planet). This model posits that anxiety acts as a suppressor on the mixing weight `w` between model-based (MB) and model-free (MF) control. Higher anxiety reduces the contribution of the model-based system, forcing the participant to rely more on simple habit-based (model-free) learning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Driven Model-Based Suppression.
+    Anxiety consumes working memory resources required for model-based planning.
+    This model implements a hybrid Model-Based/Model-Free reinforcement learning agent
+    where the mixing weight 'w' (0=pure MF, 1=pure MB) is suppressed by anxiety.
+    
+    w_effective = w_base * (1 - suppression_strength * stai)
+    
+    If anxiety is high, the agent relies more on Model-Free (TD) learning.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Baseline model-based weight
+    suppression: [0, 1] # How strongly anxiety reduces MB control
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.suppression = model_parameters
+
+    def init_model(self) -> None:
+        # MF values for stage 1
+        self.q_mf = np.zeros(self.n_choices)
+        # MB values are computed on the fly using q_stage2 (which are the model-based state values here)
+        # We use the base class q_stage2 for the second stage values (common to both MB and MF in this simplified view)
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Value (TD)
+        q_mf = self.q_mf
+        
+        # 2. Model-Based Value (Bellman)
+        # Q_MB(a) = sum(P(s'|a) * max(Q_stage2(s', :)))
+        # self.T is transition matrix [action, next_state]
+        # We assume max Q value at stage 2 is the value of that state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Value of each state (X, Y)
+        q_mb = self.T @ v_stage2
+        
+        # 3. Mix them
+        # Calculate effective w based on anxiety
+        w_eff = self.w_base * (1.0 - self.suppression * self.stai)
+        w_eff = np.clip(w_eff, 0.0, 1.0)
+        
+        q_net = w_eff * q_mb + (1 - w_eff) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Model-Free update (TD-learning)
+        # Using the value of the chosen stage 2 option as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxious Risk Aversion (Variance Penalty)
+**Hypothesis:** Anxious individuals are often intolerant of uncertainty. Instead of just maximizing expected value, they may penalize options that have high outcome variance (uncertainty). This model tracks not just the mean value (Q) but also the variance of rewards for each option. The STAI score scales a penalty term subtracted from the Q-values, making the participant avoid options with unpredictable outcomes.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxious Risk Aversion (Variance Penalty).
+    Anxious individuals avoid uncertainty. This model tracks the variance of rewards
+    and subtracts a penalty from the Q-value proportional to that variance and the STAI score.
+    
+    Q_net = Q_mean - (penalty_weight * stai * Variance)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for mean
+    beta: [0, 10]       # Inverse temperature
+    alpha_var: [0, 1]   # Learning rate for variance
+    penalty_wt: [0, 5]  # Scaling factor for variance penalty
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_var, self.penalty_wt = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance estimates for Stage 1 and Stage 2
+        self.var_stage1 = np.zeros(self.n_choices)
+        self.var_stage2 = np.zeros((self.n_states, self.n_choices))
+
+    def policy_stage1(self) -> np.ndarray:
+        # Apply penalty
+        penalty = self.penalty_wt * self.stai * self.var_stage1
+        net_values = self.q_stage1 - penalty
+        return self.softmax(net_values, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Apply penalty
+        penalty = self.penalty_wt * self.stai * self.var_stage2[state]
+        net_values = self.q_stage2[state] - penalty
+        return self.softmax(net_values, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # --- Stage 2 Updates ---
+        # Update Mean
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Variance: Var_new = Var_old + alpha_var * ((Reward - Mean_old)^2 - Var_old)
+        # Note: We use the prediction error squared as a proxy for instantaneous variance
+        sq_error_2 = delta_2 ** 2
+        self.var_stage2[state, action_2] += self.alpha_var * (sq_error_2 - self.var_stage2[state, action_2])
+
+        # --- Stage 1 Updates ---
+        # Target for stage 1 is the value of the state reached (Q_stage2)
+        target_1 = self.q_stage2[state, action_2]
+        delta_1 = target_1 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update Variance for Stage 1
+        sq_error_1 = delta_1 ** 2
+        self.var_stage1[action_1] += self.alpha_var * (sq_error_1 - self.var_stage1[action_1])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Perseveration (Stickiness)
+**Hypothesis:** High anxiety can lead to rigid, repetitive behavior (perseveration) as a safety strategy to avoid the cognitive load of re-evaluating choices. This model introduces a "stickiness" parameter that adds a bonus to the previously chosen action. The magnitude of this stickiness bonus is directly modulated by the STAI score, predicting that higher anxiety leads to more repetition regardless of reward.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Induced Perseveration.
+    Anxiety increases the tendency to repeat the previous choice (stickiness),
+    regardless of the outcome, as a way to reduce decision-making effort.
+    
+    Choice_Logit = Q_value + (stickiness_base + stickiness_anxiety * stai) * Is_Last_Choice
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Learning rate
+    beta: [0, 10]           # Inverse temperature
+    stick_base: [0, 5]      # Baseline stickiness
+    stick_anxiety: [0, 5]   # Additional stickiness per unit of STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stick_base, self.stick_anxiety = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        values = self.q_stage1.copy()
+        
+        # Add stickiness bonus if a previous action exists
+        if self.last_action1 is not None:
+            bonus = self.stick_base + (self.stick_anxiety * self.stai)
+            values[int(self.last_action1)] += bonus
+            
+        return self.softmax(values, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # We assume stickiness might primarily affect the high-level choice (Stage 1),
+        # but could also affect Stage 2. Here we apply it to Stage 2 as well for consistency.
+        values = self.q_stage2[state].copy()
+        
+        # Note: We need to track last action per state or just last action overall?
+        # Usually stickiness is "repeat last motor response". 
+        # Here we simply check if we were in this state before and what we did.
+        # However, standard stickiness usually applies to the immediately preceding trial.
+        # Since Stage 2 states are distinct, we only apply if the last trial visited THIS state.
+        
+        if self.last_state is not None and self.last_state == state and self.last_action2 is not None:
+             bonus = self.stick_base + (self.stick_anxiety * self.stai)
+             values[int(self.last_action2)] += bonus
+
+        return self.softmax(values, self.beta)
+
+    # Standard value update
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

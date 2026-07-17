@@ -1,0 +1,199 @@
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Rare-Transition Gating Model.
+
+    Hypothesis: Anxious individuals may treat 'Rare' transitions (unexpected outcomes) 
+    as errors or anomalies in the environment structure. Consequently, they may 
+    discount the information gained from these trials when updating their Model-Free 
+    values, effectively 'gating' learning when the transition was unexpected.
+
+    Parameters:
+    - learning_rate: [0, 1] Base learning rate for value updates.
+    - beta: [0, 10] Inverse temperature (exploration/exploitation).
+    - w: [0, 1] Weight for model-based control (0=MF, 1=MB).
+    - rare_dampening: [0, 1] The degree to which STAI reduces learning from rare transitions.
+      (0 = no effect, 1 = high anxiety prevents learning from rare transitions).
+    """
+    learning_rate, beta, w, rare_dampening = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Determine if transition was common or rare
+        # Common: Action 0 -> State 0, Action 1 -> State 1
+        # Rare: Action 0 -> State 1, Action 1 -> State 0
+        is_common = (action_1[trial] == state_idx)
+        
+        # Calculate effective learning rate for Stage 1
+        if is_common:
+            effective_lr = learning_rate
+        else:
+            # Dampen learning if rare, scaled by anxiety
+            effective_lr = learning_rate * (1.0 - (rare_dampening * stai_score))
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += effective_lr * delta_stage1
+        
+        # Stage 2 update is standard (reward prediction error)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Model-Based Dampening Model.
+
+    Hypothesis: While 'w' controls the arbitration between MB and MF systems, 
+    anxiety might specifically degrade the *quality* or *confidence* of the 
+    Model-Based projection itself. High anxiety dampens the projected values 
+    from the planning system (shrinking them towards zero), representing a 
+    lack of confidence in the cognitive map's predictions.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - mb_dampening: [0, 1] Factor by which anxiety reduces the magnitude of MB values.
+    """
+    learning_rate, beta, w, mb_dampening = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # Calculate standard MB value
+        raw_q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Apply anxiety-driven dampening to the MB component
+        # If anxiety is high, the MB values are shrunk, reducing their impact 
+        # relative to MF values and noise.
+        dampener = 1.0 - (mb_dampening * stai_score)
+        # Ensure dampener doesn't go below 0
+        if dampener < 0: dampener = 0
+            
+        q_stage1_mb = raw_q_stage1_mb * dampener
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Post-Failure Suppression Model.
+
+    Hypothesis: High anxiety leads to a 'freezing' or disengagement response 
+    following a negative outcome (0 coins). This manifests as a temporary 
+    suppression of the learning rate on the *subsequent* trial, preventing 
+    the agent from updating beliefs effectively immediately after a failure.
+
+    Parameters:
+    - learning_rate_base: [0, 1] Baseline learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - error_suppression: [0, 1] How much anxiety reduces learning rate after a 0 reward.
+    """
+    learning_rate_base, beta, w, error_suppression = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Initialize previous reward as 1 (success) so we don't suppress the first trial
+    last_reward = 1.0 
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Calculate dynamic learning rate based on PREVIOUS trial's outcome
+        current_lr = learning_rate_base
+        if last_reward == 0.0:
+            # If last trial was a failure, anxiety suppresses current learning
+            current_lr = learning_rate_base * (1.0 - (error_suppression * stai_score))
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += current_lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += current_lr * delta_stage2
+        
+        # Update last_reward for the next loop
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss

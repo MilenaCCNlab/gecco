@@ -1,0 +1,139 @@
+As a cognitive scientist and Python programmer, I will propose three distinct models to explain this participant's decision-making process. Given the participant's high STAI score (0.725), these models will focus on prominent theories linking anxiety to alterations in learning and decision-making, such as reduced goal-directed control, increased behavioral rigidity, and heightened sensitivity to negative feedback. The participant's behavioral data, characterized by a strong initial preference for one option despite mixed outcomes, suggests that habitual or heuristic strategies may be dominating their choices.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+This model tests the hypothesis that anxiety impairs the balance between goal-directed (model-based) and habitual (model-free) decision-making. A purely model-based agent would use its knowledge of the task structure (i.e., which spaceship commonly goes to which planet) to make optimal choices. This model proposes that this participant, due to high anxiety, underweights this model-based information and relies more heavily on simpler, stimulus-response learning. The model-based weight `w` is scaled by `(1 - stai)`, directly linking higher anxiety to reduced reliance on planning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety impairs model-based control.
+    The participant's choices are a hybrid of model-free (habitual) and model-based
+    (goal-directed) valuation. The weight given to the model-based system is
+    inversely proportional to the participant's STAI score, reflecting a shift
+    towards more habitual behavior under anxiety. This could explain why the
+    participant persists with an action even when a rare transition leads to a
+    reward, an outcome that should devalue the action for a model-based agent.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]     (Inverse softmax temperature)
+    w_base: [0, 1]    (Base weight for model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a hybrid of model-free
+        and model-based values, with anxiety reducing the model-based weight.
+        """
+        # Model-based valuation: Q_MB(a) = sum_s T(s|a) * max_a' Q_s2(s, a')
+        q_model_based = np.zeros(self.n_choices)
+        state_values = np.max(self.q_stage2, axis=1)
+        for a in range(self.n_choices):
+            q_model_based[a] = np.dot(self.T[a, :], state_values)
+
+        # Anxiety modulation: higher STAI reduces model-based weight
+        w = self.w_base * (1 - self.stai)
+
+        # Combine model-free (self.q_stage1) and model-based values
+        q_hybrid = w * q_model_based + (1 - w) * self.q_stage1
+
+        return self.softmax(q_hybrid, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Perseveration
+This model explores a simpler, heuristic-based explanation: anxiety promotes cognitive inflexibility and behavioral rigidity. It hypothesizes that the participant has a tendency to repeat their previous choice, a phenomenon known as perseveration. The strength of this "sticky" choice bias is directly proportional to the participant's STAI score. This model provides a direct mechanism to explain the long sequences of repeated choices for spaceship 0 seen in the data, framing it as an anxiety-driven inability to flexibly switch strategies.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that high anxiety leads to increased
+    perseveration or "stickiness" in choice behavior. The participant has a
+    tendency to repeat their previous first-stage action, and this tendency
+    is amplified by their anxiety level. This provides a simple, heuristic-based
+    explanation for the observed behavior of making long sequences of the same
+    choice, reflecting cognitive inflexibility that can be associated with anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]     (Inverse softmax temperature)
+    pi: [0, 5]       (Perseveration strength parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pi = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities by adding an anxiety-scaled
+        perseveration bonus to the previously chosen action.
+        """
+        # Start with standard model-free Q-values
+        q_final = np.copy(self.q_stage1)
+
+        # On all but the first trial, add a perseveration bonus
+        if self.last_action1 is not None:
+            # Anxiety modulation: higher STAI increases the perseveration bonus
+            perseveration_bonus = self.pi * self.stai
+            q_final[self.last_action1] += perseveration_bonus
+
+        return self.softmax(q_final, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Asymmetric Learning
+This model shifts the focus from choice mechanisms to the underlying learning process. The hypothesis is that anxiety induces a pessimistic learning bias, making the participant more sensitive to negative outcomes than positive ones. The model implements two distinct learning rates: one for positive prediction errors (better-than-expected outcomes) and another for negative prediction errors (worse-than-expected outcomes). The learning rate for negative errors is increased as a function of the STAI score, meaning that non-rewarded trials have a disproportionately large impact on the participant's future decisions.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that high anxiety alters the learning process itself,
+    specifically by making the participant more sensitive to negative outcomes.
+    The model uses separate learning rates for positive and negative prediction
+    errors. The learning rate for negative errors (e.g., receiving no reward when
+    one was expected) is increased as a function of the participant's STAI score.
+    This reflects a "pessimistic" learning bias, where bad outcomes have a greater
+    impact on value updating than good outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Base learning rate)
+    beta: [0, 10]     (Inverse softmax temperature)
+    neg_bias: [0, 1]   (Anxiety-driven bias towards learning from negative events)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_bias = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize anxiety-modulated learning rates."""
+        self.alpha_pos = self.alpha
+        # The learning rate for negative outcomes is the base rate plus a bonus
+        # scaled by anxiety, capped at 1.0.
+        self.alpha_neg = min(1.0, self.alpha + self.neg_bias * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using different learning rates for positive and
+        negative prediction errors.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        lr_2 = self.alpha_neg if delta_2 < 0 else self.alpha_pos
+        self.q_stage2[state, action_2] += lr_2 * delta_2
+
+        # Stage 1 update
+        # The value of the first stage action is updated based on the value of the second stage action taken
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        lr_1 = self.alpha_neg if delta_1 < 0 else self.alpha_pos
+        self.q_stage1[action_1] += lr_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,176 @@
+Here are three new cognitive models.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+
+This model proposes that anxiety mediates the balance between goal-directed ("model-based") and habitual ("model-free") decision-making systems. High anxiety is hypothesized to reduce reliance on the computationally expensive model-based system, which plans using an internal model of the task transitions, in favor of the simpler, less flexible model-free system. Furthermore, anxiety is also proposed to increase choice determinism (exploitation), making the participant less likely to explore.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety shifts the balance from goal-directed (model-based)
+    to habitual (model-free) control. The weight given to the model-based
+    system is inversely related to anxiety. Anxiety also increases choice
+    determinism, promoting exploitation over exploration.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate for both systems)
+    w: [0, 1]            (Base weight for model-based control)
+    beta_base: [0, 10]   (Base inverse temperature)
+    beta_anxiety: [0, 10] (Anxiety's effect on inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.w, self.beta_base, self.beta_anxiety = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a separate model-free Q-value table."""
+        self.q_mf = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a hybrid of model-free
+        and model-based values, with anxiety modulating the weighting and
+        choice temperature.
+        """
+        # 1. Compute model-based values
+        # V(s) = max_a Q(s,a)
+        state_values = np.max(self.q_stage2, axis=1)
+        # Q_MB(a) = sum_s' T(s'|a) * V(s')
+        q_mb = self.T @ state_values
+
+        # 2. Combine with model-free values
+        # The weight for the model-based system is reduced by anxiety
+        effective_w = self.w * (1 - self.stai)
+        q_hybrid = effective_w * q_mb + (1 - effective_w) * self.q_mf
+
+        # 3. Compute anxiety-modulated choice temperature
+        beta_eff = self.beta_base + self.beta_anxiety * self.stai
+
+        return self.softmax(q_hybrid, beta_eff)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates both the stage-2 Q-values and the model-free stage-1 Q-values.
+        """
+        # Standard TD update for stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Model-free (SARSA) update for stage 1
+        # The error is the difference between the value of the obtained state-action pair
+        # and the value of the action that led there.
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1_mf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Pessimism in Planning
+
+This model suggests that anxiety doesn't change the learning mechanism itself, but rather introduces a pessimistic bias into the planning process. Specifically, when evaluating the first-stage options, the potential outcome of a rare, uncertain transition is devalued. The magnitude of this pessimistic devaluation is proportional to the participant's anxiety level, capturing the idea that anxiety leads to "catastrophizing" or over-weighting unlikely but potentially negative outcomes.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety introduces a pessimistic bias during model-based
+    planning. The value of arriving at a planet via a rare transition is
+    perceived as lower than its true learned value. This penalty is scaled
+    by the participant's anxiety level.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]      (Inverse temperature)
+    pessimism: [0, 5]   (Strength of the pessimistic bias against rare events)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pessimism = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities using a pure model-based
+        calculation that is biased by anxiety-driven pessimism.
+        """
+        # V(s) = max_a Q(s,a)
+        state_values = np.max(self.q_stage2, axis=1)
+        
+        q_planned = np.zeros(self.n_choices)
+        
+        # The penalty for uncertainty is scaled by anxiety
+        penalty = self.pessimism * self.stai
+
+        for a in range(self.n_choices):
+            # Find common and rare transition states and probabilities for action 'a'
+            common_state = np.argmax(self.T[a])
+            rare_state = np.argmin(self.T[a])
+            common_prob = self.T[a, common_state]
+            rare_prob = self.T[a, rare_state]
+            
+            # The value of the rare state is penalized
+            value_common = state_values[common_state]
+            value_rare_penalized = state_values[rare_state] - penalty
+            
+            # Calculate the biased expected value for the action
+            q_planned[a] = common_prob * value_common + rare_prob * value_rare_penalized
+
+        return self.softmax(q_planned, self.beta)
+    
+    # We use the default value_update method from the base class. It updates
+    # q_stage2, which is used in our planning policy, and q_stage1, which
+    # is not used for choice but can be seen as a parallel MF trace.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Attentional Lapse
+
+This model posits that anxiety disrupts cognitive control, leading to attentional lapses. During a lapse, the participant forgoes their learned strategy and instead makes a completely random choice. The probability of such a lapse occurring on any given trial is directly proportional to the participant's anxiety level. This captures the notion that anxiety can impair focus and lead to inconsistent, noisy behavior.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases the rate of attentional lapses, leading
+    to noisy and inconsistent behavior. On a certain fraction of trials,
+    determined by the participant's anxiety, the choice is made randomly
+    (uniformly) rather than based on learned values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]      (Inverse temperature for non-lapse trials)
+    lapse_rate: [0, 1]  (Base probability of a lapse)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lapse_rate = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities as a mixture of a standard
+        softmax policy and a uniform random policy. The mixture weight
+        (lapse probability) is determined by anxiety.
+        """
+        # 1. Calculate the probability of a lapse, scaled by anxiety
+        # We clip to ensure the probability is valid (between 0 and 1)
+        epsilon = np.clip(self.lapse_rate * self.stai, 0, 1)
+
+        # 2. Calculate the standard value-based policy (softmax)
+        p_softmax = self.softmax(self.q_stage1, self.beta)
+        
+        # 3. Calculate the random/lapse policy (uniform)
+        p_random = np.ones(self.n_choices) / self.n_choices
+        
+        # 4. Mix the two policies
+        # With probability (1-epsilon), use softmax; with probability epsilon, choose randomly.
+        p_final = (1 - epsilon) * p_softmax + epsilon * p_random
+        
+        return p_final
+
+    # The default value_update from the base class is used, as the learning
+    # process is assumed to be a standard TD process, and anxiety only
+    # affects the expression of those values in choice.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

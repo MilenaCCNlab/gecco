@@ -1,0 +1,229 @@
+Here are 3 new cognitive models based on the two-step task, incorporating STAI scores into the decision-making process in novel ways.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hyper-Vigilant Transition Learning Model.
+
+    Hypothesis: Anxiety is characterized by hyper-vigilance to changes in environmental structure. 
+    While standard agents might have a fixed or slowly updating belief about spaceship transitions, 
+    anxious individuals update their internal model of the transition matrix (Action -> State) 
+    more rapidly, treating rare transitions as evidence of a structural change rather than noise.
+
+    Parameters:
+    - learning_rate: [0, 1] Learning rate for reward values (Q-values).
+    - beta: [0, 10] Inverse temperature for softmax choice.
+    - w: [0, 1] Weight for model-based control (0=MF, 1=MB).
+    - trans_lr_base: [0, 1] Base learning rate for the transition matrix.
+    - anxiety_boost: [0, 1] How much STAI increases the transition learning rate.
+    """
+    learning_rate, beta, w, trans_lr_base, anxiety_boost = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Anxiety increases the rate at which the agent updates beliefs about spaceship transitions
+    # Bounded to max 1.0
+    current_trans_lr = min(1.0, trans_lr_base + (anxiety_boost * stai_score))
+
+    # Initialize transition belief (starts with the instructed 0.7/0.3 structure)
+    # Row 0: Action A -> [Prob X, Prob Y]
+    # Row 1: Action U -> [Prob X, Prob Y]
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # Model-Based value uses the DYNAMIC transition matrix
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        chosen_a1 = action_1[trial]
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        
+        # 1. Update Transition Matrix (Hyper-vigilance mechanism)
+        # If we went A -> X (0 -> 0), we increase prob(0|0) and decrease prob(1|0)
+        # One-hot vector for the state we arrived at
+        state_one_hot = np.zeros(2)
+        state_one_hot[state_idx] = 1.0
+        
+        # Delta rule update for the row corresponding to the chosen action
+        transition_matrix[chosen_a1] += current_trans_lr * (state_one_hot - transition_matrix[chosen_a1])
+        
+        # 2. Update Action Values
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[chosen_a1]
+        q_stage1_mf[chosen_a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Rare-Transition Panic Model.
+
+    Hypothesis: Anxiety manifests as a "panic" response to unexpected events. 
+    When a "rare" transition occurs (e.g., Spaceship A goes to Planet Y), anxious 
+    participants experience a loss of control that increases exploration (noise) 
+    specifically at the second stage. They become less consistent in their alien choice 
+    immediately following the surprise.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Base inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - panic_factor: [0, 5] How much STAI reduces beta (increases noise) after a rare transition.
+    """
+    learning_rate, beta, w, panic_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        chosen_a1 = action_1[trial]
+
+        # --- Stage 2 Choice (Panic Mechanism) ---
+        
+        # Determine if transition was rare
+        # Common: A(0)->X(0) or U(1)->Y(1). Rare: A(0)->Y(1) or U(1)->X(0).
+        is_rare = (chosen_a1 == 0 and state_idx == 1) or (chosen_a1 == 1 and state_idx == 0)
+        
+        # Calculate current beta for stage 2
+        if is_rare:
+            # Panic reduces beta (increases noise/exploration)
+            # Denominator grows with anxiety, making beta smaller
+            current_beta_s2 = beta / (1.0 + panic_factor * stai_score)
+        else:
+            current_beta_s2 = beta
+
+        exp_q2 = np.exp(current_beta_s2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[chosen_a1]
+        q_stage1_mf[chosen_a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven WSLS Override Model.
+
+    Hypothesis: High anxiety triggers a primitive "Win-Stay, Lose-Shift" (WSLS) heuristic 
+    that overrides or biases the calculated reinforcement learning values. 
+    Regardless of the complex Model-Based or Model-Free value integration, anxious 
+    participants feel a strong urge to repeat a successful Stage 1 action or switch 
+    away from a failed one, based solely on the previous trial's outcome.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - wsls_strength: [0, 5] Magnitude of the heuristic bias added to Q-values, scaled by STAI.
+    """
+    learning_rate, beta, w, wsls_strength = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track previous trial info for WSLS
+    last_action_1 = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply WSLS Bias
+        if last_action_1 != -1:
+            wsls_bias = np.zeros(2)
+            bias_magnitude = wsls_strength * stai_score
+            
+            if last_reward == 1:
+                # Win-Stay: Boost the previous action
+                wsls_bias[last_action_1] = bias_magnitude
+            else:
+                # Lose-Shift: Boost the OTHER action
+                wsls_bias[1 - last_action_1] = bias_magnitude
+            
+            q_net += wsls_bias
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        chosen_a1 = action_1[trial]
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[chosen_a1]
+        q_stage1_mf[chosen_a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Store history
+        last_action_1 = chosen_a1
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

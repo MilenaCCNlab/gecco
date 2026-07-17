@@ -1,0 +1,159 @@
+Here are three new cognitive models. Each model proposes a unique hypothesis about how this participant's high anxiety (STAI score) influences their decision-making process in the two-step task.
+
+### Model 1
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety impairs goal-directed planning by simplifying future outcomes.
+    This model proposes that high anxiety leads to a "pruning" of the decision tree during
+    model-based (MB) planning. Instead of considering all possible transitions from a
+    stage-1 choice, the individual only considers the outcome of the most common transition.
+    This simplified, but biased, MB value is then integrated with a standard model-free (MF)
+    value. The reliance on this simplified MB system is further reduced by anxiety,
+    meaning higher STAI scores lead to more MF-like behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha_mf: [0, 1]     (Learning rate for model-free values)
+    alpha_mb: [0, 1]     (Learning rate for stage-2 values used by the MB system)
+    beta: [0, 10]        (Softmax inverse temperature)
+    base_w: [0, 1]       (Base weight on the model-based system)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_mf, self.alpha_mb, self.beta, self.base_w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities by combining a model-free value
+        with a simplified, anxiety-impaired model-based value.
+        """
+        # 1. Compute the simplified Model-Based values (Q_MB)
+        q_mb = np.zeros(self.n_choices)
+        for choice in range(self.n_choices):
+            # Find the most common planet for this spaceship choice
+            common_planet = np.argmax(self.T[choice, :])
+            # The value is just the best you can do on that common planet
+            q_mb[choice] = np.max(self.q_stage2[common_planet])
+
+        # 2. Determine the weight `w` for the MB system, reduced by anxiety
+        w = self.base_w * (1 - self.stai)
+
+        # 3. Combine MF and MB values to get the final policy
+        # q_stage1 is treated as the MF value, Q_MF
+        q_hybrid = w * q_mb + (1 - w) * self.q_stage1
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates both the stage-2 values and the model-free stage-1 values.
+        """
+        # Update stage-2 values (used by the MB system)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_mb * delta_2
+        
+        # Update model-free stage-1 value (Q_MF) using standard TD learning
+        # Note: The base class update uses Q_s2[s,a2] as the target. Using max(Q_s2[s])
+        # is also a valid SARSA-like update for the state value. We use the max here.
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_mf * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety asymmetrically enhances learning from negative outcomes.
+    This model posits that anxiety (stai) specifically amplifies the learning rate for
+    negative prediction errors. Positive, better-than-expected outcomes are learned about
+    with a standard learning rate (`alpha_pos`), but negative, worse-than-expected
+    outcomes are learned about with a higher, anxiety-scaled learning rate (`alpha_neg`).
+    This reflects a cognitive bias where negative feedback has a greater impact on
+    value updating for more anxious individuals.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]    (Learning rate for positive prediction errors)
+    alpha_neg: [0, 1]    (Base learning rate for negative prediction errors)
+    gain: [0, 2]         (Factor by which stai scales the negative learning rate)
+    beta: [0, 10]        (Softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.gain, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate the anxiety-modulated negative learning rate once."""
+        # Calculate the effective negative learning rate based on stai
+        # We cap it at 1.0 to ensure it remains a valid learning rate.
+        self.effective_alpha_neg = min(1.0, self.alpha_neg + self.gain * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using separate learning rates for positive and negative
+        prediction errors, where the negative learning rate is scaled by anxiety.
+        """
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.effective_alpha_neg * delta_2
+            
+        # Stage-1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += self.effective_alpha_neg * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety induces a pessimistic bias in evaluating future states.
+    This model suggests that when evaluating which spaceship to choose (stage 1),
+    anxious individuals do not simply consider the best possible outcome on the
+    destination planet. Instead, they compute a pessimistically-weighted average of the
+    best and worst possible outcomes at stage 2. The weight given to the worst outcome
+    is directly proportional to the individual's STAI score. This captures the idea of
+    anxious apprehension, or a "what if I make the wrong choice?" bias, influencing planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate)
+    beta: [0, 10]     (Softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates stage-1 values using a pessimistically-biased estimate of the
+        next state's value, where the pessimism is scaled by anxiety.
+        """
+        # Standard TD update for stage-2 values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Calculate the pessimistic value of the reached state
+        # The weight for the pessimistic option (min Q) is the stai score
+        w_pess = self.stai
+        max_q_s2 = np.max(self.q_stage2[state])
+        min_q_s2 = np.min(self.q_stage2[state])
+        
+        pessimistic_state_value = w_pess * min_q_s2 + (1 - w_pess) * max_q_s2
+        
+        # Update stage-1 value using this pessimistic value as the target
+        delta_1 = pessimistic_state_value - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

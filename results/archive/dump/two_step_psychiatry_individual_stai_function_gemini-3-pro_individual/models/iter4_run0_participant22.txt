@@ -1,0 +1,211 @@
+Here are three new cognitive models for the two-step task, incorporating the STAI anxiety score into different mechanisms: eligibility traces, heuristic biases, and stage-specific exploration.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 1: Anxiety-Modulated Eligibility Trace.
+    
+    This model hypothesizes that anxiety alters the 'eligibility trace' (lambda),
+    which controls how much the second-stage outcome reinforces the first-stage choice 
+    in the Model-Free system. High anxiety might lead to stronger credit assignment 
+    across stages (higher lambda), effectively making the agent more Model-Free 
+    TD(1)-like, or conversely, disrupt the link.
+
+    Parameters:
+    - learning_rate: [0, 1] Value update rate.
+    - beta: [0, 10] Inverse temperature (softmax).
+    - w: [0, 1] Weight of Model-Based system (0=MF, 1=MB).
+    - lambda_base: [0, 1] Baseline eligibility trace decay.
+    - lambda_stai_sens: [-1, 1] Sensitivity of lambda to STAI score.
+      (lambda = lambda_base + lambda_stai_sens * stai).
+    """
+    learning_rate, beta, w, lambda_base, lambda_stai_sens = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate anxiety-modulated lambda, clipped to valid range [0, 1]
+    lambda_param = lambda_base + (lambda_stai_sens * stai_score)
+    if lambda_param < 0: lambda_param = 0
+    if lambda_param > 1: lambda_param = 1
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        # TD error for stage 1 (based on stage 2 value)
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        # TD error for stage 2 (based on reward)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # Eligibility trace update: Stage 2 error propagates to Stage 1 Q-value
+        # If lambda is 1, this makes the stage 1 update fully sensitive to the final reward
+        q_stage1_mf[a1] += learning_rate * lambda_param * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 2: Anxiety-Modulated Win-Stay-Lose-Shift (WSLS).
+    
+    This model adds a heuristic "Win-Stay-Lose-Shift" bias to the first-stage choice.
+    Anxiety is hypothesized to modulate the reliance on this simple heuristic 
+    versus the more complex RL strategies. The WSLS term acts as a bonus added 
+    to the Q-values of the previously chosen action if it was rewarded, or a penalty 
+    if unrewarded.
+
+    Parameters:
+    - learning_rate: [0, 1] Value update rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight of Model-Based system.
+    - wsls_base: [0, 5] Baseline strength of the WSLS bias.
+    - wsls_stai_slope: [-2, 2] How STAI modulates the WSLS strength.
+    """
+    learning_rate, beta, w, wsls_base, wsls_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    wsls_strength = wsls_base + (wsls_stai_slope * stai_score)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = 0
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply WSLS bias
+        if last_action_1 != -1:
+            if last_reward == 1.0:
+                q_net[last_action_1] += wsls_strength
+            else:
+                q_net[last_action_1] -= wsls_strength
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+        
+        last_action_1 = a1
+        last_reward = reward[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 3: Stage-Specific Anxiety-Modulated Exploration.
+    
+    This model separates the exploration noise (inverse temperature beta) for 
+    Stage 1 and Stage 2. It hypothesizes that anxiety specifically impacts 
+    decision noise at the first stage (where MB/MF conflict occurs) differently 
+    than the second stage (pure MF). 
+
+    Parameters:
+    - learning_rate: [0, 1] Value update rate.
+    - w: [0, 1] Weight of Model-Based system.
+    - beta_stage2: [0, 10] Inverse temperature for the second stage.
+    - beta1_base: [0, 10] Baseline inverse temperature for the first stage.
+    - beta1_stai_slope: [-5, 5] Effect of STAI on first stage beta.
+    """
+    learning_rate, w, beta_stage2, beta1_base, beta1_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    beta_stage1 = beta1_base + (beta1_stai_slope * stai_score)
+    # Ensure beta stays non-negative
+    if beta_stage1 < 0: beta_stage1 = 0
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Use Stage 1 specific beta
+        exp_q1 = np.exp(beta_stage1 * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 2 Policy ---
+        # Use Stage 2 specific beta
+        exp_q2 = np.exp(beta_stage2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

@@ -1,0 +1,164 @@
+As a cognitive scientist and Python programmer, I will now propose three distinct cognitive models to explain this participant's behavior. The participant exhibits high anxiety (STAI score of 0.6875) and a highly perseverative choice pattern, sticking with one spaceship for many trials before switching. My models will explore different hypotheses for how anxiety might drive this inflexibility.
+
+### Model 1: Anxiety-Gated Arbitration between Systems
+
+This model tests the hypothesis that high anxiety impairs goal-directed, model-based planning, causing a strategic shift towards simpler, habitual model-free learning. The choice is a weighted average of values from both systems, and anxiety directly reduces the weight given to the computationally demanding model-based system. This could explain long streaks of repeating the same action, as the model-free system is slow to update and reinforces habits.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety promotes reliance on a computationally simpler, habitual
+    (model-free) learning system over a goal-directed (model-based) one. The overall
+    stage-1 value is a weighted average of both systems' values, and anxiety
+    reduces the weight (w) assigned to the model-based controller.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (learning rate for both systems)
+    beta: [0, 10]   (inverse temperature for choice)
+    w: [0, 1]       (base weight for model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a separate model-free Q-value table."""
+        self.q_mf = np.zeros(self.n_choices)
+        # The effective model-based weight is reduced by anxiety
+        self.w_effective = self.w * (1 - self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes stage-1 policy based on a mix of model-based and model-free values."""
+        # Model-based value calculation
+        q_max_s2 = np.max(self.q_stage2, axis=1)
+        q_mb = self.T @ q_max_s2
+
+        # Combine model-based and model-free values
+        self.q_stage1 = self.w_effective * q_mb + (1 - self.w_effective) * self.q_mf
+        
+        return self.softmax(self.q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update stage-2 values and the model-free stage-1 values."""
+        # Stage-2 update (same as base)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-free stage-1 update
+        # This is a SARSA-like update using the value of the reached state
+        delta_1_mf = np.max(self.q_stage2[state]) - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1_mf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Asymmetric Learning and Perseveration
+
+This model proposes that high anxiety specifically enhances learning from negative outcomes (punishment sensitivity) and fosters a general tendency to repeat recent actions (perseveration). The participant may overreact to losses, and this, combined with a "sticky" choice mechanism, could lead them to abandon an option prematurely and then perseverate on the new choice for a long time.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases sensitivity to negative outcomes and promotes
+    behavioral inflexibility. This is modeled with two learning rates: one for
+    positive and one for negative prediction errors, where anxiety amplifies the
+    negative learning rate. A separate perseveration parameter (eta) adds a bonus
+    to the previously chosen action, making it "sticky".
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   (learning rate for positive outcomes)
+    alpha_neg: [0, 1]   (base learning rate for negative outcomes)
+    beta: [0, 10]      (inverse temperature)
+    eta: [0, 5]        (perseveration bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.beta, self.eta = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate an anxiety-modulated learning rate for negative outcomes."""
+        # Anxiety scales the negative learning rate towards 1.
+        self.alpha_neg_effective = self.alpha_neg + (1 - self.alpha_neg) * self.stai
+        self.last_action1 = -1 # Initialize for first trial
+
+    def policy_stage1(self) -> np.ndarray:
+        """The policy includes a perseveration bonus for the last chosen action."""
+        q_policy = self.q_stage1.copy()
+        if self.last_action1 != -1:
+            q_policy[self.last_action1] += self.eta
+        
+        return self.softmax(q_policy, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values using separate learning rates for positive and negative prediction errors."""
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_eff_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg_effective
+        self.q_stage2[state, action_2] += alpha_eff_2 * delta_2
+        
+        # Stage-1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        # For simplicity, we can use the same effective alpha as the stage-2 update
+        alpha_eff_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg_effective
+        self.q_stage1[action_1] += alpha_eff_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Distortion of World Model
+
+This model posits that anxiety affects not the learning process or choice rule itself, but the individual's internal representation of the world. Specifically, high anxiety leads to "attentional narrowing," causing the participant to overestimate the probability of common events and underestimate rare ones. This distorted model of the task would make one spaceship appear overwhelmingly superior, justifying the observed perseveration, as rare (but potentially rewarding) outcomes from the other spaceship are mentally discounted.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety distorts the participant's internal model of the task
+    structure. It causes an overestimation of common transition probabilities and
+    an underestimation of rare ones. This is controlled by a distortion parameter
+    (omega) that is scaled by anxiety. Decisions are then made based on this
+    biased world model.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (learning rate for stage-2 values)
+    beta: [0, 10]   (inverse temperature for choice)
+    omega: [0, 1]   (base weight for transition distortion)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega = model_parameters
+
+    def init_model(self) -> None:
+        """Create a subjective transition matrix distorted by anxiety."""
+        # Assuming T[0,0] and T[1,1] are common transitions
+        p_common = self.T[0, 0]
+        p_rare = self.T[0, 1]
+
+        # The amount of distortion is scaled by anxiety and the distortion parameter
+        distortion = self.omega * self.stai * p_rare
+        
+        p_common_subj = min(1.0, p_common + distortion)
+        p_rare_subj = max(0.0, p_rare - distortion)
+        
+        self.T_subjective = np.array([
+            [p_common_subj, p_rare_subj],
+            [p_rare_subj, p_common_subj]
+        ])
+
+    def pre_trial(self) -> None:
+        """Before each choice, calculate stage-1 values based on the distorted model."""
+        # Calculate the maximum expected reward from each planet (stage-2 state)
+        q_max_s2 = np.max(self.q_stage2, axis=1)
+        
+        # Calculate model-based stage-1 values using the subjective transition matrix
+        self.q_stage1 = self.T_subjective @ q_max_s2
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update only the stage-2 values, as stage-1 values are computed, not learned."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

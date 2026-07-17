@@ -1,0 +1,112 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Memory Decay]
+    This model hypothesizes that high anxiety consumes cognitive resources (working memory),
+    causing the value representations of unchosen options to decay faster towards a neutral 
+    prior (0.5). The rate of this decay is modulated by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    decay_param: [0, 1] (Scales the decay rate by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_param = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for the chosen path
+        super().value_update(action_1, state, action_2, reward)
+        
+        # Apply decay to the unchosen Stage 1 option
+        unchosen_1 = 1 - action_1
+        
+        # The decay rate is a function of the base parameter and the participant's anxiety
+        # Higher anxiety -> faster forgetting of the option not taken
+        decay_rate = self.stai * self.decay_param
+        
+        # Decay towards neutral value of 0.5
+        self.q_stage1[unchosen_1] += decay_rate * (0.5 - self.q_stage1[unchosen_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Induced Safety Bias]
+    This model hypothesizes that anxiety leads to a static preference for a "default" or 
+    "safe" option (Spaceship A/0), independent of reward history. This bias acts as a 
+    fixed prior added to the decision logits, with magnitude scaled by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    safety_bias: [0, 5] (Strength of bias towards option 0)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.safety_bias = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Start with learned Q-values
+        logits = self.q_stage1.copy()
+        
+        # Add static bias to option 0 (Spaceship A), scaled by anxiety
+        # This represents a tendency to stick to a 'safe' default regardless of value
+        logits[0] += self.stai * self.safety_bias
+        
+        return self.softmax(logits, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Surprise Gating]
+    This model hypothesizes that when a rare transition occurs (unexpected state outcome), 
+    the participant discounts the learning update for the Stage 1 choice, attributing the 
+    outcome to environmental noise rather than action value. Anxiety modulates the strength 
+    of this gating/discounting mechanism.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    surprise_gate: [0, 1] (Discount factor for rare transitions, scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.surprise_gate = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Determine if transition was rare based on transition counts
+        # 0->0 (35) Common, 0->1 (15) Rare
+        # 1->0 (15) Rare, 1->1 (35) Common
+        is_rare = False
+        if action_1 == 0 and state == 1: is_rare = True
+        if action_1 == 1 and state == 0: is_rare = True
+        
+        # Calculate effective alpha for Stage 1
+        current_alpha = self.alpha
+        
+        if is_rare:
+            # Reduce alpha based on anxiety and parameter
+            # If surprise_gate is high and stai is high, learning from rare events is suppressed
+            discount = self.stai * self.surprise_gate
+            # Clamp discount to max 1.0 to prevent sign flip
+            if discount > 1.0: discount = 1.0
+            current_alpha *= (1.0 - discount)
+            
+        # Stage 1 update with potentially modified alpha
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

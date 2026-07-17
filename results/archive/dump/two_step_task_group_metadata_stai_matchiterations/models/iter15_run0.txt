@@ -1,0 +1,237 @@
+Here are three new cognitive models that incorporate STAI scores into the decision-making process in novel ways, distinct from the previous attempts.
+
+### Model 1: Anxiety-Modulated Eligibility Traces
+This model hypothesizes that anxiety affects how credit is assigned to past actions. Specifically, high anxiety might lead to "over-thinking" or ruminating on the first step, effectively increasing the eligibility trace parameter ($\lambda$). This means the outcome at the second stage updates the value of the first stage choice more strongly for anxious individuals, blurring the distinction between the two stages.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Eligibility Traces.
+
+    Hypothesis: Anxiety increases the eligibility trace (lambda), causing the outcome 
+    at the second stage to update the first-stage value more aggressively. 
+    High anxiety individuals bind the chain of events more tightly, making them 
+    more sensitive to the final outcome when evaluating the initial choice.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control (0=MF, 1=MB).
+    - lambda_base: [0, 1] Baseline eligibility trace parameter.
+    - lambda_mod: [0, 1] Modulation of lambda by STAI.
+    """
+    learning_rate, beta, w, lambda_base, lambda_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective lambda based on anxiety
+    # We clip to ensure it stays within [0, 1]
+    lambda_eff = np.clip(lambda_base + (lambda_mod * stai_score), 0.0, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial] # 0 for X, 1 for Y
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning ---
+        # Prediction error at stage 1 (TD(0))
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Prediction error at stage 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Eligibility trace update: The stage 2 error also updates stage 1 value
+        # scaled by lambda_eff
+        q_stage1_mf[action_1[trial]] += learning_rate * lambda_eff * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Induced Transition Uncertainty
+This model posits that anxiety degrades the precision of the internal model of the environment. While a standard Model-Based agent assumes the transition matrix is fixed (e.g., 0.7/0.3), an anxious agent might perceive the world as more volatile or uncertain. We model this by "flattening" the transition matrix towards 0.5/0.5 as anxiety increases, reducing the effectiveness of Model-Based planning.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Transition Uncertainty.
+
+    Hypothesis: Anxiety introduces entropy into the internal model of the task structure.
+    High anxiety participants perceive the transition probabilities as less certain 
+    (closer to 50/50), effectively dampening the Model-Based value calculation.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - uncertainty_bias: [0, 0.4] How much STAI flattens the transition matrix.
+    """
+    learning_rate, beta, w, uncertainty_bias = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Standard transition matrix
+    true_prob = 0.7
+    
+    # Anxious distortion: reduces the 0.7 probability towards 0.5 based on STAI
+    # If uncertainty_bias is high and STAI is high, perceived_prob drops.
+    # Max distortion should not flip the matrix (hence bound 0.4).
+    distortion = uncertainty_bias * stai_score
+    perceived_prob = true_prob - distortion
+    
+    # Ensure it doesn't go below 0.5 (random)
+    perceived_prob = max(0.5, perceived_prob)
+    
+    # Construct the subjective transition matrix
+    # Row 0: A -> [X, Y], Row 1: U -> [X, Y] (flipped)
+    transition_matrix = np.array([
+        [perceived_prob, 1 - perceived_prob], 
+        [1 - perceived_prob, perceived_prob]
+    ])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # MB values calculated using the distorted matrix
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven "Win-Stay, Lose-Shift" Heuristic
+This model suggests that under high anxiety, complex reinforcement learning (RL) computations are metabolically expensive or overwhelming. Instead, anxious individuals may revert to a simpler, reactive "Win-Stay, Lose-Shift" (WSLS) strategy at the first stage. This model mixes the standard RL policy with a heuristic policy, where the weight of the heuristic increases with STAI.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven "Win-Stay, Lose-Shift" Heuristic.
+
+    Hypothesis: High anxiety depletes cognitive resources required for value-based 
+    computation. Anxious participants rely more heavily on a simple reactive 
+    heuristic (Win-Stay, Lose-Shift) based on the previous trial's outcome, 
+    bypassing Q-value integration.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature for the RL component.
+    - w: [0, 1] Weight for model-based control within the RL component.
+    - heuristic_weight: [0, 1] How much the WSLS heuristic overrides RL, scaled by STAI.
+    """
+    learning_rate, beta, w, heuristic_weight = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate the mixing weight: 
+    # 0 = Pure RL, 1 = Pure WSLS (if STAI is high and param is high)
+    mix_alpha = np.clip(heuristic_weight * stai_score, 0.0, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_reward = 0
+    prev_action_1 = -1
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        
+        # 1. Calculate RL Policy (Hybrid MB/MF)
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_rl = exp_q1 / np.sum(exp_q1)
+        
+        # 2. Calculate Heuristic Policy (WSLS)
+        probs_heuristic = np.array([0.5, 0.5]) # Default random if no history
+        if prev_action_1 != -1:
+            if prev_reward == 1:
+                # Win-Stay: High prob to repeat last action
+                probs_heuristic = np.zeros(2)
+                probs_heuristic[prev_action_1] = 0.99
+                probs_heuristic[1 - prev_action_1] = 0.01
+            else:
+                # Lose-Shift: High prob to switch
+                probs_heuristic = np.zeros(2)
+                probs_heuristic[prev_action_1] = 0.01
+                probs_heuristic[1 - prev_action_1] = 0.99
+        
+        # 3. Mix Policies
+        final_probs_1 = (1 - mix_alpha) * probs_rl + mix_alpha * probs_heuristic
+        p_choice_1[trial] = final_probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Choice (Standard RL) ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Learning ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Update history
+        prev_reward = reward[trial]
+        prev_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

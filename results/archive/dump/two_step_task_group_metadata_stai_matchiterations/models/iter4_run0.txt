@@ -1,0 +1,227 @@
+Here are three new cognitive models that incorporate the STAI anxiety score into the decision-making process in distinct ways.
+
+### Model 1: Anxiety-Modulated Learning Rate Asymmetry
+This model hypothesizes that anxiety affects how participants learn from positive versus negative prediction errors. High anxiety might lead to a "negativity bias," where the learning rate for negative outcomes (disappointment) is higher than for positive outcomes, or vice versa.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Learning Rate Asymmetry.
+
+    Hypothesis: Anxiety modulates the balance between learning from positive and negative 
+    prediction errors. High anxiety participants may over-weight negative errors 
+    (learning more from failure) or positive errors, represented by a bias parameter.
+
+    Parameters:
+    - lr_base: [0, 1] Base learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based weight.
+    - anxiety_asym: [0, 1] Modulation factor. If > 0.5, anxiety increases learning from 
+      negative PEs. If < 0.5, anxiety increases learning from positive PEs.
+      The effective learning rate is split into lr_pos and lr_neg based on STAI and this param.
+    """
+    lr_base, beta, w, anxiety_asym = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate asymmetric learning rates based on anxiety
+    # If anxiety_asym is high, high STAI boosts negative learning rate.
+    # We center the modulation around the base rate.
+    
+    # Bias factor: -1 to 1 based on anxiety_asym parameter
+    bias_direction = (anxiety_asym - 0.5) * 2 
+    
+    # If bias_direction is positive, anxiety increases negative learning.
+    # If bias_direction is negative, anxiety increases positive learning.
+    modulator = bias_direction * stai_score
+    
+    lr_pos = lr_base * (1 - modulator)
+    lr_neg = lr_base * (1 + modulator)
+    
+    # Clip to ensure valid range [0, 1]
+    lr_pos = np.clip(lr_pos, 0.0, 1.0)
+    lr_neg = np.clip(lr_neg, 0.0, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        # Stage 1 Update (TD(0))
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # Use lr_pos if delta is positive, lr_neg if delta is negative
+        lr_s1 = lr_pos if delta_stage1 > 0 else lr_neg
+        q_stage1_mf[action_1[trial]] += lr_s1 * delta_stage1
+        
+        # Stage 2 Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        lr_s2 = lr_pos if delta_stage2 > 0 else lr_neg
+        q_stage2_mf[state_idx, action_2[trial]] += lr_s2 * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Induced Randomness (Epsilon-Greedy Mixture)
+This model posits that anxiety acts as a cognitive load or distractor, causing "lapses" in attention. Instead of just changing the softmax temperature (which affects the curve shape), anxiety introduces a baseline probability of choosing completely randomly (epsilon-greedy exploration), regardless of value differences.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Randomness (Epsilon-Greedy Mixture).
+
+    Hypothesis: Anxiety consumes cognitive resources, leading to attentional lapses.
+    Higher anxiety increases 'epsilon' (random choice probability), mixing a 
+    standard softmax policy with a uniform random policy.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature for the softmax component.
+    - w: [0, 1] Model-based weight.
+    - eps_factor: [0, 1] Scaling factor for anxiety-induced randomness.
+      The effective epsilon is eps_factor * stai.
+    """
+    learning_rate, beta, w, eps_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate epsilon based on anxiety
+    epsilon = eps_factor * stai_score
+    # Ensure epsilon doesn't exceed 1 (though bounds usually prevent this)
+    epsilon = min(epsilon, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Softmax probabilities
+        exp_q1 = np.exp(beta * q_net)
+        softmax_probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        # Mixture: (1-eps) * Softmax + eps * Random(0.5)
+        final_probs_1 = (1 - epsilon) * softmax_probs_1 + epsilon * 0.5
+        p_choice_1[trial] = final_probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        softmax_probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        # Mixture for stage 2 as well
+        final_probs_2 = (1 - epsilon) * softmax_probs_2 + epsilon * 0.5
+        p_choice_2[trial] = final_probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Eligibility Trace Decay
+This model suggests that anxiety affects working memory retention. In reinforcement learning, eligibility traces ($\lambda$) control how much credit is assigned to past actions. High anxiety might impair the ability to maintain the "trace" of the first-stage choice, effectively reducing $\lambda$. This makes the agent more purely Model-Free at stage 1 (TD(0)) rather than linking stage 1 directly to the reward (TD(1)).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Eligibility Trace Decay.
+
+    Hypothesis: Anxiety impairs working memory maintenance. This is modeled as a 
+    reduction in the eligibility trace parameter (lambda). Low anxiety allows 
+    better credit assignment (higher lambda), while high anxiety disrupts the 
+    link between Stage 1 choice and the final reward (lower lambda).
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based weight.
+    - lambda_base: [0, 1] Base eligibility trace parameter.
+    - lambda_mod: [0, 1] Strength of anxiety's reduction on lambda.
+      Effective lambda = lambda_base * (1 - lambda_mod * stai).
+    """
+    learning_rate, beta, w, lambda_base, lambda_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective lambda
+    # High anxiety reduces lambda (faster decay/less credit assignment)
+    eff_lambda = lambda_base * (1.0 - (lambda_mod * stai_score))
+    eff_lambda = np.clip(eff_lambda, 0.0, 1.0)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates with Eligibility Trace ---
+        # Standard TD errors
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # Update Stage 2 (Standard Q-learning)
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Update Stage 1
+        # In TD(lambda) for this specific task structure:
+        # Q1 += alpha * delta1  (Immediate update from transition)
+        # Q1 += alpha * lambda * delta2 (Eligibility trace update from reward)
+        
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        q_stage1_mf[action_1[trial]] += learning_rate * eff_lambda * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

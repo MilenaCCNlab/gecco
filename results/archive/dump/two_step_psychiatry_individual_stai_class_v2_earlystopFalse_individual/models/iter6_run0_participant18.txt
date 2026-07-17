@@ -1,0 +1,141 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates memory decay (forgetting) of unchosen options.
+    
+    We hypothesize that anxiety correlates with cognitive instability. High anxiety individuals 
+    may have faster decay rates for the values of options they did not choose, effectively 
+    "forgetting" the value of alternative actions faster. Low anxiety individuals (like this participant) 
+    retain value representations of unchosen options more stably.
+    
+    Mechanism:
+    After each trial, the Q-value of the *unchosen* Stage 1 action decays towards a neutral value (0.5).
+    The decay rate is proportional to the STAI score.
+    
+    Q_unchosen = Q_unchosen * (1 - decay_rate) + 0.5 * decay_rate
+    decay_rate = decay_base * stai
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    decay_base: [0, 1]  # Base decay scaling factor
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_base = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate decay rate based on anxiety
+        # Higher anxiety -> higher decay (more forgetting)
+        self.decay_rate = self.decay_base * self.stai
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Call parent to store last actions
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Apply decay to the unchosen action in Stage 1
+        unchosen_action = 1 - int(action_1)
+        
+        # Decay towards 0.5 (neutral value)
+        current_val = self.q_stage1[unchosen_action]
+        self.q_stage1[unchosen_action] = current_val * (1.0 - self.decay_rate) + 0.5 * self.decay_rate
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates credit assignment via an eligibility trace (Lambda).
+    
+    We hypothesize that anxiety disrupts the ability to link distal rewards (Stage 2 outcome) 
+    back to proximal choices (Stage 1 spaceship choice). Low anxiety individuals are better 
+    at maintaining this link (higher eligibility trace), allowing the final reward to directly 
+    reinforce the initial choice. High anxiety individuals rely more on the immediate state transition.
+    
+    Mechanism:
+    We implement a TD(lambda)-like update for the Stage 1 value.
+    The Stage 1 update includes a portion of the Stage 2 Reward Prediction Error (RPE).
+    
+    Q1(a1) <- Q1(a1) + alpha * (Q2(s, a2) - Q1(a1)) + alpha * lambda * (r - Q2(s, a2))
+    
+    lambda = lambda_base * (1 - stai)
+    (Low anxiety -> High lambda/better credit assignment)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate
+    beta: [0, 10]        # Inverse temperature
+    lambda_base: [0, 1]  # Base eligibility trace strength
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base = model_parameters
+
+    def init_model(self) -> None:
+        # Modulate lambda by STAI. 
+        # Low anxiety (low STAI) results in higher lambda.
+        # We clamp STAI effect to ensure lambda stays positive.
+        self.lambda_val = self.lambda_base * (1.0 - min(self.stai, 1.0))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate Stage 2 RPE
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Update Stage 2 Value
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Calculate Stage 1 RPE (Standard TD part)
+        # Note: We use the updated Q2 here, which is a variation of SARSA/Q-learning
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Update Stage 1 Value with both TD error and Eligibility Trace from Stage 2 error
+        # The term (alpha * lambda * delta_2) represents the direct reinforcement from the outcome
+        self.q_stage1[action_1] += self.alpha * delta_1 + (self.alpha * self.lambda_val * delta_2)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates "Loss-Switching" (Reactive Control).
+    
+    We hypothesize that anxiety increases sensitivity to negative outcomes (losses), leading to 
+    a reactive "Win-Stay, Lose-Switch" bias specifically triggered by losses. 
+    High anxiety individuals feel a strong urge to switch spaceships after receiving 0 coins.
+    Low anxiety individuals (like this participant) are less reactive to immediate losses and 
+    stick to their learned values.
+    
+    Mechanism:
+    If the previous trial resulted in 0 reward, we apply a penalty to the Q-value of the 
+    previously chosen action during the selection phase (heuristic bias).
+    
+    Penalty = switch_sens * stai
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate
+    beta: [0, 10]        # Inverse temperature
+    switch_sens: [0, 5]  # Sensitivity to loss-switching
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.switch_sens = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the penalty magnitude based on anxiety
+        self.switch_penalty = self.switch_sens * self.stai
+
+    def policy_stage1(self) -> np.ndarray:
+        q_values = self.q_stage1.copy()
+        
+        # Apply heuristic bias if the last trial was a loss (reward == 0)
+        if self.last_reward is not None and self.last_reward == 0.0:
+            if self.last_action1 is not None:
+                # Penalize the previous action to encourage switching
+                q_values[int(self.last_action1)] -= self.switch_penalty
+        
+        return self.softmax(q_values, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

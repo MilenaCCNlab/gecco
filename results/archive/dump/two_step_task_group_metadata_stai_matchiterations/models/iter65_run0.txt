@@ -1,0 +1,227 @@
+Here are 3 new cognitive models implemented as Python functions.
+
+### Model 1: Anxiety-Driven Transition Uncertainty
+This model hypothesizes that anxiety degrades the precision of the internal model of the environment. While the participant uses Model-Based (MB) planning, their belief about the transition probabilities (which spaceship goes to which planet) becomes "flatter" or more uncertain as anxiety increases. They act as if the world is more chaotic than it actually is.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Transition Uncertainty Model.
+    
+    Hypothesis: Anxiety introduces entropy into the Model-Based transition matrix.
+    High anxiety participants perceive the transition probabilities (A->X, U->Y) 
+    as closer to chance (0.5/0.5) than reality (0.7/0.3), effectively dampening 
+    the Model-Based contribution even if 'w' remains high.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - uncertainty_scale: [0, 1] How strongly STAI flattens the transition matrix.
+      (0 = perfect knowledge, 1 = maximum uncertainty/uniform belief).
+    """
+    learning_rate, beta, w, uncertainty_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Define the true transition matrix
+    true_transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    # Calculate the subjective transition matrix based on anxiety
+    # As anxiety increases, the matrix blends towards a uniform [[0.5, 0.5], [0.5, 0.5]]
+    distortion = uncertainty_scale * stai_score
+    # Ensure distortion doesn't exceed 1
+    if distortion > 1.0: distortion = 1.0
+    
+    uniform_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+    subjective_transition_matrix = (1 - distortion) * true_transition_matrix + distortion * uniform_matrix
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2)) # 2 states (planets), 2 actions (aliens)
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        # Model-Based Value Calculation using the ANXIETY-DISTORTED matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = subjective_transition_matrix @ max_q_stage2
+
+        # Net Q-value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        # Stage 1 Update (TD)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Stage 2 Update (TD)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Linked Stage 2 Stickiness
+Previous models looked at stickiness in the first stage (choosing the same spaceship). This model hypothesizes that anxiety manifests as repetitive motor behavior or "safety seeking" at the *second* stage (choosing the alien). Once the participant arrives at a planet, high anxiety drives them to repeat their previous choice at that specific planet, regardless of whether it was rewarded.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Linked Stage 2 Stickiness Model.
+    
+    Hypothesis: Anxiety increases 'choice stickiness' (perseveration) specifically 
+    at the terminal decision stage (Stage 2). High anxiety participants tend to 
+    re-select the same alien they chose last time they were at that specific planet, 
+    ignoring the reward outcome.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - s2_persev: [0, 5] Magnitude of the stickiness bonus applied to Stage 2 Q-values,
+      scaled by STAI.
+    """
+    learning_rate, beta, w, s2_persev = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track the last action taken at each state (Planet X=0, Planet Y=1)
+    # Initialize with -1 (no previous action)
+    last_action_at_state = [-1, -1] 
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        # Copy Q-values to add temporary stickiness bonus
+        q_stage2_current = q_stage2_mf[state_idx].copy()
+        
+        # If we have visited this state before, apply stickiness to the previous choice
+        prev_choice = last_action_at_state[state_idx]
+        if prev_choice != -1:
+            q_stage2_current[prev_choice] += (s2_persev * stai_score)
+
+        exp_q2 = np.exp(beta * q_stage2_current)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Update history for this state
+        last_action_at_state[state_idx] = action_2[trial]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Epsilon Lapse
+Instead of anxiety affecting the *precision* of the value comparison (beta), this model hypothesizes that anxiety causes random attentional lapses or "panic" responses. This is modeled as an Epsilon-Greedy mixture where the `epsilon` (probability of choosing completely randomly) is a function of the STAI score.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Epsilon Lapse Model.
+    
+    Hypothesis: Anxiety acts as a distractor, causing random attentional lapses.
+    Instead of just noise in the softmax (beta), anxiety drives an 'epsilon-greedy' 
+    mechanism where the participant occasionally disengages from the value-based 
+    policy entirely and chooses randomly.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature for the non-random portion of policy.
+    - w: [0, 1] Weight for model-based control.
+    - eps_param: [0, 1] Scaling factor for anxiety-driven randomness. 
+      Epsilon = eps_param * STAI.
+    """
+    learning_rate, beta, w, eps_param = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Calculate the anxiety-driven lapse rate (epsilon)
+    epsilon = eps_param * stai_score
+    # Bound epsilon to max 0.99 to prevent math errors, though param bounds usually handle this
+    if epsilon > 0.99: epsilon = 0.99
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        # Softmax calculation
+        exp_q1 = np.exp(beta * q_net)
+        softmax_probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        # Mixture: (1-eps) * Softmax + eps * Random(0.5)
+        final_probs_1 = (1 - epsilon) * softmax_probs_1 + epsilon * 0.5
+        p_choice_1[trial] = final_probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        softmax_probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        # Mixture applied to Stage 2 as well
+        final_probs_2 = (1 - epsilon) * softmax_probs_2 + epsilon * 0.5
+        p_choice_2[trial] = final_probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

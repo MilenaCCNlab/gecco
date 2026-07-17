@@ -1,0 +1,258 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Weighted Heuristic Control (Win-Stay, Lose-Shift)
+    
+    This model hypothesizes that high anxiety causes participants to rely on simple, 
+    reactive heuristics rather than value-based learning. Specifically, it implements 
+    a mixture model where the policy is a combination of Reinforcement Learning (RL) 
+    and a "Win-Stay, Lose-Shift" (WSLS) heuristic.
+    
+    The weight of the WSLS heuristic increases with anxiety (STAI).
+    
+    P_choice = (1 - w) * P_RL + w * P_WSLS
+    w = heuristic_mix * stai
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    heuristic_mix: [0, 1] (Proportion of heuristic usage scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.heuristic_mix = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate standard RL probabilities
+        p_rl = self.softmax(self.q_stage1, self.beta)
+        
+        # 2. Calculate WSLS probabilities
+        p_wsls = np.ones(self.n_choices) / self.n_choices # Default uniform if no history
+        
+        if self.last_action1 is not None and self.last_reward is not None:
+            p_wsls = np.zeros(self.n_choices)
+            if self.last_reward == 1.0:
+                # Win-Stay: Repeat last action
+                p_wsls[int(self.last_action1)] = 1.0
+            else:
+                # Lose-Shift: Choose the other action
+                p_wsls[1 - int(self.last_action1)] = 1.0
+        
+        # 3. Mix policies based on anxiety
+        # Ensure mixing weight w is within [0, 1]
+        w = np.clip(self.heuristic_mix * self.stai, 0.0, 1.0)
+        
+        return (1 - w) * p_rl + w * p_wsls
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced State Blurring (Generalization Error)
+    
+    This model hypothesizes that high anxiety impairs the ability to maintain distinct 
+    representations of the two planets (states). This leads to "leaking" or generalization 
+    of value updates: when an alien on Planet X is updated, the corresponding alien on 
+    Planet Y is also updated slightly in the same direction.
+    
+    The magnitude of this leak is proportional to the STAI score.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    blur_rate: [0, 1] (Fraction of the update applied to the unvisited state)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.blur_rate = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard update for the visited state
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Leaked update for the unvisited state (blurring)
+        other_state = 1 - state
+        leak_alpha = self.alpha * self.blur_rate * self.stai
+        
+        # We assume the participant generalizes the prediction error to the other context
+        # i.e., "Aliens are generous today" vs "Alien A is generous"
+        self.q_stage2[other_state, action_2] += leak_alpha * delta_2
+        
+        # Standard Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Risk Aversion (Mean-Variance Tradeoff)
+    
+    This model hypothesizes that anxious participants are risk-averse. They track not just 
+    the expected value (mean) of rewards but also the uncertainty (variance/deviation).
+    They penalize options with high variance.
+    
+    Utility = Q_value - (risk_penalty * stai * Uncertainty)
+    
+    Uncertainty is tracked as the mean absolute deviation of prediction errors.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    risk_penalty: [0, 5] (Scaling factor for variance penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.risk_penalty = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance tracking (Mean Absolute Deviation) for Stage 2
+        self.q_var = np.zeros((self.n_states, self.n_choices))
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Calculate risk-adjusted utility
+        # High anxiety -> larger penalty for variance
+        penalty = self.risk_penalty * self.stai * self.q_var[state]
+        utility = self.q_stage2[state] - penalty
+        
+        return self.softmax(utility, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate prediction error
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Update Mean Value (Q)
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Uncertainty (Mean Absolute Deviation)
+        # Var <- (1-alpha)*Var + alpha*|error|
+        current_var = self.q_var[state, action_2]
+        self.q_var[state, action_2] += self.alpha * (np.abs(delta_2) - current_var)
+        
+        # For Stage 1 update, we use the Risk-Adjusted Utility of the chosen Stage 2 option
+        # This implies the participant learns the value of the spaceship based on the 
+        # "safe" value of the alien they just chose.
+        penalty = self.risk_penalty * self.stai * self.q_var[state, action_2]
+        utility_stage2 = self.q_stage2[state, action_2] - penalty
+        
+        delta_1 = utility_stage2 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

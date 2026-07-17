@@ -1,0 +1,269 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+# --- Provided CognitiveModelBase and related classes (copy-pasted for completeness) ---
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences (for fitting, not strictly needed for simulation)
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+# --- ParticipantModel3 definition (copy-pasted) ---
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants exhibit a "recency bias" or "forgetting"
+    mechanism, where older value estimates decay over time, making recent experiences more influential.
+    This decay is applied to both first and second-stage Q-values before each trial's update.
+    The participant's anxiety level (STAI score) is hypothesized to increase this forgetting rate,
+    meaning higher anxiety leads to a stronger emphasis on recent outcomes and a faster decay
+    of past experiences, potentially due to reduced attentional resources or increased focus on
+    immediate, salient events, or simply a reduced ability to maintain long-term value representations.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    forget_rate_base: [0, 1] (Base rate at which Q-values decay per trial; 0=no decay, 1=complete decay)
+    k_stai_forget: [0, 1] (Sensitivity of forgetting rate to STAI score; adds to base)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.forget_rate_base, self.k_stai_forget = model_parameters
+        # Calculate the effective forgetting rate, modulated by STAI, ensuring it's within [0, 1)
+        # We cap at 0.99 to prevent total forgetting in a single step, which would make learning impossible.
+        self.forget_rate_effective = min(0.99, self.forget_rate_base + self.stai * self.k_stai_forget)
+
+    def pre_trial(self) -> None:
+        """
+        Apply forgetting to Q-values before the current trial's update.
+        """
+        decay_factor = 1.0 - self.forget_rate_effective
+        self.q_stage1 *= decay_factor
+        self.q_stage2 *= decay_factor
+        
+        # Ensure Q-values don't decay below a reasonable minimum (e.g., min possible reward -1)
+        # This prevents values from becoming excessively negative solely due to forgetting.
+        self.q_stage1 = np.maximum(self.q_stage1, -1.0)
+        self.q_stage2 = np.maximum(self.q_stage2, -1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning after the forgetting step.
+        """
+        # Standard Q-learning updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+# --- Simulation function based on the example ---
+
+def simulate_model(
+    ModelClass,
+    n_trials: int,
+    stai: float,
+    model_parameters: tuple,
+    drift1: np.ndarray,
+    drift2: np.ndarray,
+    drift3: np.ndarray,
+    drift4: np.ndarray,
+    seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Simulate a two-step task trajectory from any current-template model class
+    (i.e., a subclass of CognitiveModelBase like ParticipantModel1/2/3).
+
+    Task structure:
+      - Stage 1: choose action_1 in {0,1}
+      - Transition: state in {0,1} sampled from model.T[action_1]
+      - Stage 2: choose action_2 in {0,1} conditioned on state
+      - Reward: sampled from drifting reward probabilities:
+          state 0: [drift1[t], drift2[t]] for actions 0/1
+          state 1: [drift3[t], drift4[t]] for actions 0/1
+
+    Parameters
+    ----------
+    ModelClass : type
+        A subclass of CognitiveModelBase (e.g., ParticipantModel3).
+    n_trials : int
+        Number of trials to simulate.
+    stai : float
+        Participant anxiety score; passed into the model constructor as self.stai.
+    model_parameters : tuple
+        Parameters expected by ModelClass.unpack_parameters(...).
+    drift1, drift2, drift3, drift4 : np.ndarray (length n_trials)
+        Trial-wise reward probabilities for the 4 (state, action) pairs.
+    seed : int or None
+        RNG seed.
+
+    Returns
+    -------
+    stage1_choice : np.ndarray, shape (n_trials,)
+    state2          : np.ndarray, shape (n_trials,)
+    stage2_choice : np.ndarray, shape (n_trials,)
+    reward        : np.ndarray, shape (n_trials,)
+    """
+    rng = np.random.default_rng(seed)
+
+    # Instantiate model (will set up q-values, self.T, etc.)
+    # The `stai` parameter to the model constructor expects a float.
+    model = ModelClass(n_trials=n_trials, stai=float(stai), model_parameters=model_parameters)
+
+    stage1_choice = np.zeros(n_trials, dtype=int)
+    state2 = np.zeros(n_trials, dtype=int)
+    stage2_choice = np.zeros(n_trials, dtype=int)
+    reward = np.zeros(n_trials, dtype=int)
+
+    for t in range(n_trials):
+        model.trial = t
+        model.pre_trial() # This will apply forgetting for ParticipantModel3
+
+        # --- Stage 1 choice ---
+        p1 = model.policy_stage1()
+        # safety normalize in case an override returns tiny numerical drift
+        p1 = np.clip(p1, 1e-12, 1.0)
+        p1 = p1 / np.sum(p1)
+        a1 = int(rng.choice([0, 1], p=p1))
+
+        # --- Transition ---
+        pT = model.T[a1]
+        pT = np.clip(pT, 1e-12, 1.0)
+        pT = pT / np.sum(pT)
+        s = int(rng.choice([0, 1], p=pT))
+
+        # --- Stage 2 choice ---
+        p2 = model.policy_stage2(s)
+        p2 = np.clip(p2, 1e-12, 1.0)
+        p2 = p2 / np.sum(p2)
+        a2 = int(rng.choice([0, 1], p=p2))
+
+        # --- Reward from drifting probabilities ---
+        # state 0 -> (drift1, drift2); state 1 -> (drift3, drift4)
+        if s == 0:
+            pr = float(drift1[t]) if a2 == 0 else float(drift2[t])
+        else:
+            pr = float(drift3[t]) if a2 == 0 else float(drift4[t])
+
+        r = int(rng.random() < pr)
+
+        # (Optional) store likelihoods if you want (not required for simulation)
+        # These are usually for fitting, but can be populated during simulation for debugging/analysis
+        model.p_choice_1[t] = p1[a1]
+        model.p_choice_2[t] = p2[a2]
+
+        # --- Learning update + bookkeeping ---
+        model.value_update(a1, s, a2, float(r)) # This will use ParticipantModel3's value_update
+        model.post_trial(a1, s, a2, float(r))
+
+        stage1_choice[t] = a1
+        state2[t] = s
+        stage2_choice[t] = a2
+        reward[t] = r
+
+    return stage1_choice, state2, stage2_choice, reward
+```

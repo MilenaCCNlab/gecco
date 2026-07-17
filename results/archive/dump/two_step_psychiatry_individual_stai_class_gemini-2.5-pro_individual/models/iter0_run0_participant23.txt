@@ -1,0 +1,151 @@
+As a cognitive scientist and programmer, I've analyzed this participant's data and their medium anxiety score. Their behavior, characterized by distinct blocks of choices that shift after negative outcomes, suggests a strong reliance on reinforcement learning. The key question is how their moderate anxiety influences this process. I will propose three distinct models, each articulating a different hypothesis about the interplay between anxiety and decision-making.
+
+### Model 1: Anxiety-Modulated Exploitation
+This model hypothesizes that anxiety directly impacts the exploration-exploitation trade-off. Individuals with higher anxiety may be less willing to explore uncertain options and more likely to exploit choices they believe are best. This is captured by making the softmax inverse temperature (`beta`), which controls choice stochasticity, a function of the participant's anxiety score. A higher `stai` score will lead to a higher effective `beta`, resulting in more deterministic, exploitative choices.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that anxiety modulates the exploration-exploitation
+    balance. The participant's medium anxiety level (stai=0.325) increases their
+    tendency to exploit known good options rather than exploring, reducing choice
+    randomness. This is implemented by scaling the softmax inverse temperature (beta)
+    by the STAI score. A higher STAI score leads to more deterministic choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta_base: [0, 10] (Base inverse temperature for softmax)
+    gamma: [0, 5]      (Anxiety modulation strength on beta)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.gamma = model_parameters
+        self.beta = self.beta_base # Initialize beta
+
+    def pre_trial(self) -> None:
+        """
+        Calculate the effective beta for this trial based on the STAI score.
+        This makes the policy more or less deterministic depending on anxiety.
+        """
+        self.beta = self.beta_base * (1 + self.gamma * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD learning update, but only using a single learning rate 'alpha'.
+        The core hypothesis is tested in the policy, not the learning rule.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # Note: The update uses the *new* Q-value from stage 2
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Biased Asymmetric Learning
+This model posits that anxiety alters the learning process itself, specifically by making the individual more sensitive to negative feedback. According to this hypothesis, prediction errors (the difference between expected and actual outcomes) are weighted differently depending on their sign. For this participant with medium anxiety, negative prediction errors (e.g., receiving no reward when one was expected) will drive a stronger update to value estimates than positive prediction errors. The degree of this asymmetry is scaled by the `stai` score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that anxiety leads to asymmetric learning,
+    with a heightened sensitivity to negative outcomes. For this participant,
+    not receiving an expected reward (a negative prediction error) will have a
+    stronger impact on their future choices than receiving an expected reward.
+    The learning rate for negative prediction errors is increased as a function
+    of the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] (Base learning rate for positive/neutral outcomes)
+    beta: [0, 10]      (Inverse temperature for softmax)
+    eta: [0, 2]        (Anxiety-driven learning asymmetry parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.eta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Custom value update implementing asymmetric learning rates.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_base
+        if delta_2 < 0:
+            # Increase learning rate for negative prediction errors, modulated by anxiety
+            alpha_2 += self.eta * self.stai
+        
+        # Ensure learning rate is within [0, 1]
+        alpha_2 = np.clip(alpha_2, 0, 1)
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_base
+        if delta_1 < 0:
+            # Increase learning rate for negative prediction errors, modulated by anxiety
+            alpha_1 += self.eta * self.stai
+            
+        # Ensure learning rate is within [0, 1]
+        alpha_1 = np.clip(alpha_1, 0, 1)
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Perseveration
+This model explores the idea that anxiety promotes simple, computationally inexpensive heuristics. Specifically, it proposes that the participant has a tendency to repeat their previous choice, a phenomenon known as "choice stickiness" or perseveration. This provides a default, easy action, potentially reducing the cognitive load associated with evaluating options on every trial. The strength of this "sticky" bias is modulated by the participant's anxiety level, with higher `stai` scores leading to a greater tendency to repeat the last first-stage choice.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model assumes that anxiety fosters a reliance on simple
+    heuristics, specifically choice perseveration. The participant is more likely
+    to repeat their previous first-stage choice, irrespective of its learned value.
+    This "stickiness" bias simplifies the decision process. The strength of this
+    perseverative tendency is scaled by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]   (Inverse temperature for softmax)
+    kappa: [0, 5]   (Anxiety-modulated perseveration/stickiness parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities with a stickiness bonus.
+        The bonus is added to the Q-value of the action taken on the previous trial.
+        """
+        q_effective = self.q_stage1.copy()
+        
+        if self.last_action1 is not None:
+            # Add a bonus to the previously chosen action, scaled by anxiety
+            bonus = self.kappa * self.stai
+            q_effective[self.last_action1] += bonus
+            
+        return self.softmax(q_effective, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD learning update. The hypothesis is tested in the policy.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

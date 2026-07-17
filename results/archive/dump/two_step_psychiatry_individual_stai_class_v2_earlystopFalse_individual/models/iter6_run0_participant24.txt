@@ -1,0 +1,168 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in the two-step task.
+
+### Model 1: Anxiety-Modulated Dynamic Structure Learning
+This model hypothesizes that the participant uses a **Model-Based** strategy, but their belief about the spaceship-planet transition probabilities is not fixed. Instead, they continuously update their internal model of the transitions ($T$) based on observations. The key hypothesis is that **anxiety modulates the learning rate of this structural knowledge** ($\alpha_T$). High anxiety might lead to "volatile" beliefs (high $\alpha_T$), causing the participant to over-react to rare transitions as if the world structure has changed.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the learning rate of the transition matrix (Structure Learning).
+    
+    The participant acts as a Model-Based agent, calculating Stage 1 values 
+    using an internal transition matrix T. This matrix is updated dynamically 
+    after each transition. Anxiety (STAI) modulates how quickly this 
+    internal model is updated (alpha_T).
+    
+    alpha_T = alpha_T_base + (alpha_T_stai * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Value learning rate for aliens)
+    beta: [0, 10] (Softmax inverse temperature)
+    alpha_T_base: [0, 1] (Base structure learning rate)
+    alpha_T_stai: [-1, 1] (Modulation of structure learning by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_T_base, self.alpha_T_stai = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize internal transition belief to uniform (uncertainty)
+        # T[action, state]
+        self.T_internal = 0.5 * np.ones((self.n_choices, self.n_states))
+
+    def get_structure_learning_rate(self) -> float:
+        val = self.alpha_T_base + (self.alpha_T_stai * self.stai)
+        return np.clip(val, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Pure Model-Based Calculation
+        # V(state) = max(Q_stage2[state])
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (n_states,)
+        
+        # Q_MB(action) = Sum_s' ( T(action, s') * V(s') )
+        q_mb = self.T_internal @ v_stage2
+        
+        return self.softmax(q_mb, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update internal transition model
+        # Target is 1 for the observed state, 0 for the other
+        alpha_T = self.get_structure_learning_rate()
+        
+        # Update the row corresponding to the chosen spaceship
+        # We want T[a1, s] to move towards 1, and T[a1, other_s] to move towards 0
+        # Since it's binary, we can just update the probability of state 0 and imply state 1
+        
+        # Let's update the vector for action_1
+        target_vector = np.zeros(self.n_states)
+        target_vector[state] = 1.0
+        
+        self.T_internal[action_1] += alpha_T * (target_vector - self.T_internal[action_1])
+        
+        # Ensure normalization (though the update rule preserves it if sum is 1)
+        self.T_internal[action_1] /= np.sum(self.T_internal[action_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Stage-Specific Decision Noise
+This model hypothesizes that anxiety affects the decision process differently depending on the **stage** of the task. Specifically, it proposes that anxiety modulates the exploration/exploitation trade-off (beta) primarily at **Stage 1** (the abstract choice between spaceships), while Stage 2 (the concrete choice between aliens) remains relatively stable or distinct. This could reflect "decision paralysis" or conflict at the higher level of planning.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety specifically modulates decision noise at Stage 1.
+    
+    The model assumes different inverse temperatures (beta) for Stage 1 and Stage 2.
+    The Stage 1 beta is modulated by STAI, while Stage 2 beta is fixed.
+    This tests if anxiety impacts high-level planning choices differently 
+    from low-level bandit choices.
+    
+    beta_1 = beta_1_base + (beta_1_stai * stai)
+    beta_2 = beta_2 (fixed)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_2: [0, 10]
+    beta_1_base: [0, 10]
+    beta_1_stai: [-5, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_2, self.beta_1_base, self.beta_1_stai = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Stage 1 specific beta
+        beta_1 = self.beta_1_base + (self.beta_1_stai * self.stai)
+        beta_1 = max(0.0, beta_1) # Ensure non-negative
+        
+        # Use standard Model-Free Q-values (q_stage1)
+        return self.softmax(self.q_stage1, beta_1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Use fixed Stage 2 beta
+        return self.softmax(self.q_stage2[state], self.beta_2)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated "Post-Surprise" Reactivity
+This model hypothesizes that anxiety modulates how the participant reacts to **unexpected (rare) transitions**. While the "Post-Error" model focused on reward loss, this model focuses on *structural surprise*. It proposes that after experiencing a rare transition, anxious individuals alter their decision noise (beta) on the *subsequent* trial—potentially becoming more erratic (low beta) due to confusion or more rigid (high beta) due to a desire to regain control.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates decision noise (beta) specifically after a Rare Transition.
+    
+    If the previous trial involved a rare transition (Spaceship A -> Planet Y or 
+    Spaceship U -> Planet X), the beta for the current trial is adjusted by STAI.
+    
+    If last_transition_rare:
+        beta = beta_base + (beta_rare_stai * stai)
+    Else:
+        beta = beta_base
+        
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    beta_rare_stai: [-5, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.beta_rare_stai = model_parameters
+
+    def is_last_transition_rare(self) -> bool:
+        if self.last_action1 is None:
+            return False
+            
+        # Define common transitions based on task description/counts
+        # A (0) -> X (0) is Common
+        # U (1) -> Y (1) is Common
+        # 0->1 and 1->0 are Rare
+        
+        is_common = (self.last_action1 == self.last_state)
+        return not is_common
+
+    def get_effective_beta(self) -> float:
+        beta = self.beta_base
+        
+        if self.is_last_transition_rare():
+            beta += (self.beta_rare_stai * self.stai)
+            
+        return max(0.0, beta)
+
+    def policy_stage1(self) -> np.ndarray:
+        beta = self.get_effective_beta()
+        return self.softmax(self.q_stage1, beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        beta = self.get_effective_beta()
+        return self.softmax(self.q_stage2[state], beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

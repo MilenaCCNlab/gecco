@@ -1,0 +1,209 @@
+Here are 3 new cognitive models based on the provided template and constraints.
+
+### Model 1: Pessimistic Planning Model
+This model hypothesizes that anxiety alters the Model-Based valuation step. While a standard agent assumes they will choose the best option at Stage 2 (maximization), an anxious agent engages in "worst-case scenario" thinking. They value the future state as a weighted average of the best and worst possible outcomes, with the weight on the worst outcome determined by their STAI score.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Pessimistic Planning Model.
+    
+    Hypothesis: High anxiety leads to 'worst-case scenario' thinking during 
+    Model-Based planning. Instead of assuming they will choose the max value 
+    option at Stage 2, anxious participants weight the minimum value option 
+    more heavily when calculating the expected value of a planet.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - pessimism_bias: [0, 1] Scales how much STAI induces pessimism. 
+      At 0, agent maximizes. At 1 (with high STAI), agent averages or minimizes.
+    """
+    learning_rate, beta, w, pessimism_bias = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate the pessimism weight based on anxiety
+    # If rho is 0, standard maximization. If rho > 0, we mix in the minimum value.
+    rho = np.clip(pessimism_bias * stai_score, 0, 1)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        # Standard MB: max_q = np.max(q_stage2_mf, axis=1)
+        # Pessimistic MB: Weighted average of Max and Min based on anxiety
+        best_outcomes = np.max(q_stage2_mf, axis=1)
+        worst_outcomes = np.min(q_stage2_mf, axis=1)
+        
+        # The estimated value of the state is a mix of best and worst case
+        mixed_valuation = (1 - rho) * best_outcomes + rho * worst_outcomes
+        
+        q_stage1_mb = transition_matrix @ mixed_valuation
+        
+        # Combine MB and MF
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Stage-Specific Anxiety Noise Model
+This model hypothesizes that anxiety affects decision consistency (exploration/exploitation) asymmetrically across stages. Stage 1 involves complex planning (MB/MF trade-off) and uncertainty about transitions, which is cognitively taxing. Stage 2 is a simple bandit task. This model proposes that anxiety specifically degrades precision (lowers `beta`) in the high-load Stage 1, while Stage 2 remains precise.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Stage-Specific Anxiety Noise Model.
+    
+    Hypothesis: Anxiety acts as a cognitive load that specifically degrades 
+    decision precision in the complex first stage (planning/uncertainty), 
+    while leaving the simpler second stage (immediate reward) relatively intact.
+    High anxiety lowers beta (increases randomness) for Choice 1 only.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta_stage2: [0, 10] Base inverse temperature (used for Stage 2).
+    - w: [0, 1] Weight for model-based control.
+    - s1_noise_scale: [0, 1] How much anxiety reduces beta for Stage 1.
+    """
+    learning_rate, beta_stage2, w, s1_noise_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate Stage 1 beta: It is the base beta reduced by anxiety
+    # If s1_noise_scale is high and anxiety is high, beta_1 becomes very small (random)
+    beta_stage1 = beta_stage2 * (1.0 - (s1_noise_scale * stai_score))
+    # Ensure beta doesn't go negative
+    beta_stage1 = max(0.0, beta_stage1)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Use the anxiety-dampened beta for Stage 1
+        exp_q1 = np.exp(beta_stage1 * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        # Use the standard base beta for Stage 2
+        exp_q2 = np.exp(beta_stage2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Induced Temporal Myopia Model
+This model hypothesizes that anxiety creates "temporal myopia" (short-sightedness) in the Model-Free system. In standard TD learning, the value of Stage 2 fully propagates back to Stage 1 (discount factor $\gamma \approx 1$). This model suggests that anxious individuals discount the link between the spaceship choice and the planet arrival, effectively dampening the Model-Free update for the first stage.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Temporal Myopia Model.
+    
+    Hypothesis: Anxiety causes temporal myopia (short-sightedness). 
+    In the Model-Free system, anxious participants discount the value of the 
+    second stage state when updating the first stage value. This weakens the 
+    chain of reinforcement between the spaceship choice and the planet reached.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - myopia_factor: [0, 1] Controls the discount rate based on STAI.
+      Higher values mean anxious people discount the future more heavily.
+    """
+    learning_rate, beta, w, myopia_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate effective discount factor gamma
+    # If myopia_factor is 0, gamma is 1 (standard). 
+    # If myopia_factor is high, gamma drops, disconnecting Stage 1 from Stage 2.
+    gamma = 1.0 - (myopia_factor * stai_score)
+    gamma = max(0.0, gamma)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Apply the anxiety-driven discount factor (gamma) here
+        # Standard TD: Q(S1) <- Q(S1) + lr * (Q(S2) - Q(S1))
+        # Myopic TD:   Q(S1) <- Q(S1) + lr * (gamma * Q(S2) - Q(S1))
+        delta_stage1 = (gamma * q_stage2_mf[state_idx, action_2[trial]]) - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

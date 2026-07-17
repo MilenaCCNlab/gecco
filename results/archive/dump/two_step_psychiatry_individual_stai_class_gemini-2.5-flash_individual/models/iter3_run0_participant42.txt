@@ -1,0 +1,129 @@
+Here are three cognitive models proposing different mechanisms by which anxiety (STAI score) might influence decision-making in the two-step task.
+
+### Cognitive Models
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases an individual's sensitivity to rewards (or punishments),
+    leading to a stronger impact of observed outcomes on value updates. This could be due to
+    heightened emotional arousal or vigilance in anxious individuals. The received reward
+    is scaled by an anxiety-dependent factor before being used in the TD learning rule.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values in both stages.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    stai_reward_sensitivity: [0, 2] - How much STAI amplifies the impact of the received reward
+                                      on value updates. A value of 0 means no modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stai_reward_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate the effective reward, modulated by STAI
+        # The scaling factor ensures that rewards are amplified for higher STAI.
+        # This factor is clamped to avoid excessively large updates.
+        reward_scaling_factor = np.clip(1 + self.stai * self.stai_reward_sensitivity, 0.1, 5.0)
+        
+        # Apply scaling to the actual reward before calculating the prediction error
+        scaled_reward = reward * reward_scaling_factor
+        
+        # Stage 2 learning
+        # The prediction error is based on the scaled reward
+        delta_2 = scaled_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 learning
+        # The target for stage 1 is the *updated* Q-value of the chosen stage 2 action.
+        # The effect of the scaled reward implicitly propagates to stage 1 via q_stage2.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to asymmetric learning, with an increased learning rate for negative
+    prediction errors (losses). This reflects a heightened sensitivity to negative outcomes for anxious individuals.
+    The learning rate for losses is modulated linearly by the STAI score, while the learning rate for gains is fixed.
+
+    Parameter Bounds:
+    -----------------
+    alpha_gain: [0, 1] - Learning rate for positive prediction errors.
+    alpha_loss_base: [0, 1] - Baseline learning rate for negative prediction errors (when STAI is 0).
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    stai_loss_sensitivity: [0, 1] - How much STAI increases the learning rate for losses.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_gain, self.alpha_loss_base, self.beta, self.stai_loss_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate the effective alpha_loss for the current trial, modulated by STAI
+        # Clamp alpha_loss to be between 0 and 1
+        current_alpha_loss = np.clip(self.alpha_loss_base + self.stai * self.stai_loss_sensitivity, 0.0, 1.0)
+        
+        # Stage 2 learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 > 0:
+            self.q_stage2[state, action_2] += self.alpha_gain * delta_2
+        else: # delta_2 <= 0
+            self.q_stage2[state, action_2] += current_alpha_loss * delta_2
+        
+        # Stage 1 learning
+        # The target for stage 1 is the updated Q-value of the chosen stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 > 0:
+            self.q_stage1[action_1] += self.alpha_gain * delta_1
+        else: # delta_1 <= 0
+            self.q_stage1[action_1] += current_alpha_loss * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to increased generalization of value updates across similar (but distinct)
+    options at Stage 1. When an action is chosen and its value updated, a fraction of this update
+    'spills over' to the unchosen Stage 1 action. This 'blurring' of value representations is
+    amplified by higher STAI scores, suggesting a reduced ability to discriminate between first-stage
+    options under anxiety or a tendency to see options as more similar.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values in both stages.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    stai_generalization_rate: [0, 1] - How much STAI amplifies the generalization of value updates
+                                       to the unchosen Stage 1 action. (Clamped to prevent over-generalization).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stai_generalization_rate = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 learning (standard TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 learning for the chosen action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Apply generalization to the unchosen Stage 1 action
+        unchosen_action_1 = 1 - action_1
+        
+        # The generalization factor is modulated by STAI
+        # Clamp it to a reasonable range (e.g., 0 to 0.5) to avoid over-generalization
+        # that could lead to values flipping or diverging.
+        generalization_factor = np.clip(self.stai * self.stai_generalization_rate, 0.0, 0.5)
+        
+        # Apply a fraction of the delta_1 update to the unchosen action
+        self.q_stage1[unchosen_action_1] += self.alpha * generalization_factor * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

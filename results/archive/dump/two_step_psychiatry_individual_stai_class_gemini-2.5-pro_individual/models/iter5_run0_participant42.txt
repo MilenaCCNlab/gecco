@@ -1,0 +1,172 @@
+As a cognitive scientist and Python programmer, I will now propose three distinct cognitive models to explain the decision-making patterns of this participant. The participant's high anxiety score (stai = 0.6875) and their highly perseverative choice pattern—sticking with one spaceship for 28 trials before abruptly switching and sticking with the other—are key features that these models aim to explain. Each model posits a different mechanism through which anxiety might drive this cognitive inflexibility.
+
+### Model 1: Anxiety-Modulated Hybrid Control with Perseveration
+
+This model hypothesizes that high anxiety impairs the participant's ability to engage in goal-directed, model-based planning. Instead, they rely more on simpler, habitual (model-free) learning. This is captured by a parameter `w` that balances model-based and model-free value signals, where the effective weight is reduced by anxiety. Concurrently, a perseveration parameter `kappa` is included to account for the pronounced choice stickiness, representing a tendency to repeat the previous action regardless of its learned value.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs deliberative, model-based planning, making
+    behavior more habitual (model-free). The weight given to the model-based
+    system is inversely proportional to the participant's anxiety level.
+    Additionally, a strong perseveration bias makes the participant more likely
+    to repeat their previous choice, explaining the observed cognitive inflexibility.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (learning rate)
+    beta: [0, 10]  (inverse temperature)
+    w: [0, 1]      (base weight for model-based control)
+    kappa: [0, 5]   (perseveration strength)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w, self.kappa = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize anxiety-modulated model-based weight."""
+        # Anxiety reduces the weight on the computationally demanding model-based system
+        self.w_effective = self.w * (1 - self.stai)
+        self.last_action1 = -1  # Initialize for first trial perseveration
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute choice probabilities based on a hybrid of model-free and
+        model-based values, plus a perseveration bonus."""
+        # Model-free values are the stored Q-values for stage 1
+        q_mf = self.q_stage1
+
+        # Model-based values are calculated by considering expected future rewards
+        q_mb_0 = self.T[0, 0] * np.max(self.q_stage2[0]) + self.T[0, 1] * np.max(self.q_stage2[1])
+        q_mb_1 = self.T[1, 0] * np.max(self.q_stage2[0]) + self.T[1, 1] * np.max(self.q_stage2[1])
+        q_mb = np.array([q_mb_0, q_mb_1])
+
+        # Combine MF and MB values using the anxiety-modulated weight
+        q_hybrid = self.w_effective * q_mb + (1 - self.w_effective) * q_mf
+        
+        # Add a perseveration bonus to the last chosen action
+        q_policy = q_hybrid.copy()
+        if self.last_action1 != -1:
+            q_policy[self.last_action1] += self.kappa
+            
+        return self.softmax(q_policy, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Asymmetric Learning and Dynamic Exploration
+
+This model proposes that high anxiety makes the participant hypersensitive to negative outcomes (i.e., not receiving a coin). This is formalized using separate learning rates for positive and negative prediction errors, where learning from negative errors is amplified by anxiety. Furthermore, the model suggests that the participant's exploration strategy is dynamic: after receiving a reward, they become more exploratory (lower `beta`), but after a non-reward, they become more risk-averse and exploitative (higher `beta`), a behavior potentially exacerbated by anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases sensitivity to negative outcomes, leading to
+    faster learning from non-rewards. This is modeled with separate learning rates
+    for positive and negative prediction errors, where the negative learning rate
+    is amplified by anxiety. Additionally, exploration is dynamic: rewards promote
+    exploration, while non-rewards promote exploitation (sticking to the best option).
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   (learning rate for positive prediction errors)
+    alpha_neg: [0, 1]   (base learning rate for negative prediction errors)
+    beta: [0, 10]      (base inverse temperature)
+    rho: [0, 1]        (outcome-dependent exploration modulator)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.beta, self.rho = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize anxiety-modulated learning rate and dynamic beta."""
+        # Anxiety amplifies learning from negative prediction errors
+        self.alpha_neg_effective = self.alpha_neg * (1 + self.stai)
+        self.effective_beta = self.beta
+
+    def policy_stage1(self) -> np.ndarray:
+        """Stage-1 policy uses the dynamic, outcome-dependent beta."""
+        return self.softmax(self.q_stage1, self.effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Stage-2 policy also uses the dynamic, outcome-dependent beta."""
+        return self.softmax(self.q_stage2[state], self.effective_beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values using separate learning rates for positive and negative errors."""
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg_effective
+        q2_updated = self.q_stage2[state, action_2] + alpha_2 * delta_2
+        
+        # Stage 1 update
+        delta_1 = q2_updated - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg_effective
+        self.q_stage1[action_1] += alpha_1 * delta_1
+        
+        # Apply the stage 2 update after calculating delta_1
+        self.q_stage2[state, action_2] = q2_updated
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update effective beta based on the trial's outcome."""
+        super().post_trial(action_1, state, action_2, reward)
+        if reward > 0.5:
+            # Reward reduces beta, encouraging exploration
+            self.effective_beta = self.beta * (1 - self.rho)
+        else:
+            # Non-reward increases beta, encouraging exploitation
+            self.effective_beta = self.beta * (1 + self.rho)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Attentional Tunneling and Value Decay
+
+This model formalizes the idea of "attentional tunneling," where anxiety causes a hyper-focus on the chosen course of action while neglecting alternatives. Computationally, this is represented by a decay process: the values of unchosen options are not maintained but instead decay back towards a neutral baseline (0.5). The rate of this decay is amplified by anxiety, meaning a more anxious individual "forgets" or devalues alternative options more quickly. This can lead to extreme perseveration, as the unchosen spaceship's value rapidly diminishes, making it seem increasingly unattractive.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to 'attentional tunneling,' where the
+    participant focuses on the chosen option and neglects to maintain or update
+    the values of unchosen options. This is modeled as a value decay process for
+    unchosen actions, where the rate of decay is increased by the participant's
+    anxiety level. This explains perseveration, as neglected options quickly become
+    devalued.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (learning rate for chosen options)
+    beta: [0, 10]  (inverse temperature)
+    delta: [0, 1]   (base decay rate for unchosen options)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.delta = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize the anxiety-modulated decay rate."""
+        # Higher anxiety leads to a faster decay of unchosen option values
+        self.delta_effective = self.delta * (1 + self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update chosen values with TD learning and decay unchosen values."""
+        # Standard TD update for the chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        q2_updated_val = self.q_stage2[state, action_2] + self.alpha * delta_2
+        
+        delta_1 = q2_updated_val - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        self.q_stage2[state, action_2] = q2_updated_val
+
+        # Decay unchosen options
+        # Stage 1: Decay the spaceship that was not chosen
+        other_action_1 = 1 - action_1
+        self.q_stage1[other_action_1] = self.q_stage1[other_action_1] * (1 - self.delta_effective) + 0.5 * self.delta_effective
+
+        # Stage 2: Decay the alien that was not chosen on the current planet
+        other_action_2 = 1 - action_2
+        self.q_stage2[state, other_action_2] = self.q_stage2[state, other_action_2] * (1 - self.delta_effective) + 0.5 * self.delta_effective
+        
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

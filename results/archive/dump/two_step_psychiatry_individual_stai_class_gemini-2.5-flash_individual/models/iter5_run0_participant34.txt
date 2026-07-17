@@ -1,0 +1,140 @@
+Here are three new cognitive models, each with a distinct hypothesis about how a highly anxious participant (STAI score 0.9625) might make decisions in the two-step task.
+
+### Model 1: Anxious Goal-Directedness Shift
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Goal-Directedness Shift Model.
+    High anxiety reduces the influence of future expected rewards on Stage 1 value updates,
+    making learning more immediate and model-free. This is implemented by shifting the
+    target for Stage 1 TD error from the learned value of the second stage to a weighted
+    average of the second stage value and the immediate reward, with anxiety increasing
+    the weight of the immediate reward.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    w_mf_influence_base: [0, 1] (Base weight for immediate reward in Stage 1 TD target)
+    stai_mf_boost: [0, 1] (Factor by which STAI increases w_mf_influence)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mf_influence_base, self.stai_mf_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with Stage 1 update target shifted by anxiety-modulated model-free influence.
+        """
+        # Stage 2 update remains standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Calculate anxiety-modulated model-free influence weight
+        # Clamp to [0, 1] to ensure it's a valid weight
+        w_mf_influence = np.clip(self.w_mf_influence_base + self.stai * self.stai_mf_boost, 0, 1)
+
+        # The target for Stage 1 TD error is a weighted average
+        # (1 - w_mf_influence) * Q_stage2_target + w_mf_influence * immediate_reward
+        stage1_td_target = (1 - w_mf_influence) * self.q_stage2[state, action_2] + w_mf_influence * reward
+        
+        delta_1 = stage1_td_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxious Surprise Amplification (Rare Transition Learning)
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Surprise Amplification Model.
+    High anxiety enhances sensitivity to unexpected environmental changes,
+    specifically rare transitions in the first stage. When a rare transition
+    occurs (e.g., choosing spaceship A but landing on planet Y), the learning
+    rate for the first-stage action is temporarily increased, leading to a
+    more pronounced update of its value. This amplification is modulated by anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1: [0, 1] (Learning rate for Stage 1 Q-values)
+    alpha_stage2: [0, 1] (Learning rate for Stage 2 Q-values)
+    beta: [0, 10] (Softmax inverse temperature for both stages)
+    surprise_factor_base: [0, 2] (Base multiplier for alpha_stage1 on rare transitions)
+    stai_surprise_boost: [0, 1] (Factor by which STAI increases the surprise multiplier)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1, self.alpha_stage2, self.beta, self.surprise_factor_base, self.stai_surprise_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with Stage 1 learning rate amplified by anxiety-modulated surprise.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2 * delta_2
+
+        # Determine if a rare transition occurred
+        # Spaceship 0 (A) commonly travels to Planet 0 (X)
+        # Spaceship 1 (U) commonly travels to Planet 1 (Y)
+        is_rare_transition = (action_1 == 0 and state == 1) or \
+                             (action_1 == 1 and state == 0)
+
+        current_alpha_stage1 = self.alpha_stage1
+        if is_rare_transition:
+            # Calculate anxiety-modulated surprise multiplier
+            surprise_multiplier = self.surprise_factor_base + self.stai * self.stai_surprise_boost
+            current_alpha_stage1 = np.clip(current_alpha_stage1 * surprise_multiplier, 0, 1) # Cap alpha at 1
+
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha_stage1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxious Value Decay
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Value Decay Model.
+    This model proposes that high anxiety leads to a faster decay of the Q-values
+    for unchosen Stage 1 actions towards a neutral baseline (0.5). This reflects
+    a more volatile memory or increased uncertainty in value representations under
+    high anxiety, making past choices less influential if not reinforced.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    decay_rate_base: [0, 1] (Base rate at which unchosen Q-values decay per trial)
+    stai_decay_boost: [0, 1] (Factor by which STAI increases the decay rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate_base, self.stai_decay_boost = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # Initialize last_action1 to an invalid value to indicate no previous choice for decay
+        self.last_action1 = -1
+
+    def pre_trial(self) -> None:
+        """
+        Called before each trial. Apply decay to the unchosen Stage 1 action's Q-value.
+        """
+        if self.last_action1 != -1: # Only apply decay if a choice was made on the previous trial
+            unchosen_action = 1 - self.last_action1
+            
+            # Calculate anxiety-modulated decay rate
+            current_decay_rate = np.clip(self.decay_rate_base + self.stai * self.stai_decay_boost, 0, 1)
+
+            # Decay the Q-value of the unchosen action towards a neutral baseline (0.5)
+            self.q_stage1[unchosen_action] += current_decay_rate * (0.5 - self.q_stage1[unchosen_action])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

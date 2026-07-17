@@ -1,0 +1,213 @@
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Catastrophizing Model (Valuation Bias).
+
+    Hypothesis: Anxious individuals interpret neutral outcomes (0 coins) not as a lack of gain, 
+    but as an active punishment or failure. This shifts the asymptotic value of options 
+    below zero, altering the exploration-exploitation balance by making 'safe' (rewarded) 
+    options relatively much more valuable than uncertain ones.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control (0=MF, 1=MB).
+    - catastrophe_param: [0, 1] The magnitude of the negative penalty applied to 0-reward outcomes, scaled by STAI.
+    """
+    learning_rate, beta, w, catastrophe_param = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Fixed transition matrix as per task description (A->X, U->Y commonly)
+    # A=0, U=1; X=0, Y=1.
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2)) # State x Action
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # Model-Based Value Calculation
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        # Integrated Value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        # Softmax Choice 1
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        # Calculate effective reward based on Catastrophizing hypothesis
+        # If reward is 0, the effective reward becomes negative based on anxiety
+        r_actual = reward[trial]
+        if r_actual == 0:
+            r_effective = -1.0 * catastrophe_param * stai_score
+        else:
+            r_effective = r_actual
+
+        # MF Update Stage 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # MF Update Stage 2 (using r_effective)
+        delta_stage2 = r_effective - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Post-Error Model-Based Shutdown Model.
+
+    Hypothesis: Anxiety consumes cognitive resources required for Model-Based (MB) planning. 
+    Specifically, after a negative outcome (0 reward), the stress response causes a temporary 
+    "shutdown" of the MB system for the subsequent trial, forcing the participant to rely 
+    more heavily on Model-Free (MF) habits.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w_base: [0, 1] Baseline weight for model-based control.
+    - shutdown_param: [0, 1] How much 'w' is reduced after a loss, scaled by STAI.
+    """
+    learning_rate, beta, w_base, shutdown_param = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    last_reward = 1 # Initialize as if previous trial was successful (no stress)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        
+        # Calculate dynamic w based on previous outcome
+        if last_reward == 0:
+            # Anxiety-driven reduction in MB usage
+            w_effective = w_base * (1.0 - (shutdown_param * stai_score))
+            # Clip to ensure it stays valid
+            w_effective = max(0.0, w_effective)
+        else:
+            w_effective = w_base
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w_effective * q_stage1_mb + (1 - w_effective) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    State-Specific Repulsion Model.
+
+    Hypothesis: High anxiety leads to a specific avoidance of contexts (Planets) associated 
+    with recent failure. If a participant receives 0 reward at a specific Planet, the 
+    Model-Based valuation of that Planet is temporarily suppressed on the next trial, 
+    biasing the Stage 1 choice away from the spaceship that leads there.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - repulsion: [0, 2] Magnitude of value subtraction applied to a Planet after a loss, scaled by STAI.
+    """
+    learning_rate, beta, w, repulsion = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    last_state = -1
+    last_reward = 1
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        
+        # Calculate MB values
+        max_q_stage2 = np.max(q_stage2_mf, axis=1) # Shape (2,) for Planet X and Y
+        
+        # Apply Repulsion
+        # If we just lost (reward=0) at a specific planet (last_state), 
+        # we suppress the value of that planet in the MB calculation.
+        adjusted_values = max_q_stage2.copy()
+        if last_reward == 0 and last_state != -1:
+            repulsion_val = repulsion * stai_score
+            adjusted_values[last_state] -= repulsion_val
+        
+        q_stage1_mb = transition_matrix @ adjusted_values
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        last_state = state_idx
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss

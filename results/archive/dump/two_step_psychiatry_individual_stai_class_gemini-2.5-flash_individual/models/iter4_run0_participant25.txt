@@ -1,0 +1,213 @@
+Here are three new cognitive models, each proposing a different hypothesis to explain the participant's decision-making in the two-step task, with specific modulation by their medium anxiety (STAI score of 0.325).
+
+The participant consistently chose spaceship 1.0 (U), even when it led to a rare transition (planet 0.0 / X). This strong Stage 1 bias is a key feature that these models attempt to explain.
+
+### Model 1: Habitual Stage 1 Choice with Anxiety-Modulated Policy Determinism
+
+**Hypothesis:** This model proposes that the participant develops a strong habit for stage 1 actions (specifically spaceship 1.0, given the data). Choosing an action reinforces a 'habit strength' for that action. These habit strengths are added to the Q-values to inform stage 1 choices. Furthermore, anxiety (STAI score) is hypothesized to reduce the effective inverse temperature (`beta`) for stage 1 choices, making the decision policy more deterministic and less exploratory. This would lead to a stronger adherence to the currently preferred (and potentially habitual) action, especially under higher anxiety.
+
+**Rationale for Anxiety Modulation:** Medium anxiety might lead to a preference for familiar, well-practiced actions, reducing the willingness to explore alternatives due to perceived risk or cognitive load associated with evaluating novel choices.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Habitual Stage 1 Choice with Anxiety-Modulated Policy Determinism.
+    This model proposes that participants develop habits for stage 1 actions, where choosing
+    an action reinforces a 'habit strength' for that action. These habit strengths
+    are added to the Q-values to inform stage 1 choices. Furthermore, anxiety (STAI score)
+    is hypothesized to reduce the effective inverse temperature (beta) for stage 1 choices,
+    making the decision policy more deterministic and less exploratory. This would lead
+    to a stronger adherence to the currently preferred (and potentially habitual) action,
+    especially under higher anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_base: [0, 10] - Base inverse temperature for softmax choice.
+    habit_alpha: [0, 1] - Learning rate for updating habit strengths.
+    stai_beta_reduction_factor: [0, 10] - Factor by which STAI score reduces the effective beta for stage 1.
+                                          Higher values mean anxiety makes choices more deterministic.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.habit_alpha, self.stai_beta_reduction_factor = model_parameters
+
+    def init_model(self) -> None:
+        self.habit_strength = np.zeros(self.n_choices) # Initialize habit strength for stage 1 actions
+        # Calculate effective beta for stage 1 based on STAI score.
+        # Higher STAI reduces beta, making choices more deterministic. Clamp to ensure valid range.
+        self.effective_beta_stage1 = np.clip(self.beta_base - self.stai_beta_reduction_factor * self.stai, 0.1, 10)
+        self.q_stage1 = 0.5 * np.ones(self.n_choices) # Reset to ensure it's not pre-initialized from base class
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, incorporating habit strength
+        and anxiety-modulated beta.
+        """
+        # Combine Q-values with habit strength
+        combined_values = self.q_stage1 + self.habit_strength
+        return self.softmax(combined_values, self.effective_beta_stage1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values and habit strengths.
+        """
+        # Stage 2 Q-value update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Q-value update (model-free component)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Update habit strength for the chosen action
+        # Habit strength increases for the chosen action, bounded by 1.
+        self.habit_strength[action_1] = np.clip(self.habit_strength[action_1] + self.habit_alpha * (1 - self.habit_strength[action_1]), 0, 1)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Uncertainty Aversion in Stage 2
+
+**Hypothesis:** This model proposes that participants not only learn the average reward (Q-value) for Stage 2 actions (aliens) but also track the uncertainty (variance) of these rewards. Anxiety (STAI score) is hypothesized to amplify the aversion to this uncertainty, causing participants to prefer more predictable aliens, even if their expected reward is slightly lower. The Stage 2 policy will thus be a trade-off between expected reward and uncertainty.
+
+**Rationale for Anxiety Modulation:** Individuals with higher anxiety often exhibit increased sensitivity to uncertainty and may prefer options with more predictable outcomes to reduce potential negative surprises.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Uncertainty Aversion in Stage 2.
+    This model proposes that participants not only learn the average reward (Q-value)
+    for Stage 2 actions (aliens) but also track the uncertainty (variance) of these
+    rewards. Anxiety (STAI score) is hypothesized to amplify the aversion to this
+    uncertainty, causing participants to prefer more predictable aliens, even if
+    their expected reward is slightly lower. The Stage 2 policy will thus be a
+    trade-off between expected reward and uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    alpha_sigma: [0, 1] - Learning rate for updating uncertainty (variance) estimates.
+    uncertainty_weight_base: [0, 1] - Base weight given to uncertainty when making Stage 2 choices.
+    stai_uncertainty_factor: [0, 1] - Factor by which STAI score linearly increases the uncertainty weight.
+                                       Higher values mean anxiety makes participants more uncertainty-averse.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_sigma, self.uncertainty_weight_base, self.stai_uncertainty_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance estimates for stage 2 actions, starting low.
+        self.sigma_stage2 = 0.01 * np.ones((self.n_states, self.n_choices)) # Small initial variance
+        # Calculate effective uncertainty weight based on STAI score.
+        # Higher STAI increases uncertainty aversion. Clamp to ensure valid range.
+        self.effective_uncertainty_weight = np.clip(self.uncertainty_weight_base + self.stai_uncertainty_factor * self.stai, 0, 1)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices)) # Ensure reset
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities, incorporating uncertainty aversion.
+        """
+        # Combine Q-values with uncertainty estimates.
+        # We subtract the standard deviation (sqrt of variance) as a penalty.
+        # Add a small epsilon to sigma_stage2 to prevent sqrt(0) issues.
+        combined_values = self.q_stage2[state] - self.effective_uncertainty_weight * np.sqrt(self.sigma_stage2[state] + 1e-6)
+        return self.softmax(combined_values, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values and uncertainty estimates.
+        """
+        # Stage 2 Q-value update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 2 uncertainty (variance) update: update towards the squared prediction error.
+        # Ensure variance stays non-negative and within reasonable bounds.
+        self.sigma_stage2[state, action_2] = np.clip(self.sigma_stage2[state, action_2] + self.alpha_sigma * (delta_2**2 - self.sigma_stage2[state, action_2]), 0.001, 100)
+        
+        # Stage 1 update, using the updated Stage 2 Q-value (without direct uncertainty term for Stage 1 for simplicity)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Balance Between Goal-Directed and Habitual Control
+
+**Hypothesis:** This model proposes that participants blend goal-directed (model-based) and habitual (model-free) control when making Stage 1 decisions. Goal-directed control involves planning by considering transition probabilities and expected future rewards, while habitual control relies on cached, learned Q-values. Anxiety (STAI score) is hypothesized to shift this balance towards more habitual (model-free) control, reducing the influence of the more cognitively demanding goal-directed system. This could explain a strong preference for a single action if that action has a strong habitual component that becomes dominant under anxiety.
+
+**Rationale for Anxiety Modulation:** Anxiety can impair cognitive functions, leading individuals to rely more on simpler, less effortful, and well-established (habitual) behaviors rather than complex planning.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Balance Between Goal-Directed and Habitual Control.
+    This model proposes that participants blend goal-directed (model-based) and
+    habitual (model-free) control when making Stage 1 decisions. Goal-directed control
+    involves planning by considering transition probabilities and expected future rewards,
+    while habitual control relies on cached, learned Q-values. Anxiety (STAI score)
+    is hypothesized to shift this balance towards more habitual (model-free) control,
+    reducing the influence of the more cognitively demanding goal-directed system.
+    This could explain a strong preference for a single action if that action has
+    a strong habitual component.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (for model-free part).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    omega_base: [0, 1] - Base weight for the goal-directed (model-based) component.
+                         (1 - omega_base) is the weight for the habitual component.
+    stai_omega_reduction_factor: [0, 1] - Factor by which STAI score linearly reduces the effective omega.
+                                          Higher values mean anxiety favors habitual control.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega_base, self.stai_omega_reduction_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective omega based on STAI score.
+        # Higher STAI reduces omega, shifting towards model-free control. Clamp to ensure valid range.
+        self.effective_omega = np.clip(self.omega_base - self.stai_omega_reduction_factor * self.stai, 0, 1)
+        # q_stage1 and q_stage2 are initialized by the base class.
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, blending model-based and model-free values.
+        """
+        # Calculate Model-Based Q-values for Stage 1
+        q_mb = np.zeros(self.n_choices)
+        # For each Stage 1 action (spaceship)
+        for a1 in range(self.n_choices):
+            # The expected value of landing on a planet, considering optimal Stage 2 choice
+            expected_value_from_planet = np.zeros(self.n_states)
+            for s in range(self.n_states): # For each possible planet (X or Y)
+                # Max Q-value for Stage 2 actions (aliens) on this planet
+                expected_value_from_planet[s] = np.max(self.q_stage2[s])
+            
+            # Sum over possible transitions from a1 to s, weighted by transition probability P(s|a1)
+            # self.T[a1, s] is the probability of transitioning to state s given action a1.
+            q_mb[a1] = np.sum(self.T[a1] * expected_value_from_planet)
+
+        # Blend Model-Based and Model-Free Q-values
+        # The base class's self.q_stage1 serves as the Model-Free Q-value for Stage 1.
+        combined_q_stage1 = self.effective_omega * q_mb + (1 - self.effective_omega) * self.q_stage1
+        
+        return self.softmax(combined_q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using standard TD learning (for the model-free component).
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (model-free component)
+        # This updates the cached Q-value that contributes to the habitual component.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

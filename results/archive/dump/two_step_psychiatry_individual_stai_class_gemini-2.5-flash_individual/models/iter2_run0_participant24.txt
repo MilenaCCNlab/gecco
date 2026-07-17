@@ -1,0 +1,145 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, with anxiety (STAI score) modulating a key aspect of their behavior.
+
+### Proposed Cognitive Models
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant exhibits anxiety-modulated reward sensitivity,
+    specifically a form of loss aversion. Negative prediction errors (when the received reward is
+    less than the expected value) lead to a stronger update of value estimates compared to positive
+    prediction errors. The degree of this loss aversion is modulated by the participant's STAI score.
+    For a participant with medium anxiety (STAI = 0.35), losses might be weighted more heavily,
+    leading to more pronounced Q-value decreases upon receiving no coins or when a chosen path
+    leads to a worse-than-expected subsequent outcome.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Base learning rate.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    loss_alpha_multiplier_base: [0, 5] - Base multiplier for the learning rate when a negative prediction error occurs.
+    stai_loss_sensitivity_factor: [0, 2] - Factor by which STAI score increases the loss alpha multiplier.
+                                           A positive value means higher anxiety increases loss sensitivity.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_alpha_multiplier_base, self.stai_loss_sensitivity_factor = model_parameters
+        # Calculate the effective loss alpha multiplier based on STAI, ensuring it's non-negative.
+        # This multiplier will be applied when delta < 0.
+        self.effective_loss_multiplier = np.clip(self.loss_alpha_multiplier_base + self.stai_loss_sensitivity_factor * self.stai, 0.0, 5.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2_effective = self.alpha
+        if delta_2 < 0:  # If it's a negative prediction error (e.g., received 0 coins when expecting more)
+            alpha_2_effective *= self.effective_loss_multiplier
+        self.q_stage2[state, action_2] += alpha_2_effective * delta_2
+
+        # Stage 1 update
+        # The delta for stage 1 is the difference between the updated value of the chosen stage 2 action
+        # and the current value of the stage 1 action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1_effective = self.alpha
+        if delta_1 < 0:  # If the chosen stage 1 path led to a worse-than-expected stage 2 outcome
+            alpha_1_effective *= self.effective_loss_multiplier
+        self.q_stage1[action_1] += alpha_1_effective * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant's first-stage decision-making
+    is a blend of model-free (habitual, relying on cached Q-values) and model-based
+    (goal-directed, planning using transition probabilities and future values) control.
+    The balance between these two systems is modulated by the participant's anxiety level (STAI score).
+    For a participant with medium anxiety, a higher STAI score might lead to an increased
+    reliance on model-based planning, as a strategy to reduce uncertainty or to exert more
+    control over potential outcomes by explicitly considering future states.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for both stages (model-free component).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    w_base: [0, 1] - Base weighting parameter for model-based control (0 = pure model-free, 1 = pure model-based).
+    stai_w_factor: [-1, 1] - Factor by which STAI score modulates the model-based weight 'w'.
+                             A positive value means higher anxiety increases model-based control.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_w_factor = model_parameters
+        # Calculate the effective 'w' based on STAI, ensuring it stays within [0, 1]
+        self.w = np.clip(self.w_base + self.stai_w_factor * self.stai, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate model-based Q-values (Q_MB)
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Q_MB(a1) = Sum_s [ P(s | a1) * Max_a2(Q2(s, a2)) ]
+            expected_future_value = 0
+            for s in range(self.n_states):
+                # self.T[a1, s] is the transition probability P(state s | action1 a1)
+                # np.max(self.q_stage2[s, :]) is the value of the best action at stage 2 from state s
+                expected_future_value += self.T[a1, s] * np.max(self.q_stage2[s, :])
+            q_mb[a1] = expected_future_value
+
+        # Combine model-free (self.q_stage1) and model-based Q-values using 'w'
+        # q_stage1 is updated using model-free TD learning in the default value_update.
+        q_combined = self.w * q_mb + (1 - self.w) * self.q_stage1
+        
+        return self.softmax(q_combined, self.beta)
+
+    # The default value_update method (TD learning) is used for the model-free component (self.q_stage1 and self.q_stage2).
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant's learning rate for first-stage
+    Q-values is specifically modulated by the occurrence of rare (unexpected) transitions.
+    For a participant with medium anxiety, unexpected events might trigger a heightened
+    learning response, leading to a faster update of Q-values when a rare transition occurs.
+    The STAI score directly influences the magnitude of this learning rate boost, reflecting
+    an increased sensitivity to environmental volatility or surprise.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Base learning rate (used for stage 2 and common stage 1 transitions).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    rare_trans_alpha_multiplier_base: [0, 5] - Base multiplier for the learning rate when a rare transition occurs at stage 1.
+    stai_rare_trans_sensitivity_factor: [0, 2] - Factor by which STAI score increases the rare transition alpha multiplier.
+                                                 A positive value means higher anxiety increases sensitivity to rare transitions.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_trans_alpha_multiplier_base, self.stai_rare_trans_sensitivity_factor = model_parameters
+        # Calculate the effective multiplier for rare transitions based on STAI
+        self.effective_rare_trans_multiplier = np.clip(self.rare_trans_alpha_multiplier_base + self.stai_rare_trans_sensitivity_factor * self.stai, 0.0, 5.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update uses the base alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Determine if the transition from action_1 to state was rare
+        # From task description:
+        # Spaceship A (0) commonly to Planet X (0), rarely to Planet Y (1).
+        # Spaceship U (1) commonly to Planet Y (1), rarely to Planet X (0).
+        # self.T[action_1, state] represents P(state | action_1).
+        # Common transitions have P=0.7, Rare transitions have P=0.3 (based on self.trans_counts).
+        is_rare_transition = (self.T[action_1, state] < 0.5) # True if probability is 0.3
+
+        alpha_stage1_effective = self.alpha
+        if is_rare_transition:
+            alpha_stage1_effective *= self.effective_rare_trans_multiplier
+        
+        # Stage 1 update uses the potentially modulated alpha
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_stage1_effective * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

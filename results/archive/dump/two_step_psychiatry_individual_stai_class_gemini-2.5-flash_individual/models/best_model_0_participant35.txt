@@ -1,0 +1,80 @@
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety makes participants more
+    averse to exploring less-known options. This is modeled as a penalty applied
+    to the Q-values of choices that have been visited less frequently, with the
+    magnitude of this penalty amplified by the participant's anxiety level. This
+    encourages exploitation of well-known options and discourages exploration
+    under high anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    exploration_penalty_base: [0, 1] - Baseline penalty applied to Q-values of
+                                       options with low visit counts.
+    anxiety_exploration_amplification: [0, 1] - Factor by which STAI score
+                                                additively amplifies this penalty.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.exploration_penalty_base, self.anxiety_exploration_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize visit counts for both stages
+        self.visit_counts_stage1 = np.zeros(self.n_choices)
+        self.visit_counts_stage2 = np.zeros((self.n_states, self.n_choices))
+        
+        # Calculate effective exploration penalty based on STAI
+        # Clipped to a reasonable range for penalty magnitude
+        self.effective_exploration_penalty = np.clip(
+            self.exploration_penalty_base + self.stai * self.anxiety_exploration_amplification, 0.0, 2.0
+        )
+        # Ensure alpha is within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying an exploration penalty
+        to less-visited options.
+        """
+        biased_q_stage1 = np.copy(self.q_stage1)
+        for a1 in range(self.n_choices):
+            # Apply penalty inversely proportional to visit count.
+            # Adding 1 to denominator to avoid division by zero and provide an initial penalty.
+            biased_q_stage1[a1] -= self.effective_exploration_penalty / (self.visit_counts_stage1[a1] + 1)
+            
+        return self.softmax(biased_q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities, applying an exploration penalty
+        to less-visited options within the current state.
+        """
+        biased_q_stage2 = np.copy(self.q_stage2[state])
+        for a2 in range(self.n_choices):
+            # Apply penalty inversely proportional to visit count for stage 2
+            biased_q_stage2[a2] -= self.effective_exploration_penalty / (self.visit_counts_stage2[state, a2] + 1)
+            
+        return self.softmax(biased_q_stage2, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome using standard TD learning.
+        Visit counts are updated in post_trial.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update visit counts after each trial.
+        """
+        super().post_trial(action_1, state, action_2, reward) # Call base class post_trial
+        self.visit_counts_stage1[action_1] += 1
+        self.visit_counts_stage2[state, action_2] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)

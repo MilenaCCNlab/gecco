@@ -1,0 +1,169 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant's high anxiety (STAI score 0.8125) modulates decision-making in the two-step task.
+
+### ParticipantModel1
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-modulated asymmetric learning. High anxiety leads to a greater emphasis on learning
+    from negative outcomes (no reward) compared to positive outcomes (reward). Specifically, the learning
+    rate for negative prediction errors is boosted by the participant's STAI score, while the learning
+    rate for positive prediction errors remains separate. This reflects a vigilance towards potential threats.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg_base: [0, 1] - Base learning rate for negative prediction errors.
+    stai_neg_boost: [0, 1] - How much the STAI score boosts the negative learning rate.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_neg_boost, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective negative learning rate, boosted by STAI
+        alpha_neg = self.alpha_neg_base + self.stai_neg_boost * self.stai
+        alpha_neg = np.clip(alpha_neg, 0, 1) # Ensure alpha_neg stays within [0, 1]
+
+        # Stage 2 update with asymmetric learning rates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 > 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += alpha_neg * delta_2
+        
+        # Stage 1 update with asymmetric learning rates
+        # The target for Stage 1 is the updated Q-value of the chosen Stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 > 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += alpha_neg * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### ParticipantModel2
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-modulated transition learning. High anxiety increases the learning rate
+    for updating beliefs about state transition probabilities, making the participant more reactive
+    to observed transitions. This reflects a heightened vigilance to environmental structure changes.
+    The STAI score linearly scales this transition learning rate.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    trans_alpha_base: [0, 1] - Base learning rate for transition probabilities.
+    stai_trans_alpha_scale: [0, 1] - Scaling factor for STAI's contribution to transition learning rate.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.trans_alpha_base, self.stai_trans_alpha_scale = model_parameters
+    
+    def init_model(self) -> None:
+        super().init_model()
+        # Initialize T based on the provided trans_counts (as initial priors)
+        # Make a copy and ensure it's float for direct modification
+        self.T = np.copy(self.trans_counts).astype(float)
+        self.T = self.T / self.T.sum(axis=1, keepdims=True)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Q-value updates for stage 2 and stage 1
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Calculate effective transition learning rate, boosted by STAI
+        trans_alpha = self.trans_alpha_base + self.stai_trans_alpha_scale * self.stai
+        trans_alpha = np.clip(trans_alpha, 0, 1) # Ensure within [0, 1]
+
+        # Update transition probabilities for the chosen action (action_1)
+        # The observed outcome is 'state'
+        
+        # For the observed state, update its probability towards 1
+        self.T[action_1, state] += trans_alpha * (1.0 - self.T[action_1, state])
+        
+        # For the unobserved state, update its probability towards 0
+        other_state = 1 - state
+        self.T[action_1, other_state] += trans_alpha * (0.0 - self.T[action_1, other_state])
+        
+        # Re-normalize probabilities for the chosen action to ensure they sum to 1
+        # Clip to prevent numerical issues (e.g., division by zero if sum becomes zero, or log(0) later)
+        self.T[action_1, :] = np.clip(self.T[action_1, :], 1e-10, 1 - 1e-10) 
+        self.T[action_1, :] /= np.sum(self.T[action_1, :])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### ParticipantModel3
+
+```python
+import numpy as np # numpy is available as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-modulated balance between model-based and model-free control.
+    High anxiety influences the weighting of model-based (planning) and model-free (habitual)
+    value estimates at Stage 1. Specifically, the STAI score modulates the 'w' parameter,
+    which determines the extent to which the agent relies on model-based predictions of future
+    rewards versus direct model-free updates. A negative 'stai_w_scale' would imply
+    higher anxiety leads to more model-free (habitual) control.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w_base: [0, 1] - Base weighting factor for model-based control (0=MF, 1=MB).
+    stai_w_scale: [-1, 1] - Scaling factor for STAI's effect on 'w'.
+                            Positive values mean higher STAI -> more MB.
+                            Negative values mean higher STAI -> less MB.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_w_scale = model_parameters
+    
+    def init_model(self) -> None:
+        super().init_model()
+        # Initialize separate model-free Q1 values
+        self.q_stage1_mf = np.copy(self.q_stage1) 
+        # The base class's self.q_stage1 will store the combined MB/MF value used for choice
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (always model-free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Model-Free update (standard TD learning for chosen action)
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1_mf[action_1]
+        self.q_stage1_mf[action_1] += self.alpha * delta_1_mf
+
+        # Stage 1 Model-Based computation (re-computed for all actions on each trial)
+        # Expected value of Stage 2 states if action_1 is chosen, assuming optimal Stage 2 choices
+        q_stage2_max = np.max(self.q_stage2, axis=1) # Max Q-value for each planet
+        
+        q_stage1_mb = np.zeros(self.n_choices)
+        for a1_idx in range(self.n_choices):
+            # Sum over possible next states (planets), weighted by transition probabilities
+            q_stage1_mb[a1_idx] = np.sum(self.T[a1_idx, :] * q_stage2_max)
+
+        # Calculate effective 'w' for the current trial, modulated by STAI
+        w = self.w_base + self.stai_w_scale * self.stai
+        w = np.clip(w, 0, 1) # Ensure w is between 0 and 1
+
+        # Combine model-based and model-free values for Stage 1 choices
+        # This combined value is what the policy_stage1 method will use for action selection
+        self.q_stage1 = w * q_stage1_mb + (1 - w) * self.q_stage1_mf
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,171 @@
+As a cognitive scientist and Python programmer, I will propose three distinct models to explain this participant's decision-making process. The participant's data is characterized by a strong initial preference for one spaceship, suggesting a perseverative or "sticky" choice strategy. Their low score on the anxiety questionnaire (STAI = 0.2875) is a key feature that each model will incorporate, testing different hypotheses about how a low-anxiety trait influences learning and decision-making in this task.
+
+### Model 1: Anxiety-Modulated Perseveration and Learning Stability
+
+This model proposes that the participant's behavior is driven by two primary factors modulated by their low anxiety: a tendency to repeat previous actions (perseveration) and a stable, less reactive learning style.
+
+**Hypothesis:** Individuals with low anxiety are less perturbed by environmental uncertainty and single negative outcomes. This psychological stability manifests behaviorally as a reduced learning rate (making value estimates less volatile) and a stronger tendency to stick with a chosen action (perseveration). We model this by having the `stai` score inversely modulate a "stickiness" parameter and directly modulate the learning rate. A lower `stai` score will result in higher stickiness and a lower learning rate.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model assumes that low anxiety promotes behavioral stability.
+    This is captured by two mechanisms:
+    1.  A lower learning rate ('alpha'), making value updates less reactive to
+        recent outcomes. The effective alpha is scaled by (1 + stai).
+    2.  A 'stickiness' bias ('kappa') to repeat the previous first-stage choice.
+        This bias is stronger for individuals with lower anxiety, reflecting
+        less tendency to switch strategies. The effective kappa is scaled by (1 - stai).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Base learning rate)
+    beta:  [0, 10]  (Inverse temperature for softmax)
+    kappa: [0, 5]   (Base stickiness weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes stage-1 policy with a stickiness bias."""
+        # Calculate effective kappa, higher for lower anxiety
+        kappa_eff = self.kappa * (1 - self.stai)
+
+        # Create a stickiness vector
+        perseveration_bonus = np.zeros(self.n_choices)
+        if self.last_action1 is not None:
+            perseveration_bonus[self.last_action1] = kappa_eff
+
+        # Add stickiness bonus to Q-values before softmax
+        q_values_with_bias = self.q_stage1 + perseveration_bonus
+        return self.softmax(q_values_with_bias, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Updates Q-values using an anxiety-modulated learning rate."""
+        # Calculate effective alpha, lower for lower anxiety
+        alpha_eff = self.alpha * (1 + self.stai)
+
+        # Standard TD learning, but with the effective learning rate
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_eff * delta_2
+
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_eff * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Hybrid of Model-Based and Model-Free Control
+
+This model tests the hypothesis that decision-making arises from a combination of a goal-directed ("model-based") system and a habitual ("model-free") system. The balance between these systems is influenced by cognitive traits like anxiety.
+
+**Hypothesis:** Low anxiety is associated with greater cognitive resources and flexibility, allowing for more reliance on a goal-directed, model-based strategy. This strategy involves using knowledge of the task structure (i.e., the transition probabilities) to plan the best course of action. The model proposes that the weight given to the model-based system (`w`) is inversely proportional to the `stai` score. For this participant, the model predicts a strong reliance on the model-based controller.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits a hybrid control system, blending model-free
+    (habitual) and model-based (goal-directed) valuation. It hypothesizes that
+    low anxiety facilitates greater cognitive control, leading to a stronger
+    reliance on the model-based system. The weighting parameter 'w' determines
+    the balance, and its effective value is scaled by (1 - stai), making it
+    higher for this low-anxiety participant.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate for model-free and stage-2 values)
+    beta:  [0, 10]  (Inverse temperature for softmax)
+    w:     [0, 1]   (Base weight for model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize separate model-free Q-values for stage 1."""
+        self.q_mf_stage1 = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes stage-1 policy based on a weighted average of MF and MB values."""
+        # 1. Calculate Model-Based (MB) values
+        # Q_MB(a) = sum_s T(s|a) * max_a' Q_S2(s, a')
+        q_mb_stage1 = np.zeros(self.n_choices)
+        max_q_stage2 = np.max(self.q_stage2, axis=1)
+        for a in range(self.n_choices):
+            q_mb_stage1[a] = np.dot(self.T[a, :], max_q_stage2)
+
+        # 2. Calculate effective model-based weight
+        w_eff = self.w * (1 - self.stai)
+
+        # 3. Combine MF and MB values
+        q_hybrid = w_eff * q_mb_stage1 + (1 - w_eff) * self.q_mf_stage1
+
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates stage-2 values and model-free stage-1 values.
+        Model-based values are derived, not learned directly.
+        """
+        # Standard TD update for stage-2 values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # TD update for the chosen model-free stage-1 action
+        # Note: The base class q_stage1 is not used by this model's policy.
+        # We use q_mf_stage1 instead.
+        delta_1 = max(self.q_stage2[state, :]) - self.q_mf_stage1[action_1]
+        self.q_mf_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Asymmetric Learning from Outcomes
+
+This model explores the idea that learning itself is biased by emotional valence and that this bias is shaped by anxiety. Specifically, it tests whether the participant learns differently from positive and negative feedback.
+
+**Hypothesis:** Anxiety amplifies the impact of negative outcomes. Consequently, individuals with low anxiety are relatively insensitive to negative feedback (i.e., not receiving a reward). This model implements two separate learning rates: `alpha_pos` for positive prediction errors (better-than-expected outcomes) and `alpha_neg` for negative prediction errors (worse-than-expected outcomes). The effective negative learning rate is scaled by `(1 + stai)`, meaning for this low-anxiety participant, it will be smaller, leading them to underweight disappointing outcomes. This could cause them to perseverate on an option that has been rewarding in the past, even if it occasionally fails to pay out.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that learning is asymmetric for positive and
+    negative outcomes, and this asymmetry is modulated by anxiety. Specifically,
+    anxiety is thought to increase sensitivity to negative events. This model
+    proposes that the learning rate for negative prediction errors ('alpha_neg')
+    is scaled by (1 + stai). For this low-anxiety participant, this results in
+    a reduced learning rate from worse-than-expected outcomes, explaining their
+    perseveration despite non-rewards.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   (Learning rate for positive prediction errors)
+    alpha_neg: [0, 1]   (Base learning rate for negative prediction errors)
+    beta:      [0, 10]  (Inverse temperature for softmax)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Updates values using separate learning rates for positive and negative PEs."""
+        # Calculate effective negative learning rate, amplified by anxiety
+        alpha_neg_eff = self.alpha_neg * (1 + self.stai)
+
+        # Stage-2 update with asymmetric learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 > 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += alpha_neg_eff * delta_2
+
+        # Stage-1 update with asymmetric learning
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 > 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += alpha_neg_eff * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

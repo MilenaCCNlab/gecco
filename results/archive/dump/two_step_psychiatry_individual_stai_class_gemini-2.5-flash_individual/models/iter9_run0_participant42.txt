@@ -1,0 +1,231 @@
+Here are three new cognitive models, each proposing a distinct cognitive strategy influenced by the participant's high anxiety (STAI score 0.6875).
+
+### Analysis of Participant Data and Anxiety Context
+
+The participant shows a clear phase of choosing spaceship 0 (A) for a long duration (28 trials), then switches to spaceship 1 (U) for another long block (22 trials). This behavior suggests either a strong belief in the initial choice, or a significant shift in perceived value, potentially after a series of unrewarding outcomes or a rare event. Given the high anxiety score (0.6875), which falls into the "high anxiety" category, our models should explore how this anxiety might influence decision-making processes such as learning, memory, or risk perception.
+
+### Proposed Cognitive Models
+
+---
+
+### ParticipantModel1: Anxiety-Modulated State-Action Value Decay (Forgetting)
+
+This model proposes that high anxiety leads to faster forgetting or decay of learned values. This could be due to increased cognitive load, stress, or a tendency to focus more on recent events rather than maintaining a long-term memory of all action outcomes. For individuals with high anxiety, previously learned Q-values might "fade" more quickly, making them more susceptible to recent experiences and less reliant on stable, long-term reward expectations.
+
+**Hypothesis**: High anxiety leads to faster decay or forgetting of learned values, making participants more sensitive to recent outcomes and less reliant on long-term value estimates. This decay rate is increased (i.e., `gamma_decay` is reduced) by higher STAI scores.
+
+**Mechanism**: After each trial's value updates, all Q-values (`q_stage1` and `q_stage2`) are multiplied by an effective decay factor. This effective decay factor is `gamma_decay_base` minus a term proportional to `self.stai` and `stai_decay_factor`. This makes values "fade" more quickly for anxious individuals.
+
+**Parameter Bounds**:
+*   `alpha`: `[0, 1]` - Learning rate for Q-values.
+*   `beta`: `[0, 10]` - Softmax inverse temperature for action selection.
+*   `gamma_decay_base`: `[0.5, 1.0]` - Baseline decay factor for Q-values. A value of 1.0 means no decay.
+*   `stai_decay_factor`: `[0, 1.0]` - How much the STAI score reduces the effective `gamma_decay` (increases forgetting).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to faster decay or forgetting of learned values,
+    making participants more sensitive to recent outcomes and less reliant on long-term value estimates.
+    This decay rate is increased (i.e., gamma_decay is reduced) by higher STAI scores.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    gamma_decay_base: [0.5, 1.0] - Baseline decay factor for Q-values. 1.0 means no decay.
+    stai_decay_factor: [0, 1.0] - How much STAI score reduces the effective gamma_decay (increases forgetting).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gamma_decay_base, self.stai_decay_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective decay rate based on STAI score
+        # Ensure the decay rate stays within a valid range [0, 1]
+        self.gamma_decay_effective = np.clip(
+            self.gamma_decay_base - self.stai * self.stai_decay_factor,
+            0.0, 1.0
+        )
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Apply value decay."""
+        super().post_trial(action_1, state, action_2, reward) # Call base method to store last actions/rewards
+
+        # Apply decay to all Q-values
+        self.q_stage1 *= self.gamma_decay_effective
+        self.q_stage2 *= self.gamma_decay_effective
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### ParticipantModel2: Anxiety-Modulated Contextual Model-Based Weight
+
+This model posits that high anxiety impairs cognitive control and working memory, leading to a reduced reliance on model-based planning (which requires more cognitive effort) and an increased reliance on simpler model-free habits. Crucially, this shift is not constant but is *triggered* by unexpected events like rare transitions and amplified by the STAI score. After a rare transition, anxious individuals become more habitual.
+
+**Hypothesis**: High anxiety leads to a reduced reliance on model-based planning and an increased reliance on simpler model-free habits, *especially after unexpected events like rare transitions*. This means the model-based weight `w` is reduced in such contexts, and this reduction is amplified by STAI.
+
+**Mechanism**: The model maintains separate Model-Free (MF) and Model-Based (MB) Q-values for Stage 1. The final Q-value for action selection is a weighted average of these. The weight `w` for the MB component starts at `w_base` but is dynamically reduced if the *previous trial* involved a rare transition (e.g., spaceship A went to planet Y), and this reduction is amplified by `self.stai` and `stai_rare_trans_mf_boost`. The model also learns transition probabilities.
+
+**Parameter Bounds**:
+*   `alpha_mf`: `[0, 1]` - Learning rate for Model-Free Q-values (both stages).
+*   `alpha_t`: `[0, 1]` - Learning rate for transition probabilities.
+*   `beta`: `[0, 10]` - Softmax inverse temperature for action selection.
+*   `w_base`: `[0, 1]` - Baseline weight given to Model-Based values.
+*   `stai_rare_trans_mf_boost`: `[0, 1]` - How much STAI amplifies the shift towards Model-Free control after a rare transition.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a reduced reliance on model-based planning
+    and an increased reliance on simpler model-free habits, especially after
+    unexpected events like rare transitions. This means the model-based weight `w`
+    is reduced in such contexts, and this reduction is amplified by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha_mf: [0, 1] - Learning rate for Model-Free Q-values (both stages).
+    alpha_t: [0, 1] - Learning rate for transition probabilities.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    w_base: [0, 1] - Baseline weight given to Model-Based values.
+    stai_rare_trans_mf_boost: [0, 1] - How much STAI amplifies the shift towards
+                                        Model-Free control after a rare transition.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_mf, self.alpha_t, self.beta, self.w_base, self.stai_rare_trans_mf_boost = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize separate Q-values for Model-Free components
+        self.q_mf_stage1 = np.zeros(self.n_choices) # Model-Free Q-values for stage 1
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices)) # Stage 2 Q-values (used by both MF and MB)
+
+        # Initialize learned transition probabilities based on base class priors, then update
+        self.T_learned = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+        # Store the effective w for the current trial
+        self.w_effective = self.w_base
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, calculate the effective 'w' based on the previous trial's outcome
+        (if a rare transition occurred and anxiety modulates it).
+        Then, calculate the combined q_stage1 values.
+        """
+        # Reset w_effective to base for current trial
+        self.w_effective = self.w_base
+
+        if self.trial > 0 and self.last_action1 is not None and self.last_state is not None:
+            # Check if the last transition was rare (e.g., probability below 0.4, assuming 0.3 is rare)
+            if self.T_learned[self.last_action1, self.last_state] < 0.4:
+                # If a rare transition occurred, reduce w (shift towards MF)
+                reduction = self.stai_rare_trans_mf_boost * self.stai
+                self.w_effective = np.clip(self.w_base - reduction, 0.0, 1.0) # Ensure w stays in [0,1]
+        
+        # Calculate Model-Based Q-values for stage 1 using learned transitions
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Q_mb(a1) = sum_s T_learned(a1, s) * max_a2(Q_stage2(s, a2))
+            q_mb_stage1[a1] = np.sum(self.T_learned[a1, :] * np.max(self.q_stage2, axis=1))
+
+        # Combine Model-Based and Model-Free Q-values for stage 1 policy
+        self.q_stage1 = self.w_effective * q_mb_stage1 + (1 - self.w_effective) * self.q_mf_stage1
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the combined Q-values."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values:
+        - Q_stage2 (Model-Free)
+        - Q_mf_stage1 (Model-Free)
+        - T_learned (Transition probabilities, Model-Based)
+        """
+        # Update Stage 2 Q-value (Model-Free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_mf * delta_2
+        
+        # Update Stage 1 Model-Free Q-value
+        delta_mf1 = self.q_stage2[state, action_2] - self.q_mf_stage1[action_1]
+        self.q_mf_stage1[action_1] += self.alpha_mf * delta_mf1
+
+        # Update transition probabilities using alpha_t (TD-like update)
+        for s_idx in range(self.n_states):
+            target_t = 1.0 if s_idx == state else 0.0 # 1 for observed transition, 0 otherwise
+            self.T_learned[action_1, s_idx] += self.alpha_t * (target_t - self.T_learned[action_1, s_idx])
+        # Re-normalize to ensure probabilities sum to 1 for the chosen action
+        self.T_learned[action_1, :] = self.T_learned[action_1, :] / np.sum(self.T_learned[action_1, :])
+
+        # Store for next trial's pre_trial calculation of w_effective
+        self.last_action1 = action_1
+        self.last_state = state
+        self.last_reward = reward
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### ParticipantModel3: Anxiety-Modulated Sensitivity to Planet Value Changes (Second-Stage Negative Impact)
+
+This model suggests that high anxiety makes individuals particularly sensitive to negative outcomes at the second stage (planets/aliens). When a chosen alien yields no reward, and thus the perceived value of that planet decreases, this negative surprise has an *amplified negative impact* on the value of the first-stage action that led to that planet. This leads to a more severe devaluation of the initial spaceship, reflecting an overreaction to perceived environmental volatility or threat.
+
+**Hypothesis**: High anxiety makes participants more sensitive to negative changes in the reward probabilities at the second stage (planets/aliens). If the perceived value of a planet (or an alien on it) drops, a high-anxiety individual might overreact and penalize the first-stage action that led to that planet more severely. This means negative prediction errors from Stage 2 have an amplified negative impact when propagating back to Stage 1, modulated by STAI.
+
+**Mechanism**: The standard TD update for `q_stage1` uses the updated `q_stage2[state, action_2]` as its target. This model modifies this by adding an *additional penalty* to the `q_stage1` update if the second-stage prediction error (`delta_2`) is negative. This additional penalty is proportional to the magnitude of `delta_2` and is amplified by `self.stai` and `stai_second_stage_neg_impact`.
+
+**Parameter Bounds**:
+*   `alpha`: `[0, 1]` - Learning rate for Q-values in both stages.
+*   `beta`: `[0, 10]` - Softmax inverse temperature for action selection.
+*   `stai_second_stage_neg_impact`: `[0, 5]` - Parameter controlling how much STAI amplifies the negative impact of Stage 2 prediction errors on Stage 1 values.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety makes participants more sensitive to negative changes
+    in the reward probabilities at the second stage (planets/aliens). If the
+    perceived value of a planet (or an alien on it) drops, a high-anxiety
+    individual might overreact and penalize the first-stage action that led to
+    that planet more severely. This means negative prediction errors from Stage 2
+    have an amplified negative impact when propagating back to Stage 1,
+    modulated by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values in both stages.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    stai_second_stage_neg_impact: [0, 5] - Parameter controlling how much STAI
+                                            amplifies the negative impact of
+                                            Stage 2 prediction errors on Stage 1 values.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stai_second_stage_neg_impact = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome, with anxiety-modulated propagation
+        of negative second-stage prediction errors.
+        """
+        # Stage 2 update (standard TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # Standard TD error for Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+
+        # Apply anxiety-modulated amplification of negative Stage 2 impact
+        if delta_2 < 0: # If there was a negative surprise at Stage 2
+            # The additional penalty is proportional to the magnitude of the negative delta_2
+            # and amplified by STAI score and stai_second_stage_neg_impact
+            additional_penalty = abs(delta_2) * self.stai * self.stai_second_stage_neg_impact
+            delta_1 -= additional_penalty # Further reduce delta_1, making q_stage1 decrease more
+
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

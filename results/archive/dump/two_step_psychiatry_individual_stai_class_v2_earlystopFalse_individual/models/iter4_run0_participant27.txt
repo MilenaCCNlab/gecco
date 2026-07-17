@@ -1,0 +1,175 @@
+Here are 3 new cognitive models that explore different mechanisms for how anxiety (STAI) might influence decision-making in this task, specifically focusing on model-based/model-free arbitration, punishment sensitivity, and uncertainty avoidance.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model tests the hypothesis that anxiety shifts the balance between model-based (goal-directed) and model-free (habitual) control. High anxiety is often associated with reduced cognitive flexibility and a reliance on habits. Here, the STAI score modulates the mixing weight (`w`) between these two systems.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Model-Based/Model-Free Hybrid]
+    This model implements a hybrid reinforcement learning agent where the balance between 
+    Model-Based (MB) and Model-Free (MF) control is modulated by anxiety.
+    Higher anxiety (STAI) is hypothesized to reduce Model-Based control (planning) 
+    and increase reliance on Model-Free (habitual) control.
+    
+    The mixing weight 'w' is calculated as: w = base_w * (1 - stai)
+    If w is close to 1, the agent is purely Model-Based. If w is close to 0, purely Model-Free.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature)
+    base_w: [0, 1] (Baseline model-based weight, attenuated by anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.base_w = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition matrix (fixed for this simple version, or could be learned)
+        # 0 -> [0.7, 0.3], 1 -> [0.3, 0.7] based on task description
+        self.T = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Free Q-values (TD learning)
+        q_mf = self.q_stage1
+        
+        # Model-Based Q-values (Bellman equation using transition matrix)
+        # Q_MB(a1) = sum(P(s2|a1) * max(Q_stage2(s2, a2)))
+        # We use the max of stage 2 values as the estimated value of the state
+        v_stage2 = np.max(self.q_stage2, axis=1)
+        q_mb = self.T @ v_stage2
+        
+        # Calculate effective w based on anxiety
+        # Higher STAI -> Lower w (less model-based)
+        # We clamp STAI effect to ensure w stays valid, though STAI is usually < 1
+        effective_w = self.base_w * (1.0 - min(self.stai, 0.9))
+        
+        # Integrated Q-values
+        q_net = effective_w * q_mb + (1 - effective_w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # TD update for Stage 1 (Model-Free path)
+        # Note: In full hybrid models, this might use lambda-returns, but here we use simple TD(0)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Punishment Sensitivity
+This model hypothesizes that anxiety specifically amplifies the learning signal from negative outcomes (omission of reward). Instead of a single learning rate, the model uses separate learning rates for positive and negative prediction errors, where the "negative" learning rate is boosted by the STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Induced Punishment Sensitivity]
+    This model hypothesizes that anxiety increases sensitivity to negative prediction errors 
+    (disappointments). The agent learns differently from positive vs negative outcomes.
+    The learning rate for negative prediction errors (alpha_neg) is scaled up by the STAI score.
+    
+    alpha_pos = alpha
+    alpha_neg = alpha * (1 + stai * sensitivity_boost)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Base learning rate for positive outcomes)
+    beta: [0, 10] (Inverse temperature)
+    sensitivity_boost: [0, 5] (Multiplier for anxiety's effect on negative learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.sensitivity_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine learning rate based on sign of prediction error
+        if delta_2 >= 0:
+            eff_alpha_2 = self.alpha
+        else:
+            # Boost learning from negative errors based on anxiety
+            eff_alpha_2 = self.alpha * (1.0 + self.stai * self.sensitivity_boost)
+            # Clamp to 1.0 to prevent instability
+            eff_alpha_2 = min(eff_alpha_2, 1.0)
+            
+        self.q_stage2[state, action_2] += eff_alpha_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        if delta_1 >= 0:
+            eff_alpha_1 = self.alpha
+        else:
+            eff_alpha_1 = self.alpha * (1.0 + self.stai * self.sensitivity_boost)
+            eff_alpha_1 = min(eff_alpha_1, 1.0)
+
+        self.q_stage1[action_1] += eff_alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Uncertainty Avoidance
+This model suggests that anxious individuals are averse to uncertainty. In the context of this task, "uncertainty" can be operationalized as the variance or entropy of the expected rewards. Here, we track the variance of rewards for each option and subtract a penalty proportional to STAI from the Q-values.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Driven Uncertainty Avoidance]
+    This model hypothesizes that anxiety drives an avoidance of options with high outcome variance.
+    The model tracks not just the mean value (Q) but also the variance of rewards for each option.
+    
+    Decision Value = Q - (stai * risk_aversion * Variance)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for both mean and variance)
+    beta: [0, 10] (Inverse temperature)
+    risk_aversion: [0, 5] (Scaling factor for uncertainty penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.risk_aversion = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance estimates for Stage 1 and Stage 2
+        # Initial variance is 0.25 (assuming max variance for binary 0/1 is 0.25)
+        self.var_stage1 = np.ones(self.n_choices) * 0.25
+        self.var_stage2 = np.ones((self.n_states, self.n_choices)) * 0.25
+
+    def policy_stage1(self) -> np.ndarray:
+        # Penalize Q-values by variance scaled by anxiety
+        penalty = self.stai * self.risk_aversion * self.var_stage1
+        adjusted_q = self.q_stage1 - penalty
+        return self.softmax(adjusted_q, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Penalize Q-values by variance scaled by anxiety
+        penalty = self.stai * self.risk_aversion * self.var_stage2[state]
+        adjusted_q = self.q_stage2[state] - penalty
+        return self.softmax(adjusted_q, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 Mean and Variance
+        # Variance update: Var_new = Var_old + alpha * ((Reward - Q_old)^2 - Var_old)
+        # This approximates the running variance
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.var_stage2[state, action_2] += self.alpha * ((delta_2**2) - self.var_stage2[state, action_2])
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Mean and Variance
+        # We use the Stage 2 Q-value as the "reward" for Stage 1
+        outcome_1 = self.q_stage2[state, action_2]
+        delta_1 = outcome_1 - self.q_stage1[action_1]
+        self.var_stage1[action_1] += self.alpha * ((delta_1**2) - self.var_stage1[action_1])
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

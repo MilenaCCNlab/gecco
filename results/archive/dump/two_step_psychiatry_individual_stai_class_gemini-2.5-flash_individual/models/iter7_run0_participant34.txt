@@ -1,0 +1,170 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the highly anxious participant (STAI score 0.9625) makes decisions in the two-step task. Each model leverages the `self.stai` score to modulate a specific cognitive mechanism.
+
+---
+
+### Model 1: Anxiety-Driven Risk Aversion (Unchosen Alien Penalty)
+
+This model proposes that high anxiety makes participants more sensitive to potential negative outcomes, leading them to proactively penalize the *unchosen* Stage 2 option when the chosen option yields no reward. This reflects an increased aversion to the perceived risk or "missed opportunity" associated with the alternative, and this effect is amplified by their anxiety level.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Risk Aversion (Unchosen Alien Penalty).
+    High anxiety leads participants to penalize the *unchosen* Stage 2 option
+    more strongly, especially when the chosen option yields no reward. This
+    reflects a heightened aversion to the perceived risk or "missed opportunity"
+    of the alternative, amplified by anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    unchosen_penalty_base: [0, 1] (Base penalty applied to the unchosen Stage 2 option)
+    stai_penalty_boost: [0, 1] (Factor by which STAI amplifies the unchosen penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.unchosen_penalty_base, self.stai_penalty_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, applying an anxiety-amplified penalty to the unchosen
+        Stage 2 option if the chosen one yielded no reward.
+        """
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Apply penalty to unchosen Stage 2 option if reward was 0
+        if reward == 0:
+            unchosen_action_2 = 1 - action_2 # The other alien is the unchosen one
+            
+            # Calculate anxiety-amplified penalty magnitude
+            penalty_magnitude = self.unchosen_penalty_base + (self.stai * self.stai_penalty_boost)
+            penalty_magnitude = np.clip(penalty_magnitude, 0, 1) # Ensure penalty is within reasonable bounds
+            
+            # Reduce the value of the unchosen option
+            self.q_stage2[state, unchosen_action_2] -= penalty_magnitude
+            # Clamp Q-values to be within [0, 1] (as rewards are 0 or 1)
+            self.q_stage2[state, unchosen_action_2] = np.clip(self.q_stage2[state, unchosen_action_2], 0, 1)
+
+        # Standard Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### Model 2: Anxiety-Induced Global Beta Reduction on Negative Outcomes
+
+This model posits that high anxiety leads to a dynamic reduction in the inverse temperature (`beta`) following negative outcomes (no reward). This makes subsequent choices more stochastic or exploratory, reflecting a loss of confidence or increased uncertainty when things go wrong. This effect is amplified by anxiety, and `beta` gradually recovers towards its initial value over time.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Global Beta Reduction on Negative Outcomes.
+    High anxiety leads to a dynamic reduction in the inverse temperature (beta)
+    following negative outcomes (no reward), making subsequent choices more
+    stochastic or exploratory. This reflects a loss of confidence or increased
+    uncertainty when things go wrong, and this effect is amplified by anxiety.
+    Beta gradually recovers towards its initial value.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta_initial: [0, 10] (Base softmax inverse temperature)
+    beta_reduction_factor_base: [0, 5] (Base reduction in beta after a 0-reward)
+    stai_beta_reduction_boost: [0, 5] (Factor by which STAI amplifies beta reduction)
+    beta_recovery_rate: [0, 1] (Rate at which beta recovers towards beta_initial)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_initial, self.beta_reduction_factor_base, self.stai_beta_reduction_boost, self.beta_recovery_rate = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        self.beta_current = self.beta_initial # Initialize current beta
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using current, dynamic beta."""
+        return self.softmax(self.q_stage1, self.beta_current)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using current, dynamic beta."""
+        return self.softmax(self.q_stage2[state], self.beta_current)
+        
+    def pre_trial(self) -> None:
+        """Called before each trial. Allows beta to recover slightly."""
+        # Beta recovers towards beta_initial
+        self.beta_current = (1 - self.beta_recovery_rate) * self.beta_current + self.beta_recovery_rate * self.beta_initial
+        # Ensure beta stays within a reasonable range
+        self.beta_current = np.clip(self.beta_current, 0.1, 10.0)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Called after each trial. If reward was 0, reduce beta.
+        """
+        super().post_trial(action_1, state, action_2, reward) # Store last action/state/reward
+
+        if reward == 0:
+            # Calculate anxiety-amplified beta reduction
+            reduction = self.beta_reduction_factor_base + (self.stai * self.stai_beta_reduction_boost)
+            self.beta_current = self.beta_current - reduction # Apply reduction
+            # Ensure beta doesn't go too low or too high
+            self.beta_current = np.clip(self.beta_current, 0.1, 10.0)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Model 3: Anxiety-Modulated Stage 1 Backpropagation Discount
+
+This model hypothesizes that high anxiety specifically hinders the backpropagation of value from Stage 2 to Stage 1. This means the learning rate for Stage 1 updates, which integrate the value of the subsequent state, is effectively reduced. This reduction is amplified by anxiety, making it harder for participants to connect immediate Stage 2 outcomes to their initial Stage 1 choices and thus impairing long-term planning.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Stage 1 Backpropagation Discount.
+    High anxiety specifically hinders the backpropagation of value from Stage 2
+    to Stage 1. This means that the learning rate for Stage 1 updates, which
+    integrate the value of the subsequent state, is effectively reduced,
+    and this reduction is amplified by anxiety. Participants might struggle to
+    connect immediate Stage 2 outcomes to their initial Stage 1 choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage2: [0, 1] (Learning rate for Stage 2 Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    backprop_discount_base: [0, 1] (Base factor by which Stage 1 learning is discounted)
+    stai_backprop_discount_boost: [0, 1] (Factor by which STAI amplifies this discount)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage2, self.beta, self.backprop_discount_base, self.stai_backprop_discount_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, applying an anxiety-amplified discount to the Stage 1
+        learning update (backpropagation).
+        """
+        # Stage 2 update uses alpha_stage2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2 * delta_2
+        
+        # Calculate the effective discount for Stage 1 learning
+        # The higher the discount, the less Stage 1 learns from Stage 2
+        effective_discount = self.backprop_discount_base + (self.stai * self.stai_backprop_discount_boost)
+        effective_discount = np.clip(effective_discount, 0, 1) # Ensure discount is within [0, 1]
+
+        # Stage 1 update: delta_1 is scaled by (1 - effective_discount)
+        # This means alpha_stage1_effective = alpha_stage2 * (1 - effective_discount)
+        alpha_stage1_effective = self.alpha_stage2 * (1 - effective_discount)
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_stage1_effective * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

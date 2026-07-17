@@ -1,0 +1,160 @@
+Here are 3 new cognitive models exploring different mechanisms for how anxiety (STAI) might influence decision-making in this task, specifically focusing on the participant's low anxiety score (0.2875) and their observed behavior.
+
+### Model 1: Anxiety-Modulated Model-Based Weighting
+This model hypothesizes that anxiety affects the balance between model-based (planning) and model-free (habitual) control. Low anxiety participants might rely more on model-based planning, utilizing the transition structure of the task, whereas high anxiety might drive a retreat to simpler model-free strategies.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    
+    The agent computes Q-values as a weighted mixture:
+    Q_net = w * Q_MB + (1 - w) * Q_MF
+    
+    The weighting parameter 'w' is modulated by STAI.
+    Low anxiety (STAI < 0.31) -> Higher 'w' (more Model-Based).
+    High anxiety -> Lower 'w' (more Model-Free).
+    
+    w = w_base * (1 - stai)  [Bounded 0-1]
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    w_base: [0, 1]     # Base model-based weight
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the mixing weight based on STAI
+        # Lower STAI -> Higher weight for Model-Based
+        self.w = np.clip(self.w_base * (1.0 - self.stai), 0.0, 1.0)
+        
+        # Initialize Model-Free Q-values (Stage 1) separately
+        self.q_mf = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Compute Model-Based Q-values
+        # Q_MB(a1) = sum(P(s|a1) * max(Q_stage2(s, :)))
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Using the fixed transition matrix self.T
+            # T[a, s] is prob of transition from action a to state s
+            expected_val = 0
+            for s in range(self.n_states):
+                expected_val += self.T[a, s] * np.max(self.q_stage2[s])
+            q_mb[a] = expected_val
+
+        # 2. Combine with Model-Free Q-values
+        q_net = self.w * q_mb + (1 - self.w) * self.q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 values (common to both systems)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Model-Free values (TD(1) style for simplicity or SARSA)
+        # Here using the standard TD update from stage 2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Learning Rate Asymmetry
+This model suggests that anxiety influences how people learn from positive versus negative prediction errors. A low anxiety participant might be more balanced or optimistic (learning more from rewards), while high anxiety might lead to a negativity bias (learning more from punishments/omissions).
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the asymmetry between learning from positive and negative prediction errors.
+    
+    We split the learning rate alpha into alpha_pos (for RPE > 0) and alpha_neg (for RPE < 0).
+    The ratio or bias is determined by STAI.
+    
+    alpha_pos = alpha_base
+    alpha_neg = alpha_base * (1 + bias_param * stai)
+    
+    If bias_param > 0, higher anxiety leads to stronger learning from negative outcomes.
+    Low anxiety implies alpha_pos approx alpha_neg.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]   # Base learning rate
+    beta: [0, 10]        # Inverse temperature
+    bias_param: [0, 5]   # Strength of anxiety-induced negative bias
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.bias_param = model_parameters
+
+    def init_model(self) -> None:
+        # Define positive and negative learning rates
+        self.alpha_pos = self.alpha_base
+        # Anxiety amplifies the negative learning rate
+        self.alpha_neg = np.clip(self.alpha_base * (1.0 + self.bias_param * self.stai), 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Inverse Temperature (Exploration Noise)
+This model posits that anxiety affects the randomness of choice (exploration vs. exploitation). The "choking under pressure" or "distracted" hypothesis suggests high anxiety adds noise to decision making (lower beta), whereas low anxiety allows for more precise, deterministic value-based choices (higher beta).
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates decision noise (inverse temperature beta).
+    
+    High anxiety reduces beta (more random/noisy choices).
+    Low anxiety increases beta (more deterministic/greedy choices).
+    
+    beta_effective = beta_max / (1 + noise_param * stai)
+    
+    For this low anxiety participant, we expect a high effective beta.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta_max: [0, 20]   # Maximum inverse temperature (theoretical max precision)
+    noise_param: [0, 10]# Sensitivity of noise to anxiety
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_max, self.noise_param = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective beta
+        # As STAI increases, the denominator grows, making beta smaller (noisier).
+        self.beta_eff = self.beta_max / (1.0 + self.noise_param * self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.q_stage1, self.beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.softmax(self.q_stage2[state], self.beta_eff)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

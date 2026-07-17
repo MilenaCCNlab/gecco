@@ -1,0 +1,225 @@
+Here are three cognitive models expressed as Python functions that incorporate the STAI (anxiety) score into the decision-making process.
+
+### Model 1: Anxiety-Modulated Transition Belief (Pessimism)
+This model posits that anxiety does not degrade the *capacity* for model-based control (the `w` parameter), but rather corrupts the *internal model* of the world. High anxiety individuals may exhibit "pessimism" or uncertainty about the stability of the environment, believing the "common" transition (usually 70%) is less likely than it actually is, effectively flattening the transition matrix toward 50/50 chance.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Transition Belief (Pessimism).
+    
+    Hypothesis: Anxiety affects the internal model of the environment used for 
+    Model-Based (MB) planning. While the world remains 70/30, high anxiety 
+    participants perceive the transitions as less reliable (closer to 50/50), 
+    reducing the effectiveness of their MB planning.
+    
+    Parameters:
+    learning_rate: [0, 1] - Rate of updating value estimates.
+    beta: [0, 10] - Inverse temperature (randomness) for both stages.
+    w: [0, 1] - Weighting for model-based control (0=MF, 1=MB).
+    belief_distortion: [0, 1] - How much STAI reduces the perceived probability 
+                                of the common transition.
+    """
+    learning_rate, beta, w, belief_distortion = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+    
+    # Mechanism: The true world is 0.7, but anxiety lowers this belief.
+    # If distortion is high and STAI is high, belief approaches 0.5 (random).
+    # We clip at 0.5 because it's unlikely they believe the rare transition becomes common.
+    perceived_common_prob = np.clip(0.7 - (stai_val * belief_distortion), 0.5, 0.7)
+    
+    # Construct the internal model based on anxiety-modulated belief
+    transition_matrix = np.array([
+        [perceived_common_prob, 1 - perceived_common_prob], 
+        [1 - perceived_common_prob, perceived_common_prob]
+    ])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # The MB value is calculated using the distorted transition matrix
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = (w * q_stage1_mb) + ((1 - w) * q_stage1_mf)
+        
+        exp_q1 = np.exp(beta * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        a2 = int(action_2[trial])
+        p_choice_2[trial] = probs_2[a2]
+  
+        # Update Stage 1 (TD-error based on stage 2 value estimation)
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        # Update Stage 2 (TD-error based on reward)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Stage-Specific Anxiety Noise (Beta Split)
+This model hypothesizes that anxiety creates a "panic" effect specifically at the moment of the final outcome decision (Stage 2), increasing randomness (lowering beta) when faced with the aliens. However, the initial navigation choice (Stage 1) remains governed by a baseline temperature. This separates the planning phase from the consumption phase.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Stage-Specific Anxiety Noise (Beta Split).
+    
+    Hypothesis: Anxiety acts as a distractor that specifically degrades decision 
+    precision (lowers Beta) at the second stage (immediate reward context), 
+    while the first stage (navigation context) retains a baseline precision.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate.
+    beta_stage1: [0, 10] - Inverse temperature for the spaceship choice.
+    w: [0, 1] - Model-based weight.
+    beta_stage2_base: [0, 10] - Baseline inverse temperature for alien choice.
+    stai_noise_factor: [0, 1] - How much STAI reduces beta at stage 2.
+    """
+    learning_rate, beta_stage1, w, beta_stage2_base, stai_noise_factor = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Mechanism: Calculate Stage 2 beta based on anxiety.
+    # Higher anxiety -> Lower beta (more noise/randomness) at stage 2.
+    beta_stage2 = beta_stage2_base * (1.0 - (stai_val * stai_noise_factor))
+    # Ensure beta doesn't go below 0
+    beta_stage2 = np.maximum(beta_stage2, 0.0)
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = (w * q_stage1_mb) + ((1 - w) * q_stage1_mf)
+        
+        exp_q1 = np.exp(beta_stage1 * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # policy for the second choice
+        # Use the anxiety-modulated beta_stage2 here
+        exp_q2 = np.exp(beta_stage2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        a2 = int(action_2[trial])
+        p_choice_2[trial] = probs_2[a2]
+  
+        # Update Stage 1
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        # Update Stage 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Hyper-Vigilant Stage 1 Learning
+This model suggests that anxiety leads to hyper-vigilance regarding cues and environmental structure (Stage 1), but not necessarily the reward consumption itself (Stage 2). High anxiety individuals update their values for the "predictors" (spaceships) more aggressively than low anxiety individuals, resulting in a higher learning rate specifically for the first stage.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hyper-Vigilant Stage 1 Learning.
+    
+    Hypothesis: Anxiety drives hyper-vigilance toward predictive cues (Stage 1).
+    Therefore, STAI boosts the learning rate specifically for the first stage 
+    transition (learning the value of spaceships), while the second stage 
+    learning rate remains at a baseline.
+    
+    Parameters:
+    lr_base: [0, 1] - Baseline learning rate (applied to Stage 2).
+    beta: [0, 10] - Inverse temperature.
+    w: [0, 1] - Model-based weight.
+    stai_s1_boost: [0, 1] - Additional learning rate added to Stage 1 based on STAI.
+    """
+    lr_base, beta, w, stai_s1_boost = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Mechanism: Stage 1 learning rate is boosted by anxiety.
+    # Stage 2 learning rate is just the base rate.
+    lr_stage1 = np.clip(lr_base + (stai_val * stai_s1_boost), 0.0, 1.0)
+    lr_stage2 = lr_base
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = (w * q_stage1_mb) + ((1 - w) * q_stage1_mf)
+        
+        exp_q1 = np.exp(beta * q_net_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        a2 = int(action_2[trial])
+        p_choice_2[trial] = probs_2[a2]
+  
+        # Update Stage 1 using the boosted learning rate
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += lr_stage1 * delta_stage1
+        
+        # Update Stage 2 using the base learning rate
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += lr_stage2 * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

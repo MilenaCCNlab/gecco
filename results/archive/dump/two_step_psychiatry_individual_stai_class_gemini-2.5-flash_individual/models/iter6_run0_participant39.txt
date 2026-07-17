@@ -1,0 +1,146 @@
+Here are three new cognitive models that propose different hypotheses for how the participant's decision-making is influenced by their high anxiety (STAI score = 0.6625). Each model uses the `stai` score to modulate a specific cognitive process.
+
+### Model 1: Anxiety-Modulated Positive RPE Learning (Pessimism)
+
+This model hypothesizes that high anxiety leads to a more pessimistic learning style, specifically by reducing the impact of positive outcomes. Anxious individuals may discount good news, resulting in a slower update of values when things go well, while remaining sensitive to negative outcomes.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a reduced learning rate for *positive* prediction errors,
+    making participants less responsive to good outcomes. Learning from negative outcomes
+    remains at a baseline rate. This reflects a pessimistic bias where positive feedback is discounted.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos_base: [0, 1] - Baseline learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta: [0, 10] - Softmax inverse temperature.
+    stai_pos_rpe_reduction_factor: [0, 1] - Factor by which STAI reduces the positive RPE learning rate.
+                                            A higher value means more anxious individuals discount positive outcomes more.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos_base, self.alpha_neg, self.beta, self.stai_pos_rpe_reduction_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate RPE for stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+
+        # Determine effective alpha for stage 2 based on RPE sign and STAI
+        if delta_2 >= 0:
+            # Positive RPE: alpha is reduced by anxiety
+            effective_alpha_2 = self.alpha_pos_base * (1 - self.stai_pos_rpe_reduction_factor * self.stai)
+            effective_alpha_2 = max(0.0, effective_alpha_2) # Ensure alpha doesn't go negative
+        else:
+            # Negative RPE: alpha is fixed at alpha_neg
+            effective_alpha_2 = self.alpha_neg
+        
+        self.q_stage2[state, action_2] += effective_alpha_2 * delta_2
+        
+        # Calculate RPE for stage 1 (using updated Q2 value)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+
+        # Determine effective alpha for stage 1 based on RPE sign and STAI
+        # Stage 1 learning also reflects the pessimistic bias if it's a positive update,
+        # otherwise uses the negative learning rate.
+        if delta_1 >= 0:
+            effective_alpha_1 = self.alpha_pos_base * (1 - self.stai_pos_rpe_reduction_factor * self.stai)
+            effective_alpha_1 = max(0.0, effective_alpha_1)
+        else:
+            effective_alpha_1 = self.alpha_neg
+
+        self.q_stage1[action_1] += effective_alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Perseveration (Stickiness)
+
+This model proposes that high anxiety leads to increased perseveration, meaning participants are more likely to repeat their previous Stage 1 choice regardless of its current value. This could stem from a desire to reduce decision-making effort or avoid the uncertainty of exploring new options.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases the tendency to repeat the previous Stage 1 choice,
+    irrespective of its value, potentially due to risk aversion or decision paralysis.
+    This leads to increased perseveration in choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for value updates.
+    beta: [0, 10] - Softmax inverse temperature.
+    stickiness_base: [0, 2] - Baseline bonus added to the Q-value of the previously chosen Stage 1 action.
+    stai_stickiness_boost_factor: [0, 2] - Factor by which STAI boosts the stickiness bonus.
+                                            A higher value means more anxious individuals are more likely to repeat actions.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_base, self.stai_stickiness_boost_factor = model_parameters
+        
+    def policy_stage1(self) -> np.ndarray:
+        # Start with current Q-values
+        q_values_with_stickiness = np.copy(self.q_stage1)
+        
+        # If a previous action exists, apply stickiness bonus
+        if self.last_action1 is not None:
+            # Calculate effective stickiness bonus, amplified by STAI
+            effective_stickiness_bonus = self.stickiness_base + (self.stai_stickiness_boost_factor * self.stai)
+            
+            # Add bonus to the Q-value of the last chosen action
+            q_values_with_stickiness[self.last_action1] += effective_stickiness_bonus
+        
+        return self.softmax(q_values_with_stickiness, self.beta)
+
+    # Value update remains standard TD learning, as stickiness only affects choice policy.
+    # We use the base class's value_update.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Rare Negative Outcome Aversion
+
+This model postulates that highly anxious individuals develop a strong aversion to rare transitions when they lead to negative outcomes. Instead of just learning faster, they apply a direct penalty to the value of the Stage 1 action that resulted in such an event, leading to a greater avoidance of those paths.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety makes agents particularly sensitive to *negative* outcomes
+    that follow *rare* transitions, leading to a stronger devaluation of the initial
+    action that led to such an event. This is an explicit aversion rather than just faster learning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for value updates.
+    beta: [0, 10] - Softmax inverse temperature.
+    rare_neg_penalty_base: [0, 2] - Baseline penalty applied to Stage 1 Q-value for rare negative outcomes.
+    stai_penalty_amplification: [0, 5] - Factor by which STAI amplifies the rare negative outcome penalty.
+                                        A higher value means more anxious individuals are more averse to such events.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_neg_penalty_base, self.stai_penalty_amplification = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD learning for Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Apply anxiety-driven rare negative outcome aversion
+        # Check if the transition was rare and the reward was negative
+        is_rare_transition = (self.T[action_1, state] < 0.5) # Common transitions are 0.7, rare are 0.3
+        is_negative_reward = (reward < 0)
+
+        if is_rare_transition and is_negative_reward:
+            # Calculate the effective penalty, amplified by STAI
+            effective_penalty = self.rare_neg_penalty_base * (1 + self.stai_penalty_amplification * self.stai)
+            
+            # Apply the penalty to the Q-value of the chosen Stage 1 action
+            self.q_stage1[action_1] -= effective_penalty
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

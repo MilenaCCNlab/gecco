@@ -1,0 +1,193 @@
+Here are three new cognitive models exploring different mechanisms for how high anxiety (STAI = 0.7625) might influence decision-making in this task.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Trade-off
+This model tests the hypothesis that high anxiety impairs model-based planning (using the transition structure) and favors model-free learning (habitual responding). The weighting parameter `w` determines the balance between these systems, and anxiety reduces `w` (shifting towards model-free).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Impaired Model-Based Control.
+    High anxiety consumes cognitive resources (working memory), reducing the ability 
+    to engage in computationally expensive model-based planning.
+    
+    Mechanism:
+    The agent uses a hybrid Model-Based (MB) and Model-Free (MF) strategy.
+    The mixing weight 'w' determines the contribution of MB values.
+    'w' is modulated by STAI: w_effective = w_base * (1 - anxiety_impact * stai).
+    Higher anxiety leads to lower w_effective (more Model-Free behavior).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Baseline model-based weight
+    anxiety_impact: [0, 1] # How strongly anxiety reduces MB control
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.anxiety_impact = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize Model-Free Q-values for stage 1 (Q_MF)
+        self.q_mf = np.zeros(self.n_choices)
+        # Transition matrix is fixed in the base class (self.T)
+        # Stage 2 values are standard Q-learning (self.q_stage2)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values for Stage 1
+        # Q_MB(a1) = sum(P(s2|a1) * max(Q_stage2(s2, :)))
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # self.T is [2x2] (action x state) transition matrix
+            # T[a, s] is prob of reaching state s given action a
+            # Note: Base class T is defined as trans_counts / sum. 
+            # Let's assume row 0 is action A -> usually state X (0), row 1 is action U -> usually state Y (1)
+            # We need max Q value from stage 2 for each state
+            v_stage2 = np.max(self.q_stage2, axis=1) 
+            q_mb[a] = np.sum(self.T[a] * v_stage2)
+
+        # Calculate effective weight
+        # If anxiety_impact is high and stai is high, w becomes small -> Model Free
+        w_eff = self.w_base * (1.0 - self.anxiety_impact * self.stai)
+        w_eff = np.clip(w_eff, 0.0, 1.0)
+
+        # Combine values: Q_net = w * Q_MB + (1-w) * Q_MF
+        q_net = w_eff * q_mb + (1.0 - w_eff) * self.q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 values (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Stage 1 Model-Free values (TD(1) / SARSA-like logic)
+        # Using the value of the state reached (or the reward directly if we treat it as a chain)
+        # Standard hybrid models often update MF Q1 based on Q2
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Negative Bias (Pessimism)
+This model hypothesizes that anxious individuals have a biased perception of reward probabilities, specifically overweighting the likelihood of negative outcomes or underweighting rewards. This "pessimism" is implemented as a scaling factor on the reward prediction error.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Pessimism (Asymmetric Learning).
+    Anxious participants may learn differently from positive vs. negative prediction errors.
+    Specifically, high anxiety might dampen the learning from positive surprises (rewards)
+    or amplify the learning from negative surprises (omissions).
+    
+    Mechanism:
+    We split the learning rate alpha into alpha_pos and alpha_neg.
+    The balance is modulated by STAI.
+    alpha_pos = alpha * (1 - pessimism * stai)
+    alpha_neg = alpha * (1 + pessimism * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Base learning rate
+    beta: [0, 10]       # Inverse temperature
+    pessimism: [0, 1]   # Degree to which anxiety skews learning towards negative
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pessimism = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate prediction error for stage 2
+        pe_2 = reward - self.q_stage2[state, action_2]
+        
+        # Modulate learning rate based on sign of PE and anxiety
+        # If PE > 0 (good surprise), anxiety reduces learning rate
+        # If PE < 0 (bad surprise), anxiety increases learning rate
+        if pe_2 >= 0:
+            eff_alpha = self.alpha * (1.0 - self.pessimism * self.stai)
+        else:
+            eff_alpha = self.alpha * (1.0 + self.pessimism * self.stai)
+            
+        eff_alpha = np.clip(eff_alpha, 0.0, 1.0)
+        
+        self.q_stage2[state, action_2] += eff_alpha * pe_2
+        
+        # Propagate to stage 1
+        # We use the updated Q2 value to drive Q1
+        pe_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Apply same asymmetry to stage 1? 
+        # Often simpler to keep stage 1 symmetric or just follow stage 2's value.
+        # Let's apply the base alpha here to isolate the effect to reward processing at the outcome.
+        self.q_stage1[action_1] += self.alpha * pe_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Exploration/Exploitation Shift
+This model suggests that anxiety alters the exploration-exploitation trade-off. High anxiety might lead to "safety behaviors" (sticking to what is known, high beta) or erratic behavior due to panic (randomness, low beta). Given the high STAI score, this model tests if anxiety specifically modulates the inverse temperature parameter `beta`.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Decision Noise (Inverse Temperature).
+    Anxiety affects the consistency of choices. This model tests if anxiety leads to 
+    more random behavior (low beta, "panic/confusion") or more rigid behavior 
+    (high beta, "compulsion/safety").
+    
+    Mechanism:
+    The inverse temperature beta is a function of STAI.
+    beta_effective = beta_base * exp(direction * stai)
+    
+    If 'direction' is positive, anxiety increases beta (rigidity).
+    If 'direction' is negative, anxiety decreases beta (randomness).
+    To keep parameters bounded [0,1], we map 'direction' parameter 'k' 
+    such that it can represent both increase and decrease relative to base.
+    
+    Let's define: beta_eff = beta_base * (1 + k_mod * stai)
+    where k_mod can be positive or negative. 
+    To fit the bounds requirement, we use a separate parameter 'mod_strength' [0,1]
+    and a discrete switch or just assume a direction. 
+    Let's assume the hypothesis is Rigidity (Anxiety increases exploitation).
+    
+    beta_eff = beta_base + (beta_max - beta_base) * (stai * rigidity_factor)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    rigidity_factor: [0, 1] # How much STAI pushes beta towards the upper bound (10)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.rigidity_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta
+        # We scale from beta_base up to a max of 20 (arbitrary high rigidity) or just add
+        # Let's use a multiplicative factor: beta_eff = beta_base * (1 + rigidity * stai * 5)
+        # This allows beta to grow significantly with anxiety.
+        
+        beta_eff = self.beta_base * (1.0 + self.rigidity_factor * self.stai * 3.0)
+        return self.softmax(self.q_stage1, beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        beta_eff = self.beta_base * (1.0 + self.rigidity_factor * self.stai * 3.0)
+        return self.softmax(self.q_stage2[state], beta_eff)
+
+    # Standard Q-learning update
+    # No override needed for value_update if it's standard, but we need to ensure
+    # q_stage1 and q_stage2 are updated. The base class has a standard update.
+    # However, to be safe and explicit about the mechanism being ONLY beta modulation:
+    
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

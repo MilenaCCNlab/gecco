@@ -1,0 +1,193 @@
+Here are three cognitive models, each proposing a different hypothesis about how the participant makes decisions, with specific modulation by their anxiety (STAI) score.
+
+```python
+import numpy as np
+# The CognitiveModelBase class is assumed to be provided and available in the environment.
+# from abc import ABC, abstractmethod
+# class CognitiveModelBase(ABC):
+#     """
+#     Base class for cognitive models in a two-step task.
+#     ...
+#     """
+#     # ... (rest of the base class code)
+
+# Model 1: Anxiety-Modulated Learning Rate
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants learn action values using
+    standard temporal difference (TD) learning. The learning rate (alpha) is
+    modulated by the participant's anxiety level (STAI score). Specifically,
+    higher anxiety is hypothesized to lead to a reduced effective learning rate,
+    making value updates slower and potentially resulting in more stable, less
+    adaptive behavior. For this participant with medium anxiety, their learning
+    rate is expected to be moderately dampened.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]  (Base learning rate)
+    beta: [0, 10]       (Softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        self.alpha_base, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        """
+        Initialize model state. Here, the effective learning rate 'alpha' is
+        calculated based on the base learning rate and the STAI score.
+        """
+        # Modulate alpha based on STAI score. Higher STAI means lower effective alpha.
+        # If STAI is 0, alpha = alpha_base. If STAI is 1, alpha = 0.
+        self.alpha = self.alpha_base * (1 - self.stai)
+        
+        # Ensure alpha stays within valid bounds and is not extremely close to zero
+        # to prevent numerical instability, especially during optimization.
+        self.alpha = np.clip(self.alpha, 1e-5, 1.0) 
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome using the anxiety-modulated alpha.
+        The update rule is standard TD learning.
+        """
+        # Update Q-value for the second stage
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update Q-value for the first stage based on the learned value of the
+        # chosen second-stage action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+# Create the callable cognitive model function for ParticipantModel1
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+# Model 2: Anxiety-Modulated Model-Based Control Weight
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests a hybrid control strategy where decisions
+    are influenced by both model-free (habitual) and model-based (goal-directed)
+    values. The model-based component uses known transition probabilities to
+    estimate future rewards. The weight given to this model-based component (w)
+    is modulated by the participant's anxiety level. Higher anxiety is hypothesized
+    to reduce the influence of the computationally expensive model-based system,
+    pushing behavior towards simpler, model-free strategies.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate for model-free updates)
+    beta: [0, 10]       (Softmax inverse temperature)
+    w_base: [0, 1]      (Base weight for model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        """
+        Initialize model state. The effective model-based weight 'w' is
+        calculated based on the base weight and the STAI score.
+        """
+        # q_stage1 in the base class will serve as the model-free component.
+        # Modulate w based on STAI score. Higher STAI means lower effective w.
+        # If STAI is 0, w = w_base. If STAI is 1, w = 0.
+        self.w = self.w_base * (1 - self.stai)
+        self.w = np.clip(self.w, 0.0, 1.0) # Ensure w is within bounds
+
+        # This will store the combined Q-values for stage 1 choices.
+        self.q_stage1_combined = np.zeros(self.n_choices)
+        
+        # The base class's self.q_stage1 will be treated as the model-free Q-values.
+
+    def pre_trial(self) -> None:
+        """
+        Called before each trial. Here, we calculate the model-based Q-values
+        for stage 1 and then combine them with the model-free Q-values
+        to inform the current stage-1 choice.
+        """
+        # Calculate model-based Q-values for stage 1:
+        # Q_MB(a1) = sum_s' P(s'|a1) * max_{a2} Q2(s', a2)
+        q_stage1_model_based = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_future_value = 0
+            for s_prime in range(self.n_states):
+                # self.T[a1, s_prime] is the transition probability P(s_prime | a1)
+                # np.max(self.q_stage2[s_prime, :]) is the maximum value achievable
+                # from state s_prime in the second stage.
+                expected_future_value += self.T[a1, s_prime] * np.max(self.q_stage2[s_prime, :])
+            q_stage1_model_based[a1] = expected_future_value
+        
+        # Combine model-free (self.q_stage1) and model-based Q-values using weight 'w'.
+        self.q_stage1_combined = (1 - self.w) * self.q_stage1 + self.w * q_stage1_model_based
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using the combined model-free and
+        model-based Q-values.
+        """
+        return self.softmax(self.q_stage1_combined, self.beta)
+    
+    # The value_update method remains as in the base class, as it updates the
+    # model-free Q-values (self.q_stage1) and second-stage Q-values (self.q_stage2).
+
+# Create the callable cognitive model function for ParticipantModel2
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+# Model 3: Anxiety-Modulated Choice Stickiness (Perseveration)
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that participants exhibit choice perseveration,
+    meaning they have a tendency to repeat their previous first-stage action.
+    This 'stickiness' adds a bonus to the value of the action chosen on the
+    immediately preceding trial. The strength of this stickiness is modulated
+    by the participant's anxiety level (STAI score). Higher anxiety is
+    hypothesized to increase stickiness, leading to more rigid choices as a
+    strategy to reduce cognitive load or avoid uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]       (Softmax inverse temperature)
+    stick_base: [0, 1]  (Base stickiness bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        self.alpha, self.beta, self.stick_base = model_parameters
+
+    def init_model(self) -> None:
+        """
+        Initialize model state. The effective stickiness parameter is
+        calculated based on the base stickiness and the STAI score.
+        """
+        # Modulate stickiness based on STAI score. Higher STAI means higher effective stickiness.
+        # If STAI is 0, stickiness = stick_base. If STAI is 1, stickiness = 2*stick_base.
+        self.stickiness = self.stick_base * (1 + self.stai)
+        # Ensure stickiness is non-negative. There's no inherent upper bound,
+        # but values typically don't exceed 1-2 in practice for a bonus.
+        self.stickiness = np.clip(self.stickiness, 0.0, None) 
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities. This method applies a stickiness
+        bonus to the value of the last chosen first-stage action before
+        applying the softmax function.
+        """
+        # Create a copy of the current Q-values to apply the bonus
+        q_values_adjusted = np.copy(self.q_stage1)
+        
+        # Apply the stickiness bonus if a previous action has been recorded
+        # (i.e., not the very first trial).
+        if self.last_action1 is not None:
+            q_values_adjusted[self.last_action1] += self.stickiness
+        
+        return self.softmax(q_values_adjusted, self.beta)
+    
+    # The value_update and policy_stage2 methods remain as in the base class.
+
+# Create the callable cognitive model function for ParticipantModel3
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

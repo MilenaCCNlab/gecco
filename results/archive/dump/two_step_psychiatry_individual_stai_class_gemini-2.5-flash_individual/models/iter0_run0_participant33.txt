@@ -1,0 +1,149 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant makes decisions in the two-step task, incorporating their high anxiety score (STAI = 0.75).
+
+### Model 1: Anxious Reinforcement Learning with Asymmetric Learning Rates
+
+This model hypothesizes that high anxiety leads to increased vigilance and sensitivity to negative outcomes. Specifically, the participant updates their value estimates more aggressively when they do *not* receive a reward (negative prediction error) compared to when they do receive a reward (positive prediction error). The STAI score directly amplifies this "loss aversion" in learning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (STAI) leads to asymmetric learning rates.
+    Participants with high anxiety update their value estimates more
+    aggressively when they receive no reward (negative prediction error)
+    compared to when they receive a reward. The STAI score modulates
+    the learning rate for negative outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] (Learning rate for positive prediction errors)
+    alpha_neg_base: [0, 1] (Base learning rate for negative prediction errors)
+    stai_neg_effect: [0, 1] (How much STAI amplifies alpha_neg)
+    beta: [0, 10] (Inverse temperature for softmax)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_neg_effect, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine current learning rate based on reward
+        if reward == 0:
+            # For non-rewards, alpha_neg is amplified by STAI score
+            current_alpha = self.alpha_neg_base + self.stai_neg_effect * self.stai
+        else:
+            # For rewards, use the positive learning rate
+            current_alpha = self.alpha_pos
+        
+        # Ensure alpha stays within [0, 1]
+        current_alpha = np.clip(current_alpha, 0, 1)
+
+        # Stage 2 value update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        # Stage 1 value update (using the same determined alpha)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+```
+
+### Model 2: Anxiety-Modulated Action Perseveration (Stickiness)
+
+This model proposes that high anxiety leads to increased perseveration or "stickiness" to previously chosen actions at the first stage. This might reflect a tendency to stick with familiar choices in an uncertain environment, or a reduced ability to shift strategies. The STAI score directly increases the strength of this stickiness bonus.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (STAI) increases action perseveration (stickiness).
+    Participants with high anxiety are more likely to repeat their last
+    stage-1 action, reflecting a tendency to stick to familiar choices.
+    The STAI score modulates the strength of this stickiness bonus.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature for softmax)
+    stickiness_base: [0, 1] (Base value for repeating the last action)
+    stai_stickiness_effect: [0, 1] (How much STAI amplifies stickiness)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness_base, self.stai_stickiness_effect = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize stickiness values for stage 1 actions
+        self.stickiness_values = np.zeros(self.n_choices)
+
+    def pre_trial(self) -> None:
+        # Reset stickiness values for the current trial
+        self.stickiness_values[:] = 0
+        
+        # If it's not the first trial, apply stickiness to the last chosen action
+        if self.trial > 0 and self.last_action1 is not None:
+            # Stickiness is base + STAI effect
+            stickiness_strength = self.stickiness_base + self.stai_stickiness_effect * self.stai
+            self.stickiness_values[self.last_action1] = stickiness_strength
+
+    def policy_stage1(self) -> np.ndarray:
+        # Add stickiness bonus to Q-values before softmax
+        return self.softmax(self.q_stage1 + self.stickiness_values, self.beta)
+
+    # value_update uses the default TD learning from CognitiveModelBase
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+```
+
+### Model 3: Anxiety-Modulated Reaction to Rare Transitions
+
+This model proposes that high anxiety makes participants more reactive to unexpected environmental events, specifically rare transitions between stages. When a rare transition occurs (e.g., choosing spaceship A but landing on planet Y), this participant updates their value for the *chosen spaceship* more drastically, reflecting a heightened sensitivity to environmental volatility.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (STAI) leads to amplified learning from rare transitions.
+    Participants with high anxiety react more strongly to unexpected (rare)
+    transitions between stage 1 and stage 2. This is modeled as an
+    additional update to the stage-1 value for the chosen action when a
+    rare transition occurs, with the STAI score modulating this amplification.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature for softmax)
+    rare_trans_weight_base: [0, 1] (Base additional weight for rare transitions)
+    stai_rare_effect: [0, 1] (How much STAI amplifies the rare transition weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_trans_weight_base, self.stai_rare_effect = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Check if the transition was rare
+        # Spaceship 0 (A) commonly to Planet 0 (X)
+        # Spaceship 1 (U) commonly to Planet 1 (Y)
+        # Rare transitions are (0,1) or (1,0)
+        is_rare_transition = (action_1 == 0 and state == 1) or \
+                             (action_1 == 1 and state == 0)
+
+        if is_rare_transition:
+            # Calculate additional learning weight amplified by STAI
+            rare_weight = self.rare_trans_weight_base + self.stai_rare_effect * self.stai
+            # Ensure weight stays within reasonable bounds
+            rare_weight = np.clip(rare_weight, 0, 1) 
+            
+            # Apply an additional update to stage 1 Q-value
+            self.q_stage1[action_1] += rare_weight * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+
+```

@@ -1,0 +1,150 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Modulated Stage Discrepancy
+This model tests the hypothesis that anxiety creates a dissociation between the learning rates for the two stages of the task. Specifically, anxious individuals might focus more on the immediate outcomes (Stage 2, the aliens) while neglecting the predictive structure (Stage 1, the spaceships), or vice versa.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the ratio of learning rates between Stage 1 (Spaceships) 
+    and Stage 2 (Aliens). 
+    
+    The model uses a base learning rate `alpha` for Stage 1, but modulates the 
+    Stage 2 learning rate based on STAI:
+    alpha_s1 = alpha
+    alpha_s2 = alpha * (1 + psi * stai)
+    
+    If psi > 0, anxiety amplifies learning about the aliens (immediate reward).
+    If psi < 0, anxiety dampens learning about the aliens relative to spaceships.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Base learning rate
+    beta: [0, 10]   # Inverse temperature
+    psi: [-1, 5]    # Anxiety modulation factor
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.psi = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate stage-specific alphas
+        alpha_1 = self.alpha
+        # Clip alpha_2 to be within [0, 1] for stability
+        alpha_2 = np.clip(self.alpha * (1.0 + self.psi * self.stai), 0.0, 1.0)
+        
+        # Stage 2 Update (Aliens)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update (Spaceships)
+        # We use the value of the chosen stage 2 option to update stage 1 (SARSA-style)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Risk Aversion (Variance Penalty)
+This model tests the hypothesis that anxiety induces risk aversion. The agent tracks not just the expected value (Q) but also the variance of the rewards for each option. Anxious participants penalize options that have high outcome variance, preferring certainty even if the mean value is slightly lower.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces risk aversion based on outcome variance.
+    The agent tracks the variance of rewards for each option.
+    The action selection is based on a risk-penalized Q-value:
+    Q_net = Q - omega * STAI * sqrt(Variance)
+    
+    Anxious participants will avoid options with high variance (uncertainty in outcome).
+    Variance is updated online using the squared prediction error.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta: [0, 10]   # Inverse temperature
+    omega: [0, 5]   # Risk penalty weight
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize variance estimates. 
+        # Initial uncertainty is set to 0.25 (variance of a Bernoulli(0.5) distribution)
+        self.var_stage1 = np.ones(self.n_choices) * 0.25
+        self.var_stage2 = np.ones((self.n_states, self.n_choices)) * 0.25
+
+    def policy_stage1(self) -> np.ndarray:
+        # Penalize Q-values by variance
+        penalty = self.omega * self.stai * np.sqrt(self.var_stage1)
+        adjusted_q = self.q_stage1 - penalty
+        return self.softmax(adjusted_q, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        penalty = self.omega * self.stai * np.sqrt(self.var_stage2[state])
+        adjusted_q = self.q_stage2[state] - penalty
+        return self.softmax(adjusted_q, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Q updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Variance updates: V <- V + alpha * ((R - Q_old)^2 - V)
+        # We use the squared prediction error as the instantaneous variance sample
+        self.var_stage2[state, action_2] += self.alpha * (delta_2**2 - self.var_stage2[state, action_2])
+        self.var_stage1[action_1] += self.alpha * (delta_1**2 - self.var_stage1[action_1])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Reversion to Prior (The "Worry" Model)
+This model tests the hypothesis that anxiety accelerates the decay of value representations for unchosen options. Anxious individuals may struggle to maintain stable beliefs about options they are not currently engaging with, causing those values to revert rapidly to the prior (0.5, representing maximum uncertainty).
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety accelerates "forgetting" or reversion to the prior (uncertainty) 
+    for unchosen options. 
+    
+    For unchosen actions, the value decays towards 0.5:
+    Q(a) <- Q(a) + kappa * STAI * (0.5 - Q(a))
+    
+    This implies that anxious individuals become uncertain about options they haven't 
+    tried recently much faster than non-anxious individuals.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta: [0, 10]   # Inverse temperature
+    kappa: [0, 1]   # Decay/Reversion rate scaler
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard update for chosen options
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Decay unchosen options towards 0.5
+        decay_rate = np.clip(self.kappa * self.stai, 0.0, 1.0)
+        
+        # Stage 1 unchosen
+        unchosen_a1 = 1 - action_1
+        self.q_stage1[unchosen_a1] += decay_rate * (0.5 - self.q_stage1[unchosen_a1])
+        
+        # Stage 2 unchosen (in the current state only)
+        unchosen_a2 = 1 - action_2
+        self.q_stage2[state, unchosen_a2] += decay_rate * (0.5 - self.q_stage2[state, unchosen_a2])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,168 @@
+Here are three new cognitive models based on the participant's high anxiety score (STAI = 0.7625) and the provided data.
+
+### Model 1: Anxiety-Driven Transition Volatility (Dynamic Model-Based)
+**Hypothesis**: High anxiety leads to a belief that the environment's structure is unstable. While a standard participant might learn the transition probabilities (which spaceship goes to which planet) and keep them relatively fixed, an anxious participant constantly updates these probabilities with a high learning rate, reacting to "rare" transitions as if the world has changed. This model implements a Model-Based strategy where the transition learning rate is scaled by STAI.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Transition Volatility.
+    Anxious participants perceive the environment structure (transitions) as volatile.
+    They update their internal model of transition probabilities (T) more rapidly 
+    than low-anxiety participants.
+    
+    Mechanism:
+    - Maintain an internal estimate of T (initially 0.7/0.3).
+    - Update T after every transition: T_new = T_old + (t_volatility * stai) * (Outcome - T_old).
+    - Stage 1 values are computed purely Model-Based: Q1 = T * V_stage2.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Reward learning rate for Stage 2)
+    beta: [0, 10] (Softmax inverse temperature)
+    t_volatility: [0, 1] (Scaling factor for transition learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.t_volatility = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize internal transition belief: 
+        # Row 0 (Action A): [P(X), P(Y)], Row 1 (Action U): [P(X), P(Y)]
+        # We assume they start with the correct prior knowledge (70/30)
+        self.T_est = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based calculation for Stage 1
+        # V_stage2 is the max Q-value available at each state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Q1 = T_est * V_stage2
+        # T_est is (2, 2), v_stage2 is (2,) -> Result (2,)
+        q_mb = np.dot(self.T_est, v_stage2)
+        
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 values (Standard Q-Learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Transition Beliefs (Dynamic Structural Learning)
+        # Construct the observed transition vector (one-hot)
+        outcome_vector = np.zeros(2)
+        outcome_vector[state] = 1.0
+        
+        # Learning rate for transitions depends on anxiety
+        lr_t = self.t_volatility * self.stai
+        
+        # Update the row corresponding to the chosen spaceship
+        self.T_est[action_1] += lr_t * (outcome_vector - self.T_est[action_1])
+        
+        # Ensure probabilities sum to 1 (numerical stability)
+        self.T_est[action_1] /= np.sum(self.T_est[action_1])
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Stage 2 Perseveration
+**Hypothesis**: Anxiety manifests as rigid habit formation specifically in the "confrontational" stage (Stage 2, choosing the alien), rather than the navigational stage. The participant data shows long streaks of choosing the same alien (e.g., Alien 0 on Planet 1) despite mixed rewards. This model adds a "stickiness" bonus to the Stage 2 choice that is proportional to STAI, making anxious participants reluctant to switch aliens once on a planet.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Stage 2 Perseveration.
+    High anxiety leads to rigidity/stickiness specifically in the second stage 
+    (choosing the alien), potentially as a safety-seeking behavior.
+    
+    Mechanism:
+    - Standard TD learning for values.
+    - In Stage 2 policy, add a bonus to the Q-value of the previously chosen 
+      alien for that specific planet.
+    - Bonus = s2_stick * stai.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    s2_stick: [0, 5] (Strength of perseveration bias)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.s2_stick = model_parameters
+
+    def init_model(self) -> None:
+        # Track the last action taken in each state (planet)
+        # Initialize with -1 (no previous action)
+        self.last_action_per_state = np.array([-1, -1])
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        q_values = self.q_stage2[state].copy()
+        
+        # Apply stickiness bonus if we have visited this state before
+        prev_action = self.last_action_per_state[state]
+        if prev_action != -1:
+            bonus = self.s2_stick * self.stai
+            q_values[prev_action] += bonus
+            
+        return self.softmax(q_values, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Update history for the specific state visited
+        self.last_action_per_state[state] = action_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Surprise Sensitivity
+**Hypothesis**: Anxious individuals are hyper-reactive to unexpected events ("surprises"). In this task, a "rare" transition (e.g., Spaceship A going to Planet Y) is a surprise. This model posits that when a rare transition occurs, the participant's learning rate for that trial is boosted by their anxiety level, causing them to over-update their values based on the outcome of that surprising trial.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Surprise Sensitivity.
+    Anxious participants react more strongly to outcomes that follow a 'rare' 
+    transition. They treat these surprising events as highly informative, 
+    boosting their learning rate.
+    
+    Mechanism:
+    - Identify if transition was rare (Action != State).
+    - If rare: alpha_effective = alpha * (1 + surprise_reaction * stai).
+    - If common: alpha_effective = alpha.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    surprise_reaction: [0, 10] (Multiplier for learning rate boost)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.surprise_reaction = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if transition was rare
+        # Common: 0->0 (A->X) or 1->1 (U->Y). Rare: 0->1 or 1->0.
+        # So Rare if action_1 != state.
+        is_rare = (action_1 != state)
+        
+        # Calculate effective learning rate
+        if is_rare:
+            # Boost alpha based on anxiety
+            alpha_eff = self.alpha * (1.0 + self.surprise_reaction * self.stai)
+            # Cap alpha at 1.0 to maintain stability
+            alpha_eff = min(alpha_eff, 1.0)
+        else:
+            alpha_eff = self.alpha
+
+        # Update Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_eff * delta_2
+        
+        # Update Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_eff * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

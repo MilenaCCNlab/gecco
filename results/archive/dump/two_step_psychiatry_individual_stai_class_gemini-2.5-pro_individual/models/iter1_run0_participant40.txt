@@ -1,0 +1,190 @@
+Of course. As a cognitive scientist and programmer, I will propose three distinct models to explain this participant's decision-making process. Given the participant's low score on the anxiety questionnaire (stai = 0.2625), each model will incorporate a specific hypothesis about how low anxiety might manifest in their cognitive strategy.
+
+### Model 1: Optimistic Explorer
+
+This model hypothesizes that low anxiety is associated with a more optimistic and exploratory approach. The participant may start with an inflated expectation of rewards and be less deterministic in their choices, allowing for more exploration of the environment.
+
+*   **Cognitive Hypothesis:** The participant's low anxiety leads to two behavioral tendencies: 1) An inherent optimism, reflected by initializing the values of all options above average. 2) A higher degree of exploration, as low anxiety reduces the perceived risk of making a suboptimal choice. This is modeled by anxiety dampening the softmax `beta` parameter, leading to more random choices.
+*   **Anxiety Modulation:** `self.stai` scales down the `beta` parameter. Lower anxiety leads to a lower effective `beta`, increasing choice stochasticity.
+*   **Implementation:** The model uses a simple, model-free SARSA update rule, where the first-stage value is updated towards the value of the specific second-stage action taken, rather than the best possible action.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes an "Optimistic Explorer" strategy. The
+    participant's low anxiety (stai) makes them more exploratory and optimistic.
+    Optimism is captured by initializing Q-values to a positive value. Higher
+    exploration is modeled by anxiety dampening the softmax inverse temperature (beta),
+    making choices more random for low-anxiety individuals. The model uses a
+    simple SARSA update rule.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]      (Base inverse temperature for softmax)
+    optimism: [0, 2]   (Initial Q-value for all options)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.optimism = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize Q-values with an optimism bias."""
+        self.q_stage1 = self.optimism * np.ones(self.n_choices)
+        self.q_stage2 = self.optimism * np.ones((self.n_states, self.n_choices))
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Stage-1 policy is softened by anxiety. Low anxiety reduces beta,
+        increasing exploration.
+        """
+        # Low stai -> lower effective_beta -> more stochasticity
+        effective_beta = self.beta * (1 + self.stai)
+        return self.softmax(self.q_stage1, effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Stage-2 policy is also softened by anxiety."""
+        effective_beta = self.beta * (1 + self.stai)
+        return self.softmax(self.q_stage2[state], effective_beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Implements a simple SARSA (model-free) update rule.
+        """
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage-1 update is based on the value of the action actually taken in stage 2
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Habitual Control
+
+This model tests the hypothesis that cognitive control, specifically the balance between goal-directed (model-based) and habitual (model-free) decision-making, is influenced by anxiety. Low anxiety may favor less cognitively demanding, habitual strategies.
+
+*   **Cognitive Hypothesis:** The participant arbitrates between a computationally demanding model-based system (which plans using the transition structure) and a simpler model-free system (which relies on cached values). Low anxiety biases this arbitration towards the less effortful model-free system, making the participant behave more habitually.
+*   **Anxiety Modulation:** `self.stai` directly modulates the weighting parameter `w`, which governs the balance between model-based and model-free value estimates. Lower anxiety reduces the influence of the model-based system.
+*   **Implementation:** The model computes separate model-based (`q_mb`) and model-free (`q_mf`) values for the first-stage choice. The final policy is based on a weighted average of these two values, where the weight is determined by a base parameter `w` and the participant's `stai` score.
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that anxiety modulates the balance between
+    goal-directed (model-based) and habitual (model-free) control. Low anxiety
+    favors the computationally cheaper model-free system. The final choice is
+    a result of combining values from both systems, with the weighting (w)
+    being directly influenced by the participant's stai score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for value updates)
+    beta: [0, 10]     (Inverse temperature for softmax)
+    w: [0, 1]         (Base weighting of the model-based system)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Stage-1 policy is based on a weighted average of model-based and
+        model-free value estimates.
+        """
+        # Model-based values: calculated on the fly
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Q_MB(a) = P(s0|a)*max(Q(s0)) + P(s1|a)*max(Q(s1))
+            q_mb[a] = np.dot(self.T[a, :], [np.max(self.q_stage2[s, :]) for s in range(self.n_states)])
+        
+        # Model-free values are stored in self.q_stage1
+        q_mf = self.q_stage1
+
+        # Anxiety modulates the weighting. Low stai -> lower w_eff -> more model-free
+        w_effective = self.w * (1 - self.stai)
+        
+        q_hybrid = w_effective * q_mb + (1 - w_effective) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates both the stage-2 values and the model-free (q_stage1) values.
+        """
+        # Stage-2 update (same for both systems)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-free stage-1 update (Q-learning)
+        delta_1 = np.max(self.q_stage2[state, :]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Surprise-Resistant Perseveration
+
+This model explores how low anxiety might affect learning from surprising events. Specifically, it suggests that low-anxiety individuals are less likely to update their beliefs after an unexpected outcome (a rare transition), while also exhibiting a general tendency to repeat choices.
+
+*   **Cognitive Hypothesis:** The participant is less sensitive to prediction errors that arise from surprising events. When a rare transition occurs (e.g., choosing spaceship A and arriving at planet Y), their low anxiety buffers them from the surprise, causing them to discount the outcome and learn less from it. This is combined with a simple "stickiness" or perseverance bias, where they are more likely to repeat their previous choice.
+*   **Anxiety Modulation:** On trials with a rare transition, `self.stai` is used to scale down the first-stage learning rate `alpha`. For a low-anxiety individual, this significantly reduces learning from unexpected outcomes.
+*   **Implementation:** The model checks if a transition was rare (`action_1 != state`). If so, it applies an anxiety-dampened learning rate to the first-stage value update. The policy at stage 1 also includes a perseverance parameter `p` that adds a bonus to the value of the action chosen on the previous trial.
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests a "Surprise-Resistant Perseverator".
+    The participant has a general tendency to repeat choices (perseveration).
+    Crucially, their low anxiety makes them less reactive to surprising outcomes.
+    When a rare transition occurs, they update their first-stage choice values
+    less, effectively ignoring information that strongly violates their expectations.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Base learning rate)
+    beta: [0, 10]      (Inverse temperature)
+    p: [0, 5]          (Perseverance strength bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.p = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Stage-1 policy includes a perseverance bonus for the last-chosen action.
+        """
+        q_policy = np.copy(self.q_stage1)
+        if self.last_action1 is not None:
+            q_policy[self.last_action1] += self.p
+        return self.softmax(q_policy, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        The first-stage learning rate is reduced on rare transition trials,
+        scaled by the participant's low anxiety.
+        """
+        # Determine if the transition was common (action_1 == state) or rare
+        is_rare_transition = (action_1 != state)
+        
+        # Low anxiety reduces learning from surprising (rare) events
+        # Effective alpha is self.alpha on common trials, but reduced on rare trials
+        alpha_stage1 = self.alpha * (1 - self.stai) if is_rare_transition else self.alpha
+        
+        # Standard TD updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = np.max(self.q_stage2[state, :]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_stage1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,234 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        self.trans_counts = np.array([[35, 15], [15, 35]]) # Prior counts for transitions, if needed for learning
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) # Transition probabilities, if needed for direct use
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Uncertainty Penalty.
+    
+    This model hypothesizes that high anxiety participants find structural uncertainty 
+    (rare transitions) intrinsically aversive. They apply a penalty to the value of 
+    an action if it results in a rare transition, effectively discouraging choices 
+    that lead to unexpected states, independent of the subsequent reward outcome.
+    This creates a bias towards "reliable" transitions.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Learning rate
+    beta: [0, 10]           # Inverse temperature
+    penalty_weight: [0, 1]  # Penalty magnitude for rare transitions, scaled by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.penalty_weight = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Apply penalty for rare transition
+        # Common transitions are 0->0 and 1->1. Rare are 0->1 and 1->0.
+        is_rare = (action_1 != state)
+        
+        if is_rare:
+            # The penalty scales with anxiety (STAI)
+            penalty = self.penalty_weight * self.stai
+            self.q_stage1[action_1] -= penalty
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Eligibility Trace.
+    
+    This model hypothesizes that high anxiety impairs the cognitive ability to maintain 
+    a model of the task structure (chaining values from state to state). Instead, 
+    anxious participants rely more on direct reinforcement from the outcome to the 
+    initial choice. This is modeled by an eligibility trace parameter (`lambda`) 
+    that scales with STAI. Higher anxiety leads to a higher lambda, meaning the 
+    Stage 1 choice is reinforced more directly by the Stage 2 reward.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         # Learning rate
+    beta: [0, 10]         # Inverse temperature
+    lambda_scale: [0, 1]  # Scaling factor for eligibility trace based on STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate prediction error at stage 2 (Reward Prediction Error)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Update stage 2 value
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Calculate prediction error at stage 1 (Temporal Difference Error)
+        # Note: Using updated q_stage2 is standard in this base class implementation
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Determine eligibility trace lambda based on anxiety
+        # High anxiety -> High lambda (more direct reinforcement)
+        lambda_val = np.clip(self.lambda_scale * self.stai, 0.0, 1.0)
+        
+        # Update Stage 1: Standard TD update + Eligibility Trace term
+        # The trace term allows the Stage 2 RPE (delta_2) to directly affect Stage 1 value
+        self.q_stage1[action_1] += self.alpha * delta_1 + self.alpha * lambda_val * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Surprise Boosting (Pearce-Hall).
+    
+    This model hypothesizes that anxiety is associated with hyper-vigilance. When a 
+    structural prediction error occurs (a rare transition), anxious participants 
+    increase their learning rate to rapidly adapt their value estimates, assuming 
+    the environment might be changing or dangerous. The learning rate for the 
+    Stage 1 update is boosted proportional to STAI when a rare transition is observed.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                 # Base learning rate
+    beta: [0, 10]                 # Inverse temperature
+    surprise_sensitivity: [0, 5]  # How much STAI boosts alpha on rare transitions
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.surprise_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Check for rare transition
+        # Common: 0->0, 1->1. Rare: 0->1, 1->0.
+        is_rare = (action_1 != state)
+        
+        # Modulate alpha for Stage 1 update based on surprise and anxiety
+        alpha_eff = self.alpha
+        if is_rare:
+            # Boost alpha: alpha * (1 + sensitivity * stai)
+            boost = 1.0 + (self.surprise_sensitivity * self.stai)
+            alpha_eff = np.clip(self.alpha * boost, 0.0, 1.0)
+            
+        # Stage 2 update (uses standard alpha as the surprise was at the transition)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (uses boosted alpha if transition was rare)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_eff * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

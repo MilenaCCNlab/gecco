@@ -1,0 +1,141 @@
+Here are three new cognitive models, each proposing a distinct cognitive strategy influenced by anxiety, expressed as Python classes inheriting from `CognitiveModelBase`.
+
+---
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants blend model-free (habitual) and model-based (planning)
+    control for their stage 1 decisions. High anxiety is hypothesized to reduce the influence of the
+    cognitively demanding model-based system, leading to a stronger reliance on the simpler model-free system.
+
+    Specifically, the weighting 'w' between model-based and model-free Q-values for stage 1 is modulated
+    by the STAI score, such that higher anxiety decreases 'w' (more model-free control).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    w_intercept: [-5, 5] - Intercept for the sigmoid function determining the model-based weight.
+    stai_w_slope: [-5, 5] - Slope for how STAI score influences the model-based weight (negative means higher anxiety -> less model-based).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_intercept, self.stai_w_slope = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize separate Q-values for model-free and model-based components for stage 1
+        self.q_mf = np.zeros(self.n_choices)
+        self.q_mb = np.zeros(self.n_choices)
+
+        # Calculate the model-based weighting 'w' based on STAI score
+        # Using sigmoid to constrain w between 0 and 1
+        # A negative stai_w_slope means higher STAI leads to a lower w (more model-free)
+        logit_w = self.w_intercept + self.stai_w_slope * self.stai
+        self.w = 1 / (1 + np.exp(-logit_w))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Model-Free (MF) Stage 1 update: learns from the experienced state's value
+        delta_mf = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_mf
+
+        # Model-Based (MB) Stage 1 update: recalculates expected value using transitions and future Qs
+        # Assumes perfect knowledge of transition probabilities (self.T)
+        for s1_action_idx in range(self.n_choices):
+            mb_value = 0
+            for next_state_idx in range(self.n_states):
+                # P(next_state | s1_action_idx) * max_over_a2 (Q_stage2(next_state, a2))
+                max_q_s2 = np.max(self.q_stage2[next_state_idx, :])
+                mb_value += self.T[s1_action_idx, next_state_idx] * max_q_s2
+            self.q_mb[s1_action_idx] = mb_value # Direct assignment for model-based Q
+
+        # The final q_stage1 used for policy calculation is a blend of MF and MB
+        self.q_stage1 = self.w * self.q_mb + (1 - self.w) * self.q_mf
+
+# Link the model class to the cognitive_model function interface
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety influences the participant's exploration-exploitation
+    trade-off by modulating their decision temperature (beta parameter). Specifically, higher STAI
+    scores lead to a higher beta, making choices more deterministic and exploitative (less exploratory),
+    reflecting a tendency to stick to perceived better options to reduce uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_intercept: [-5, 5] - Intercept for the exponential function determining the inverse temperature (beta).
+    beta_stai_slope: [-5, 5] - Slope for how STAI score influences beta (positive means higher anxiety -> higher beta).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_intercept, self.beta_stai_slope = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective beta based on STAI score
+        # Using exponential to ensure beta is always positive.
+        # A positive beta_stai_slope means higher STAI leads to a higher beta (more exploitative).
+        self.beta = np.exp(self.beta_intercept + self.beta_stai_slope * self.stai)
+        # Clip beta to a reasonable range to prevent numerical instability
+        self.beta = np.clip(self.beta, 0.1, 100.0)
+
+    # The value_update, policy_stage1, and policy_stage2 methods can use the default implementations
+    # because the only change is how 'self.beta' is set, which is then used by the default softmax.
+
+# Link the model class to the cognitive_model function interface
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety influences learning specifically during rare environmental transitions.
+    Participants with higher STAI scores are hypothesized to learn more rapidly (i.e., have an increased learning rate)
+    on trials where a rare transition occurs, possibly due to heightened vigilance or an amplified response to unexpected events.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Base learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    stai_rare_alpha_boost: [0, 1] - How STAI score boosts the learning rate during rare transitions (positive means higher anxiety -> faster learning).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.stai_rare_alpha_boost = model_parameters
+
+    def init_model(self) -> None:
+        # Define rare transition pairs (action_1, state).
+        # Spaceship 0 (A) commonly to Planet 0 (X), rarely to Planet 1 (Y).
+        # Spaceship 1 (U) commonly to Planet 1 (Y), rarely to Planet 0 (X).
+        self.rare_transition_pairs = {(0, 1), (1, 0)}
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine effective learning rate for this trial
+        alpha_effective = self.alpha_base
+        if (action_1, state) in self.rare_transition_pairs:
+            # Boost alpha if a rare transition occurred, modulated by STAI
+            alpha_effective += self.stai_rare_alpha_boost * self.stai
+            # Ensure alpha_effective stays within valid bounds [0, 1]
+            alpha_effective = np.clip(alpha_effective, 0, 1)
+
+        # Stage 2 update using the effective learning rate
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_effective * delta_2
+        
+        # Stage 1 update using the effective learning rate
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_effective * delta_1
+
+    # The policy_stage1 and policy_stage2 methods can use the default implementations
+    # as the Q-values are updated with the anxiety-modulated learning rate.
+
+# Link the model class to the cognitive_model function interface
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

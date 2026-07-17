@@ -1,0 +1,232 @@
+Here are three new cognitive models that incorporate the STAI anxiety score into the decision-making process, distinct from the parameter combinations previously explored.
+
+### Model 1: Anxiety-Induced Working Memory Decay
+This model hypothesizes that anxiety acts as a cognitive load, accelerating the decay of value representations in working memory. While the agent learns from chosen actions, the values of *unchosen* actions (counterfactuals or simply neglected options) decay back to a neutral prior more rapidly for high-anxiety individuals. This reflects the difficulty anxious individuals may have in maintaining stable representations of the entire state space over time.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 1: Anxiety-Induced Working Memory Decay.
+    
+    This model assumes that anxiety consumes cognitive resources, leading to 
+    faster forgetting of action values for options that were NOT chosen. 
+    High anxiety leads to a higher decay rate, causing the agent to lose 
+    learned values of unvisited states/actions more quickly.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate for chosen actions.
+    - beta: [0, 10] Inverse temperature for softmax choice.
+    - w: [0, 1] Mixing weight (0=Model-Free, 1=Model-Based).
+    - decay_base: [0, 1] Base rate of memory decay for unchosen options.
+    - decay_stai_slope: [0, 1] How much STAI increases the decay rate.
+      (Effective decay = decay_base + decay_stai_slope * stai).
+    """
+    learning_rate, beta, w, decay_base, decay_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate effective decay rate bounded between 0 and 1
+    decay_rate = decay_base + (decay_stai_slope * stai_score)
+    if decay_rate > 1.0: decay_rate = 1.0
+    if decay_rate < 0.0: decay_rate = 0.0
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+
+        # --- Value Updating ---
+        
+        # 1. Standard TD Update for Chosen Path
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # 2. Anxiety-Modulated Decay for UNCHOSEN options
+        # Decay Stage 1 unchosen
+        q_stage1_mf[1-a1] *= (1.0 - decay_rate)
+        
+        # Decay Stage 2 unchosen (in the current state)
+        q_stage2_mf[state_idx, 1-a2] *= (1.0 - decay_rate)
+        
+        # Decay Stage 2 unvisited state (the other planet)
+        q_stage2_mf[1-state_idx, :] *= (1.0 - decay_rate)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Terminal Choice Precision
+This model separates the decision noise (inverse temperature $\beta$) into two stages. It hypothesizes that anxiety specifically degrades decision-making at the "terminal" stage (Stage 2: choosing the alien) rather than the planning stage (Stage 1: choosing the ship). While Stage 1 relies on abstract planning (where high anxiety might actually increase rigidity), Stage 2 is the immediate confrontation with the reward source. High anxiety is modeled as causing "choking under pressure" or increased noise specifically at this final step.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 2: Anxiety-Modulated Terminal Choice Precision.
+    
+    This model posits that anxiety differentially affects the exploration/exploitation 
+    balance (beta) at Stage 2 compared to Stage 1. It assumes that anxious 
+    individuals may plan normally (Stage 1) but exhibit more erratic or 
+    noisy behavior when facing the immediate reward source (Stage 2).
+    
+    Parameters:
+    - learning_rate: [0, 1] Value update rate.
+    - w: [0, 1] Weight of Model-Based system.
+    - beta_stage1: [0, 10] Fixed inverse temperature for the spaceship choice.
+    - beta_stage2_base: [0, 10] Base inverse temperature for the alien choice.
+    - beta_stage2_stai_slope: [-5, 5] How STAI modulates Stage 2 precision.
+      (Negative slope = anxiety increases noise/randomness at Stage 2).
+    """
+    learning_rate, w, beta_stage1, beta_stage2_base, beta_stage2_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate Stage 2 beta based on anxiety
+    beta_stage2 = beta_stage2_base + (beta_stage2_stai_slope * stai_score)
+    # Ensure beta stays non-negative
+    if beta_stage2 < 0: beta_stage2 = 0.0
+    if beta_stage2 > 20: beta_stage2 = 20.0 # Upper safety bound
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 1 Policy (Fixed Beta) ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta_stage1 * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+        
+        # --- Stage 2 Policy (Anxiety-Modulated Beta) ---
+        exp_q2 = np.exp(beta_stage2 * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # --- Value Updating ---
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Structural Surprise Learning
+This model suggests that anxiety affects how agents learn specifically from "Rare" (surprising) transitions versus "Common" (expected) transitions. High anxiety is often linked to hyper-vigilance regarding unexpected outcomes. This model proposes that when a Rare transition occurs (e.g., Spaceship A goes to Planet Y), anxious individuals boost their learning rate for the Model-Free Stage 1 update, effectively over-reacting to structural surprises.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 3: Anxiety-Modulated Structural Surprise Learning.
+    
+    This model hypothesizes that anxiety modulates learning rates specifically 
+    when the transition structure violates expectations (a "Rare" transition).
+    Anxious individuals may be hyper-sensitive to these structural surprises, 
+    updating their Stage 1 values more aggressively when the spaceship goes 
+    to the unlikely planet.
+
+    Parameters:
+    - learning_rate_common: [0, 1] Learning rate for trials with Common transitions.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Mixing weight (MB vs MF).
+    - rare_boost_base: [0, 5] Base multiplier for learning rate on Rare trials.
+    - rare_boost_stai: [0, 5] How much STAI amplifies the learning rate on Rare trials.
+      (LR_Rare = LR_Common * (rare_boost_base + rare_boost_stai * stai)).
+    """
+    learning_rate_common, beta, w, rare_boost_base, rare_boost_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+        
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # --- Determine Learning Rate based on Transition Type ---
+        # Common transitions: (Action 0 -> State 0) or (Action 1 -> State 1)
+        # Rare transitions: (Action 0 -> State 1) or (Action 1 -> State 0)
+        is_rare = (a1 != state_idx)
+        
+        current_lr = learning_rate_common
+        
+        if is_rare:
+            # Calculate boost factor
+            boost = rare_boost_base + (rare_boost_stai * stai_score)
+            current_lr = learning_rate_common * boost
+            # Cap LR at 1.0
+            if current_lr > 1.0: current_lr = 1.0
+        
+        # --- Value Updating ---
+        # Note: We apply the modulated LR to Stage 1 update (the structural prediction)
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += current_lr * delta_stage1
+        
+        # Stage 2 update uses the base common rate (reward prediction error)
+        # as this is about reward, not structure.
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate_common * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

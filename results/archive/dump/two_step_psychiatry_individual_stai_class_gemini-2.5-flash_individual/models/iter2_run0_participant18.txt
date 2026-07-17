@@ -1,0 +1,186 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, especially considering their low anxiety (STAI score of 0.2875).
+
+### Model 1: Asymmetric Learning Rates with STAI-Modulated Positive Learning
+
+**Hypothesis:** This model posits that participants learn differently from positive (rewarding) and negative (unrewarding) outcomes. For individuals with low anxiety (low STAI), learning from rewards is hypothesized to be more efficient. This implies a more optimistic or reward-focused learning strategy, where positive prediction errors lead to faster value updates compared to negative prediction errors, and this difference is amplified for less anxious participants.
+
+**STAI Modulation:** Lower STAI scores directly boost the learning rate used for positive prediction errors, making low-anxiety individuals quicker to capitalize on successful outcomes.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants learn from positive and
+    negative outcomes with different learning rates (asymmetric learning).
+    Specifically, low anxiety (lower STAI score) is hypothesized to make
+    participants more efficient at learning from rewards, leading to a higher
+    learning rate for positive prediction errors. This suggests a more optimistic
+    or reward-seeking learning strategy in low-anxiety individuals.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos_base: [0, 1] - Base learning rate for positive outcomes.
+    alpha_neg: [0, 1] - Learning rate for negative outcomes.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    alpha_pos_stai_effect: [0, 1] - Factor by which low STAI boosts positive learning.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos_base, self.alpha_neg, self.beta, self.alpha_pos_stai_effect = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values with asymmetric learning rates, modulated by STAI for positive learning.
+        """
+        # Calculate effective alpha for positive outcomes, boosted by low STAI
+        # (1 - self.stai) will be higher for lower STAI scores.
+        alpha_pos_effective = self.alpha_pos_base + self.alpha_pos_stai_effect * (1 - self.stai)
+        # Ensure alpha_pos_effective stays within [0, 1]
+        alpha_pos_effective = np.clip(alpha_pos_effective, 0, 1)
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        current_alpha_2 = alpha_pos_effective if delta_2 > 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += current_alpha_2 * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        current_alpha_1 = alpha_pos_effective if delta_1 > 0 else self.alpha_neg
+        self.q_stage1[action_1] += current_alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 3: Model-Based Control with STAI-Modulated Weighting
+
+**Hypothesis:** This model proposes a hybrid control system where decisions are influenced by both habitual (model-free) learning and goal-directed (model-based) planning. Low anxiety is hypothesized to increase the reliance on model-based planning, suggesting that less anxious individuals are more capable or inclined to engage in flexible, forward-looking behavior by considering the task's transition structure.
+
+**STAI Modulation:** A lower STAI score leads to a higher weighting of the model-based component in the first-stage decision, making low-anxiety participants more likely to choose based on their understanding of the task's structure and potential future rewards.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model incorporates a hybrid control system, combining
+    model-free (MF) Q-learning with model-based (MB) planning. The weight
+    given to the model-based component is modulated by the participant's
+    anxiety level. Specifically, low anxiety (lower STAI score) is hypothesized
+    to increase the reliance on model-based planning, suggesting that less
+    anxious individuals are more capable or inclined to engage in flexible,
+    goal-directed behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for model-free updates.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w_mb_base: [0, 1] - Base weight for the model-based control (0=pure MF, 1=pure MB).
+    w_mb_stai_effect: [0, 1] - Factor by which low STAI boosts the model-based weight.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb_base, self.w_mb_stai_effect = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize internal variables for model-based and hybrid Q-values
+        self.q_mb_stage1 = np.zeros(self.n_choices)
+        self.q_hybrid_stage1 = np.zeros(self.n_choices)
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, compute the model-based values and combine them
+        with model-free values (self.q_stage1) to form hybrid Q-values.
+        """
+        # Calculate effective w_mb, boosted by low STAI
+        # (1 - self.stai) will be higher for lower STAI scores.
+        w_mb_effective = self.w_mb_base + self.w_mb_stai_effect * (1 - self.stai)
+        # Ensure w_mb_effective stays within [0, 1]
+        self.w_mb_effective = np.clip(w_mb_effective, 0, 1)
+
+        # Compute model-based Q-values for stage 1
+        # Q_MB(a1) = sum_s ( P(s|a1) * max_a2(Q_MF(s, a2)) )
+        for a1 in range(self.n_choices):
+            expected_future_value = 0
+            for s_prime in range(self.n_states): # s_prime is the next state (planet)
+                prob_transition = self.T[a1, s_prime]
+                max_q_stage2_at_s_prime = np.max(self.q_stage2[s_prime, :])
+                expected_future_value += prob_transition * max_q_stage2_at_s_prime
+            self.q_mb_stage1[a1] = expected_future_value
+
+        # Combine model-free and model-based values
+        self.q_hybrid_stage1 = (1 - self.w_mb_effective) * self.q_stage1 + \
+                               self.w_mb_effective * self.q_mb_stage1
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using hybrid Q-values.
+        """
+        return self.softmax(self.q_hybrid_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update model-free values using standard TD learning.
+        The hybrid Q-values are used for choice, but only the model-free Q-values
+        (self.q_stage1) are updated directly through experience.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```
+
+### Model 4: Adaptive Learning Rate Based on Prediction Error Magnitude and STAI
+
+**Hypothesis:** This model suggests that the learning rate is not fixed but dynamically adjusts based on the "surprise" of an outcome, quantified by the magnitude of the prediction error. Larger prediction errors (more surprising events) lead to a higher learning rate, enabling faster adaptation. Low anxiety individuals are hypothesized to be more flexible in this adaptation, increasing their learning rate more significantly in response to surprising outcomes.
+
+**STAI Modulation:** Lower STAI scores amplify the sensitivity to prediction error magnitude, meaning low-anxiety individuals show a more pronounced increase in their learning rate when faced with unexpected rewards or punishments.
+
+```python
+class ParticipantModel4(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the learning rate is not constant but
+    dynamically adjusts based on the magnitude of the prediction error (PE).
+    Larger prediction errors (more surprising outcomes) lead to an increased
+    learning rate, allowing for quicker adaptation. Low anxiety (lower STAI score)
+    is hypothesized to enhance this adaptive learning mechanism, making individuals
+    more sensitive to surprising outcomes and thus more flexible in adjusting
+    their learning rate.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Baseline learning rate.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    alpha_pe_sensitivity: [0, 1] - How much the learning rate increases per unit of absolute prediction error.
+                                    This sensitivity is amplified by low STAI.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.alpha_pe_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values with a dynamic learning rate based on prediction error magnitude and STAI.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Calculate effective alpha for stage 2, amplified by low STAI for PE sensitivity
+        # (1 - self.stai) term ensures lower STAI amplifies the PE sensitivity
+        alpha_effective_2 = self.alpha_base + (self.alpha_pe_sensitivity * (1 - self.stai)) * np.abs(delta_2)
+        alpha_effective_2 = np.clip(alpha_effective_2, 0, 1) # Ensure alpha is within [0, 1]
+
+        self.q_stage2[state, action_2] += alpha_effective_2 * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Calculate effective alpha for stage 1, also amplified by low STAI for PE sensitivity
+        alpha_effective_1 = self.alpha_base + (self.alpha_pe_sensitivity * (1 - self.stai)) * np.abs(delta_1)
+        alpha_effective_1 = np.clip(alpha_effective_1, 0, 1) # Ensure alpha is within [0, 1]
+
+        self.q_stage1[action_1] += alpha_effective_1 * delta_1
+
+cognitive_model4 = make_cognitive_model(ParticipantModel4)
+```

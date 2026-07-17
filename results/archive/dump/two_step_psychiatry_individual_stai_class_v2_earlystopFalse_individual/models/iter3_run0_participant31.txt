@@ -1,0 +1,133 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces 'Subjective Loss Aversion'.
+    
+    Standard reinforcement learning models treat a reward of 0 as a neutral outcome.
+    This model hypothesizes that high-anxiety participants perceive the lack of reward (0 coins) 
+    as a negative outcome (punishment). The magnitude of this subjective loss is 
+    proportional to their STAI score. This leads to active avoidance of options 
+    that yield 0 coins, rather than just extinction of value.
+
+    Effective Reward = Reward if Reward == 1
+    Effective Reward = -1 * loss_scale * stai if Reward == 0
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    loss_scale: [0, 5]  # Scaling factor for subjective loss perception
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Modulate reward perception based on anxiety
+        if reward == 0:
+            # 0 coins is perceived as a loss scaled by anxiety
+            effective_reward = -1.0 * self.loss_scale * self.stai
+        else:
+            effective_reward = reward
+
+        # Standard TD update using the effective reward
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety acts as cognitive noise, reducing decision precision.
+    
+    While some theories suggest anxiety leads to rigidity, this model tests the 
+    hypothesis that anxiety overwhelms cognitive processing, effectively increasing 
+    randomness in choice behavior. The inverse temperature (beta) is down-regulated 
+    by the STAI score, making high-anxiety participants more stochastic (lower beta).
+    
+    beta_effective = beta_base / (1 + noise_factor * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         # Learning rate
+    beta_base: [0, 10]    # Baseline inverse temperature (for low anxiety)
+    noise_factor: [0, 10] # How strongly anxiety reduces beta (adds noise)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.noise_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta: higher anxiety -> lower beta -> more noise
+        beta_eff = self.beta_base / (1.0 + self.noise_factor * self.stai)
+        return self.softmax(self.q_stage1, beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Apply the same noise reduction to stage 2
+        beta_eff = self.beta_base / (1.0 + self.noise_factor * self.stai)
+        return self.softmax(self.q_stage2[state], beta_eff)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates credit assignment via an eligibility trace mechanism.
+    
+    This model hypothesizes that anxiety affects how participants assign credit to 
+    their first-stage choices. High anxiety might cause participants to focus on the 
+    final outcome (Reward) rather than the structure of the task (State Value).
+    
+    This is implemented as a mixture of TD(0) (bootstrapping from stage 2 value) 
+    and TD(1) (learning directly from reward), where the mixing parameter 'lambda' 
+    is controlled by STAI.
+    
+    Target_Q1 = (1 - lambda_eff) * Q2 + lambda_eff * Reward
+    lambda_eff = lambda_credit * stai
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         # Learning rate
+    beta: [0, 10]         # Inverse temperature
+    lambda_credit: [0, 1] # Sensitivity of eligibility trace to anxiety
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_credit = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective lambda based on anxiety
+        # If lambda_eff is high, update Q1 based more on Reward (Monte Carlo / TD(1))
+        # If lambda_eff is low, update Q1 based more on Q2 (TD(0))
+        lambda_eff = self.lambda_credit * self.stai
+        
+        # Update Stage 2 first (Standard Q-learning)
+        q2_old = self.q_stage2[state, action_2]
+        delta_2 = reward - q2_old
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Get the updated Q2 value
+        q2_new = self.q_stage2[state, action_2]
+        
+        # Update Stage 1
+        # The update target is a mixture: (1-lambda)*Q2_new + lambda*Reward
+        # This can be rewritten as updating towards Q2_new, plus a correction term for the Reward
+        
+        # Standard TD(0) part: drive Q1 towards Q2
+        delta_1_td0 = q2_new - self.q_stage1[action_1]
+        
+        # TD(1) / Direct Reward part: drive Q1 towards Reward
+        # The difference (Reward - Q2_new) is the extra info in the reward not in Q2
+        direct_reward_correction = reward - q2_new
+        
+        # Combine: Q1 += alpha * (delta_td0 + lambda * correction)
+        total_delta = delta_1_td0 + lambda_eff * direct_reward_correction
+        
+        self.q_stage1[action_1] += self.alpha * total_delta
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

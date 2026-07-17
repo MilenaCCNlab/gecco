@@ -1,0 +1,129 @@
+As a cognitive scientist and Python programmer, I've analyzed the provided model-fitting code. The core of `ParticipantModel1` is the anxiety-modulated combination of a model-free (`q_stage1`) and a model-based (`q_mb_stage1`) value signal to guide first-stage choices. The model-free value is updated via standard temporal-difference learning, while the model-based value is re-computed each trial by planning over the known transition structure (`self.T`) and the current second-stage values (`q_stage2`).
+
+To simulate this process, we need to invert the logic of the fitting code. Instead of calculating the likelihood of observed actions, we will use the model's policies to *generate* actions, then use those actions to experience outcomes and update the model's internal state.
+
+Here is the simulation function, which follows the logic of the provided `ParticipantModel1` and can generalize to other models built on the same `CognitiveModelBase` class.
+
+```python
+import numpy as np
+
+def simulate_model(
+    ModelClass,
+    n_trials: int,
+    stai: float,
+    model_parameters: tuple,
+    drift1: np.ndarray,
+    drift2: np.ndarray,
+    drift3: np.ndarray,
+    drift4: np.ndarray,
+    seed: int | None = None,
+):
+    """
+    Simulates a two-step task trajectory from a cognitive model class.
+
+    This function generates a sequence of choices and outcomes by iteratively
+    querying the model for its policy, sampling an action, observing the
+    consequences according to the task structure, and then allowing the model
+    to update its internal values based on the experience.
+
+    Task structure:
+      - Stage 1: choose action in {0,1}
+      - Transition: state in {0,1} sampled from model.T[action_1]
+      - Stage 2: choose action in {0,1} conditioned on state
+      - Reward: sampled from drifting reward probabilities:
+          state 0: [drift1[t], drift2[t]] for actions 0/1
+          state 1: [drift3[t], drift4[t]] for actions 0/1
+
+    Parameters
+    ----------
+    ModelClass : type
+        A subclass of CognitiveModelBase (e.g., ParticipantModel1).
+    n_trials : int
+        Number of trials to simulate.
+    stai : float
+        Participant anxiety score, passed to the model constructor.
+    model_parameters : tuple
+        Parameters expected by ModelClass.unpack_parameters(...).
+    drift1, drift2, drift3, drift4 : array-like
+        Trial-wise reward probabilities for the 4 (state, action) pairs.
+        Each should have length n_trials.
+    seed : int or None, optional
+        Seed for the random number generator for reproducibility.
+
+    Returns
+    -------
+    stage1_choice : np.ndarray
+        The sequence of first-stage actions (0 or 1). Shape (n_trials,).
+    state2 : np.ndarray
+        The sequence of second-stage states reached (0 or 1). Shape (n_trials,).
+    stage2_choice : np.ndarray
+        The sequence of second-stage actions (0 or 1). Shape (n_trials,).
+    reward : np.ndarray
+        The sequence of rewards received (0 or 1). Shape (n_trials,).
+    """
+    rng = np.random.default_rng(seed)
+
+    # 1. Instantiate the cognitive model
+    model = ModelClass(n_trials=n_trials, stai=float(stai), model_parameters=model_parameters)
+
+    # 2. Initialize arrays to store the simulation trajectory
+    stage1_choice = np.zeros(n_trials, dtype=int)
+    state2 = np.zeros(n_trials, dtype=int)
+    stage2_choice = np.zeros(n_trials, dtype=int)
+    reward = np.zeros(n_trials, dtype=int)
+
+    # 3. Loop through trials to generate behavior
+    for t in range(n_trials):
+        # Set the model's internal trial counter
+        model.trial = t
+        
+        # A. Run any computations that occur before choice (e.g., planning)
+        model.pre_trial()
+
+        # B. Stage 1 Choice
+        # Get action probabilities from the model's policy
+        p1 = model.policy_stage1()
+        # Ensure probabilities sum to 1 to handle potential float precision issues
+        p1 = np.clip(p1, 1e-12, 1.0)
+        p1 /= np.sum(p1)
+        # Sample the action
+        a1 = int(rng.choice([0, 1], p=p1))
+
+        # C. Transition to Stage 2
+        # Get transition probabilities based on the chosen action
+        p_transition = model.T[a1]
+        p_transition = np.clip(p_transition, 1e-12, 1.0)
+        p_transition /= np.sum(p_transition)
+        # Sample the resulting state
+        s = int(rng.choice([0, 1], p=p_transition))
+
+        # D. Stage 2 Choice
+        # Get action probabilities for the current state
+        p2 = model.policy_stage2(s)
+        p2 = np.clip(p2, 1e-12, 1.0)
+        p2 /= np.sum(p2)
+        # Sample the action
+        a2 = int(rng.choice([0, 1], p=p2))
+
+        # E. Receive Reward
+        # Determine the probability of reward based on the state-action pair
+        if s == 0:
+            pr = float(drift1[t]) if a2 == 0 else float(drift2[t])
+        else: # s == 1
+            pr = float(drift3[t]) if a2 == 0 else float(drift4[t])
+        # Sample the reward outcome
+        r = int(rng.random() < pr)
+
+        # F. Model Learning and Update
+        # Allow the model to update its internal values based on the trial's events
+        model.value_update(a1, s, a2, float(r))
+        model.post_trial(a1, s, a2, float(r))
+
+        # G. Store the results for this trial
+        stage1_choice[t] = a1
+        state2[t] = s
+        stage2_choice[t] = a2
+        reward[t] = r
+
+    return stage1_choice, state2, stage2_choice, reward
+```

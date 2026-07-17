@@ -1,0 +1,218 @@
+Here are three new cognitive models that explore different mechanisms for how anxiety (STAI) might influence decision-making in the two-step task, specifically focusing on reward sensitivity, perseveration, and learning rates.
+
+### Model 1: Anxiety-Modulated Reward Sensitivity
+This model hypothesizes that anxiety levels alter how subjectively valuable rewards are. Low anxiety (like this participant) might lead to "standard" valuation, while higher anxiety could blunt or amplify the impact of rewards. Here, the STAI score scales the effective reward magnitude before it enters the prediction error calculation.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid Model-Based/Model-Free RL with Anxiety-Modulated Reward Sensitivity.
+    
+    This model posits that anxiety (STAI) affects the subjective valuation of rewards.
+    The effective reward `r_eff` is scaled by `rho` which is modulated by STAI.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature for softmax.
+    - w: [0, 1] Mixing weight (0=MF, 1=MB).
+    - rho_base: [0, 2] Baseline reward sensitivity.
+    - rho_mod: [-1, 1] Modulation of sensitivity by STAI.
+    """
+    learning_rate, beta, w, rho_base, rho_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    # Calculate effective reward sensitivity scalar
+    rho = rho_base + (rho_mod * stai_score)
+    # Ensure rho stays non-negative for logic consistency
+    rho = np.maximum(rho, 0.0)
+
+    for trial in range(n_trials):
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Policy for the first choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Combined value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # --- Policy for the second choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+        
+        # --- Updates ---
+        # Scale the received reward by the sensitivity parameter
+        effective_reward = reward[trial] * rho
+        
+        # TD(0) update for Stage 2
+        delta_stage2 = effective_reward - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # TD(1) / SARSA-like update for Stage 1 (using Stage 2 Q-value)
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Choice Perseveration
+This model introduces a "stickiness" or perseveration parameter. It assumes that anxiety influences the tendency to repeat the previous Stage 1 choice regardless of reward history (a common finding in stress literature). The STAI score modulates the strength of this autocorrelation.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid RL with Anxiety-Modulated Choice Perseveration (Stickiness).
+    
+    This model includes a perseveration bonus 'p' added to the Q-value of the 
+    previously chosen action. The magnitude of 'p' is determined by STAI.
+    
+    Parameters:
+    - learning_rate: [0, 1] Learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Mixing weight (0=MF, 1=MB).
+    - p_base: [-1, 1] Baseline perseveration (positive=stick, negative=switch).
+    - p_mod: [-1, 1] Modulation of perseveration by STAI.
+    """
+    learning_rate, beta, w, p_base, p_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Calculate perseveration weight
+    perseveration_weight = p_base + (p_mod * stai_score)
+    
+    last_choice = -1 # Indicator for previous choice
+
+    for trial in range(n_trials):
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Policy for the first choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Add perseveration bonus if it's not the first trial
+        if last_choice != -1:
+            q_net[last_choice] += perseveration_weight
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+        
+        # Update last choice tracker
+        last_choice = a1
+
+        # --- Policy for the second choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Learning Rate (Volatility)
+This model proposes that anxiety affects how quickly the participant updates their beliefs (learning rate). High anxiety might be associated with perceiving the environment as more volatile, leading to a higher learning rate, whereas low anxiety (like this participant) might lead to more stable, lower learning rates.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid RL with Anxiety-Modulated Learning Rate.
+    
+    This model assumes the learning rate 'alpha' is a function of anxiety.
+    This reflects how much weight is given to the most recent prediction error.
+    
+    Parameters:
+    - alpha_base: [0, 1] Baseline learning rate.
+    - alpha_mod: [-1, 1] Modulation of learning rate by STAI.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Mixing weight (0=MF, 1=MB).
+    - lambda_eligibility: [0, 1] Eligibility trace decay (Stage 1 update from Stage 2 RPE).
+    """
+    alpha_base, alpha_mod, beta, w, lambda_eligibility = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Calculate effective learning rate
+    alpha = alpha_base + (alpha_mod * stai_score)
+    alpha = np.clip(alpha, 0.0, 1.0)
+
+    for trial in range(n_trials):
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+
+        # --- Policy for the first choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # --- Policy for the second choice ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # --- Updates ---
+        # Standard Q-learning update for second stage
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+        
+        # Update Stage 1 MF values
+        # Here we use lambda to mix the contribution of the Stage 2 value (TD(1)) 
+        # and the Stage 2 RPE (TD(lambda)).
+        # Note: In standard Daw 2011, Stage 1 is updated by Stage 2 value. 
+        # Here we follow the template structure but utilize lambda for the update strength/type.
+        
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        
+        # We use lambda as a scaling factor for the Stage 1 update efficiency
+        q_stage1_mf[a1] += alpha * lambda_eligibility * delta_stage1
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

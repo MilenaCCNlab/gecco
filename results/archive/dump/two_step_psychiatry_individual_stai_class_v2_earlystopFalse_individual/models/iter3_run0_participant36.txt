@@ -1,0 +1,141 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes reactive Win-Stay, Lose-Shift (WSLS) heuristics.
+    High anxiety individuals may rely more on simple, reactive heuristics like 
+    "Win-Stay, Lose-Shift" to spare cognitive resources, rather than integrating 
+    probabilistic value over time. This model adds a bias to the Q-values based 
+    on the immediate previous outcome, scaled by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    wsls_k: [0, 5]      # Scaling factor for WSLS bias based on STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.wsls_k = model_parameters
+
+    def init_model(self) -> None:
+        # The strength of the heuristic bias depends on anxiety
+        self.wsls_bias = self.wsls_k * self.stai
+
+    def policy_stage1(self) -> np.ndarray:
+        q_modified = self.q_stage1.copy()
+        
+        # Apply WSLS bias if there is a previous trial
+        if self.last_action1 is not None and self.last_reward is not None:
+            prev_a = int(self.last_action1)
+            
+            if self.last_reward > 0.0: # Win: bias towards staying
+                q_modified[prev_a] += self.wsls_bias
+            else: # Lose: bias towards shifting (staying on the other option)
+                q_modified[1 - prev_a] += self.wsls_bias
+                
+        return self.softmax(q_modified, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety leads to unstable internal models (Jumping to Conclusions).
+    Anxious individuals may be intolerant of uncertainty and over-update their 
+    beliefs about the world structure (transition probabilities) based on recent 
+    events. This model uses a Model-Based controller where the transition 
+    learning rate is scaled by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Value learning rate (Stage 2)
+    beta: [0, 10]       # Inverse temperature
+    eta_k: [0, 1]       # Transition learning rate scaler
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta_k = model_parameters
+
+    def init_model(self) -> None:
+        # Transition learning rate scales with anxiety
+        # We clamp it to max 1.0 to avoid instability
+        self.eta = min(1.0, self.eta_k * (1.0 + self.stai))
+        
+        # Initialize transition matrix explicitly to priors
+        # T[action, state]
+        self.T = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # Pure Model-Based calculation for Stage 1
+        # Q_MB(a) = Sum_s' T(s'|a) * V(s')
+        # V(s') = max_a' Q_stage2(s', a')
+        
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Dot product of transition probs for action a and stage 2 values
+            q_mb[a] = np.dot(self.T[a], v_stage2)
+            
+        return self.softmax(q_mb, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Dynamic update of transition matrix
+        # T[a, s] moves towards 1.0, T[a, other_s] moves towards 0.0
+        # Delta rule: T_new = T_old + eta * (Target - T_old)
+        
+        # Create one-hot target vector for the observed state
+        target = np.zeros(self.n_states)
+        target[state] = 1.0
+        
+        # Update the row corresponding to the chosen action
+        self.T[action_1] += self.eta * (target - self.T[action_1])
+        
+        # Ensure probabilities sum to 1 (numerical stability)
+        self.T[action_1] /= np.sum(self.T[action_1])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety causes value over-generalization across contexts.
+    Anxious individuals may generalize negative (or positive) outcomes from one 
+    context (planet) to another, blurring the distinction between states. 
+    This model updates the unvisited state's values based on the visited state's 
+    prediction error, scaled by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    gen_k: [0, 1]       # Generalization rate scaler
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gen_k = model_parameters
+
+    def init_model(self) -> None:
+        # Generalization rate depends on STAI
+        self.gen_rate = self.gen_k * self.stai
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Generalization update for the OTHER state (unvisited planet)
+        # We update the SAME alien (action_2) in the OTHER state
+        other_state = 1 - state
+        self.q_stage2[other_state, action_2] += self.alpha * self.gen_rate * delta_2
+        
+        # Standard Stage 1 update (TD)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

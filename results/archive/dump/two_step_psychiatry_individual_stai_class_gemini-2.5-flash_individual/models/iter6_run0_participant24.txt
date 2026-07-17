@@ -1,0 +1,167 @@
+Here are three new cognitive models, each proposing a distinct cognitive strategy for the participant, with `self.stai` modulating a key aspect of their decision-making.
+
+```python
+import numpy as np
+
+# Base class is provided and not modified.
+# from abc import ABC, abstractmethod
+# class CognitiveModelBase(ABC):
+#     """
+#     Base class for cognitive models in a two-step task.
+#     ... (omitted for brevity) ...
+# """
+
+# Model 1: Reward-Dependent Learning Rate (Positive RPEs), STAI-modulated Baseline
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant uses different learning rates for
+    positive and negative reward prediction errors (RPEs). Crucially, the *baseline* learning rate
+    for positive outcomes (`alpha_pos`) is modulated by their anxiety level (STAI score). For a
+    participant with medium anxiety (STAI 0.35), higher anxiety might lead to a reduced baseline
+    sensitivity to positive rewards (if stai_pos_factor is negative), making good outcomes
+    less impactful, reflecting a cautious or pessimistic outlook. Conversely, a positive
+    stai_pos_factor would mean higher anxiety amplifies learning from positive outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos_base: [0, 1] - Base learning rate for positive reward prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative reward prediction errors.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stai_pos_factor: [-1, 1] - Factor by which STAI score modulates the positive learning rate.
+                                A negative value means higher anxiety reduces alpha_pos,
+                                a positive value means higher anxiety increases alpha_pos.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos_base, self.alpha_neg, self.beta, self.stai_pos_factor = model_parameters
+        # Calculate the effective alpha_pos, ensuring it stays within [0, 1]
+        self.alpha_pos = np.clip(self.alpha_pos_base + self.stai_pos_factor * self.stai, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        current_alpha_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += current_alpha_2 * delta_2
+        
+        # Stage 1 update
+        # The RPE for stage 1 is based on the updated value of the chosen second-stage action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        current_alpha_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg
+        self.q_stage1[action_1] += current_alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+# Model 2: State-Uncertainty Aversion, STAI-modulated Aversion Strength
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that the participant is averse to states (planets)
+    where they have high uncertainty about the outcomes of the available actions (aliens).
+    This aversion manifests as a penalty applied to the Q-values of first-stage choices
+    that commonly lead to more uncertain planets. The strength of this "uncertainty aversion" is
+    modulated by the participant's anxiety level (STAI score). For a medium-anxiety
+    participant, higher STAI might increase this aversion, making them more likely to
+    avoid or actively resolve uncertainty by choosing more 'known' paths.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    uncertainty_aversion_base: [0, 2] - Base strength of the uncertainty aversion penalty.
+    stai_aversion_factor: [-1, 1] - Factor by which STAI score modulates uncertainty aversion.
+                                    A positive value means higher anxiety increases aversion,
+                                    a negative value means higher anxiety decreases it.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.uncertainty_aversion_base, self.stai_aversion_factor = model_parameters
+        # Calculate the effective uncertainty aversion strength, ensuring it's non-negative
+        self.uncertainty_aversion_strength = np.clip(self.uncertainty_aversion_base + self.stai_aversion_factor * self.stai, 0.0, 5.0)
+
+    def init_model(self) -> None:
+        # Initialize counts for each (planet, alien) pair to track uncertainty
+        # Add a small prior to avoid division by zero for unvisited options
+        self.visit_counts_stage2 = np.ones((self.n_states, self.n_choices))
+
+    def pre_trial(self) -> None:
+        # Calculate uncertainty for each planet before making a stage 1 choice
+        self.planet_uncertainty = np.zeros(self.n_states)
+        for state in range(self.n_states):
+            # A simple metric: inverse of the average visit count for aliens in that planet.
+            # Higher value means higher uncertainty. Add a small epsilon to avoid division by zero.
+            self.planet_uncertainty[state] = 1.0 / (np.mean(self.visit_counts_stage2[state]) + 1e-6)
+            # Normalize uncertainty metric to a reasonable range, e.g., [0, 1]
+            self.planet_uncertainty[state] = np.clip(self.planet_uncertainty[state], 0, 1)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Create a copy of Q-values to apply the uncertainty penalty
+        q_values_with_penalty = np.copy(self.q_stage1)
+        
+        # Determine which planet each spaceship commonly leads to (from self.T)
+        # Assuming T is structured as T[spaceship_choice, planet_outcome]
+        # and common transitions are like spaceship 0 -> planet 0, spaceship 1 -> planet 1
+        common_transition_planets = np.argmax(self.T, axis=1) # T[action] -> common_state
+
+        for action1 in range(self.n_choices):
+            # Get the common planet for this spaceship
+            target_planet = common_transition_planets[action1]
+            # Apply penalty based on the uncertainty of the target planet
+            q_values_with_penalty[action1] -= self.uncertainty_aversion_strength * self.planet_uncertainty[target_planet]
+        
+        return self.softmax(q_values_with_penalty, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Update visit counts for the chosen (planet, alien) pair
+        self.visit_counts_stage2[state, action_2] += 1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+# Model 3: Goal-Directed Re-evaluation with STAI-modulated "Look-Ahead" Strength
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that, in addition to standard model-free TD learning,
+    the participant performs a "goal-directed re-evaluation" of their first-stage choices.
+    This involves updating the first-stage Q-value not just with the value of the *chosen*
+    second-stage action, but also by considering the *best possible expected value*
+    from the second stage on the reached planet. This "look-ahead" re-evaluation strength
+    is modulated by the participant's anxiety level (STAI score). For a medium-anxiety
+    participant, higher STAI might increase this re-evaluation strength, reflecting a
+    heightened concern for maximizing future rewards or avoiding sub-optimal paths.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    re_evaluation_base: [0, 1] - Base strength of the goal-directed re-evaluation.
+    stai_re_evaluation_factor: [-1, 1] - Factor by which STAI score modulates re-evaluation strength.
+                                         A positive value means higher anxiety increases re-evaluation,
+                                         a negative value means higher anxiety decreases it.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.re_evaluation_base, self.stai_re_evaluation_factor = model_parameters
+        # Calculate the effective re-evaluation strength, ensuring it stays within [0, 1]
+        self.re_evaluation_strength = np.clip(self.re_evaluation_base + self.stai_re_evaluation_factor * self.stai, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard TD update for Stage 1 (model-free component)
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1_mf
+
+        # Goal-directed re-evaluation for Stage 1 (additional update)
+        # This update considers the maximum possible Q-value from the current state
+        # and updates the first-stage action Q-value towards it. This acts as a
+        # "look-ahead" to the best possible outcome in the second stage.
+        max_q_stage2_in_state = np.max(self.q_stage2[state])
+        delta_1_re_eval = max_q_stage2_in_state - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.re_evaluation_strength * delta_1_re_eval
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+
+```

@@ -1,0 +1,174 @@
+As a cognitive scientist and programmer, I'll propose three distinct models to explain this participant's decision-making process. Given their high anxiety score, each model will articulate a different hypothesis about how anxiety shapes learning and choice, moving beyond standard reinforcement learning frameworks.
+
+### Model 1: Anxiety-Driven Aversive Pruning
+
+This model hypothesizes that anxiety leads to a simplification of future planning by systematically devaluing paths with uncertain outcomes. Instead of integrating the value of both common and rare transitions, the participant's anxiety causes them to "prune" the decision tree by being averse to the path of the rare transition. The value of a stage-1 choice is thus computed by heavily discounting, or even ignoring, the potential rewards from the less likely planet. The degree of this discounting is proportional to the participant's trait anxiety.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes "aversive pruning," a cognitive heuristic
+    where the participant systematically devalues action sequences involving
+    unpredictable (rare) state transitions. This manifests as a penalty on
+    the contribution of the rare transition's outcome to the overall value
+    of a stage-1 choice. The strength of this penalty is scaled by the
+    participant's anxiety level, making them behave in a more "model-based"
+    way for predictable paths and ignore unpredictable ones.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate for stage-2 values)
+    beta: [0, 10]  (Inverse softmax temperature)
+    kappa: [0, 5]   (Strength of the anxiety-driven aversion to rare transitions)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 values on-the-fly, applying an anxiety-scaled penalty
+        to the value contribution from rare state transitions.
+        """
+        q_mb = np.zeros(self.n_choices)
+        max_q_stage2 = np.max(self.q_stage2, axis=1) # Max value for each planet
+
+        # Penalty factor is clipped between 0 and 1. High kappa & stai can
+        # lead to complete pruning (factor=0).
+        penalty_factor = np.clip(1 - self.kappa * self.stai, 0, 1)
+
+        # For choice 0, state 0 is common, state 1 is rare
+        q_mb[0] = self.T[0, 0] * max_q_stage2[0] + penalty_factor * self.T[0, 1] * max_q_stage2[1]
+
+        # For choice 1, state 1 is common, state 0 is rare
+        q_mb[1] = penalty_factor * self.T[1, 0] * max_q_stage2[0] + self.T[1, 1] * max_q_stage2[1]
+
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        This model is purely model-based at stage 1, so we only need to update
+        the stage-2 values which are the basis of the model-based calculation.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Fictive Learning
+
+This model proposes that anxiety enhances a specific form of counterfactual thinking, or "fictive learning." Following a non-rewarded outcome, the anxious participant is more likely to ruminate on what might have been. This model formalizes this by updating the value of the *unchosen* action, imagining it would have led to a better outcome. This anxiety-driven update encourages faster switching away from choices that have recently failed, reflecting a heightened sensitivity to negative feedback and a restless search for better alternatives.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety amplifies learning from negative outcomes by promoting
+    fictive (counterfactual) updates. When a choice results in no reward,
+    the participant not only learns that the chosen action was poor, but also
+    imagines that the *unchosen* action would have yielded a better result.
+    This increases the value of the unchosen option, promoting rapid switching.
+    The learning rate for this fictive update is scaled by anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Standard learning rate)
+    beta: [0, 10]     (Inverse softmax temperature)
+    alpha_f: [0, 1]    (Base learning rate for fictive updates)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_f = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Applies a standard TD update and then, if no reward was received,
+        applies an additional, anxiety-scaled update to the unchosen action.
+        """
+        # Standard TD(lambda=1) update for the chosen action
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        self.q_stage1[action_1] += self.alpha * delta_2 # Eligibility trace
+        
+        # Fictive update for the unchosen action if reward was zero
+        if reward == 0:
+            unchosen_action = 1 - action_1
+            
+            # The counterfactual is based on the model-based value of the unchosen action
+            max_q_stage2 = np.max(self.q_stage2, axis=1)
+            q_mb_unchosen = np.dot(self.T[unchosen_action], max_q_stage2)
+            
+            # Update the unchosen action's value towards its estimated MB value
+            delta_fictive = q_mb_unchosen - self.q_stage1[unchosen_action]
+            fictive_lr = self.alpha_f * self.stai
+            self.q_stage1[unchosen_action] += fictive_lr * delta_fictive
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Volatility Tracking
+
+This model posits that anxiety acts as a bias in how the participant perceives the stability of the environment. The model dynamically estimates the environment's volatility based on the magnitude of recent prediction errors. This volatility estimate, in turn, sets the learning rate for the next trial—a higher perceived volatility leads to faster learning. Crucially, trait anxiety provides a positive, tonic offset to the volatility estimate. This causes the anxious participant to perceive the world as inherently less stable, leading them to maintain a higher, more reactive learning rate to cope with expected, but not necessarily real, changes.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety biases the perception of environmental volatility,
+    leading to an adaptively high learning rate. The model tracks volatility
+    via the magnitude of reward prediction errors. The learning rate for each
+    trial is then set as a function of this perceived volatility. Trait anxiety
+    (stai) acts as a constant positive bias on the volatility estimate, making
+    the participant believe the world is more unstable than it is, and thus
+    causing them to learn faster and be more sensitive to recent outcomes.
+
+    Parameter Bounds:
+    -----------------
+    beta: [0, 10]   (Inverse softmax temperature)
+    eta: [0, 1]     (Volatility learning rate)
+    kappa: [0, 5]   (Scaling factor for anxiety's influence on volatility)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.beta, self.eta, self.kappa = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize volatility tracker and dynamic learning rate."""
+        self.volatility = 0.0
+        self.current_alpha = 0.1 # Initial learning rate
+
+    def pre_trial(self) -> None:
+        """
+        Calculate the learning rate for the current trial based on the
+        volatility estimated from the *previous* trial.
+        """
+        # Anxiety adds a baseline level to perceived volatility
+        anxiety_offset = self.kappa * self.stai
+        effective_volatility = self.volatility + anxiety_offset
+        
+        # A sigmoid function maps effective volatility to a learning rate [0, 1].
+        # A higher threshold (1.0) means alpha only rises with substantial volatility.
+        threshold = 1.0
+        self.current_alpha = 1 / (1 + np.exp(-(effective_volatility - threshold)))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using the dynamic learning rate (current_alpha) and
+        then updates the volatility estimate for the next trial.
+        """
+        # --- Value Update using dynamic alpha ---
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.current_alpha * delta_2
+        
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.current_alpha * delta_1
+        self.q_stage1[action_1] += self.current_alpha * delta_2 # Eligibility trace
+
+        # --- Volatility Update for next trial ---
+        # Volatility tracks the absolute reward prediction error
+        self.volatility += self.eta * (np.abs(delta_2) - self.volatility)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

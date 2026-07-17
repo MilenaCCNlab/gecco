@@ -1,0 +1,124 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the learning rate (volatility of beliefs).
+    
+    This model proposes that anxiety affects how rapidly a participant updates their 
+    value estimates. High anxiety might lead to 'over-updating' (high alpha) due to 
+    perceived environmental volatility, or 'rigidity' (low alpha).
+    
+    alpha = clip(alpha_base + (alpha_stai * stai), 0, 1)
+    
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]   # Baseline learning rate
+    alpha_stai: [-1, 1]  # Modulation of learning rate by STAI
+    beta: [0, 10]        # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.alpha_stai, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective learning rate once, as STAI is constant per participant
+        val = self.alpha_base + (self.alpha_stai * self.stai)
+        self.alpha = np.clip(val, 0.0, 1.0)
+
+    # We use the standard policy_stage1, policy_stage2, and value_update
+    # because self.alpha is already set in init_model and used by the base class.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates 'Post-Error' exploration (reaction to failure).
+    
+    This model hypothesizes that anxiety specifically affects behavior after a loss (0 reward).
+    Anxious individuals might become more erratic (lower beta/higher noise) or more 
+    rigid (higher beta) immediately following a negative outcome.
+    
+    If last_reward == 0:
+        beta_eff = beta_base + (beta_loss_stai * stai)
+    Else:
+        beta_eff = beta_base
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    beta_loss_stai: [-5, 5] # How STAI shifts beta after a loss
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.beta_loss_stai = model_parameters
+
+    def get_effective_beta(self) -> float:
+        """Calculate beta based on the previous trial's outcome."""
+        beta_eff = self.beta_base
+        # Check if a previous trial exists and resulted in a loss (0.0)
+        if self.last_reward is not None and self.last_reward == 0.0:
+            beta_eff += (self.beta_loss_stai * self.stai)
+            # Ensure beta remains non-negative
+            beta_eff = max(0.0, beta_eff)
+        return beta_eff
+
+    def policy_stage1(self) -> np.ndarray:
+        beta = self.get_effective_beta()
+        return self.softmax(self.q_stage1, beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        beta = self.get_effective_beta()
+        return self.softmax(self.q_stage2[state], beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates reliance on 'Choice Kernel' habits (long-term perseveration).
+    
+    Unlike simple 1-step stickiness, a Choice Kernel integrates a history of past choices.
+    This model suggests anxiety modulates the weight (w) given to this accumulated habit strength
+    versus the learned Q-values.
+    
+    Kernel Update: K(a) = (1 - eta) * K(a) + eta * I(chosen)
+    Decision Value: Q(a) + w_eff * K(a)
+    w_eff = w_base + (w_stai * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    eta: [0, 1]       # Kernel decay/learning rate
+    w_base: [-2, 2]   # Base weight for habit
+    w_stai: [-5, 5]   # STAI modulation of habit weight
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta, self.w_base, self.w_stai = model_parameters
+
+    def init_model(self) -> None:
+        self.choice_kernel = np.zeros(self.n_choices)
+        self.w_eff = self.w_base + (self.w_stai * self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Combine learned value (Q) and habit strength (Kernel)
+        # Note: We apply the weight inside the softmax calculation logic
+        combined_values = self.q_stage1 + (self.w_eff * self.choice_kernel)
+        return self.softmax(combined_values, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Call parent to store last actions/rewards
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update Choice Kernel for Stage 1 actions
+        # Decay all traces
+        self.choice_kernel *= (1.0 - self.eta)
+        # Strengthen the chosen action
+        self.choice_kernel[int(action_1)] += self.eta
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

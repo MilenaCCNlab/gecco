@@ -1,0 +1,148 @@
+As a cognitive scientist and Python programmer, I will propose three distinct cognitive models to explain this participant's decision-making process. Given the participant's high anxiety score (STAI = 0.6875) and their behavioral pattern of sticking with one option for an extended period before switching, my hypotheses will focus on how anxiety might influence learning, cognitive control, and generalization.
+
+### Model 1: Anxiety-Driven Asymmetry in Learning
+
+This model hypothesizes that high anxiety leads to a heightened sensitivity to negative outcomes. Instead of learning equally from rewards and non-rewards, anxious individuals may overweight non-rewards, causing them to update their value estimates more drastically after a failure. This could lead to rapid devaluation of an option and a reluctance to explore, or in this case, a sudden "giving up" on an option after accumulating negative evidence.
+
+The model implements this by using two separate learning rates: `alpha_pos` for rewarded trials and `alpha_neg` for unrewarded trials. The participant's anxiety (`stai`) score specifically amplifies the learning rate for negative outcomes.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to asymmetric learning, specifically by amplifying the learning rate for negative outcomes (non-rewards). Anxious individuals are more sensitive to punishment, causing a stronger downward revision of value estimates after a loss. This can lead to choice patterns characterized by sharp devaluations and a pessimistic assessment of options.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]     (Learning rate for positive outcomes)
+    alpha_neg: [0, 1]     (Base learning rate for negative outcomes)
+    beta: [0, 10]        (Softmax inverse temperature / choice stochasticity)
+    lambda_neg: [0, 5]   (Anxiety's amplification factor for negative learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.beta, self.lambda_neg = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate an effective negative learning rate based on anxiety."""
+        # Anxiety (stai) increases the learning rate specifically for negative outcomes.
+        self.alpha_neg_effective = min(1.0, self.alpha_neg + self.stai * self.lambda_neg)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values using different learning rates for rewards and non-rewards."""
+        if reward > 0.5:
+            # Use the positive learning rate for rewarded trials
+            current_alpha = self.alpha_pos
+        else:
+            # Use the anxiety-modulated negative learning rate for unrewarded trials
+            current_alpha = self.alpha_neg_effective
+
+        # Stage 2 update (alien values)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        # Stage 1 update (spaceship values)
+        # The update is based on the value of the action taken in stage 2 (SARSA-like)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Impaired Hybrid Control and Exploitation
+
+This model proposes that anxiety has a dual effect on decision-making, consistent with theories of cognitive control. First, it impairs "model-based" control, which is the goal-directed ability to use an internal model of the task structure (i.e., transition probabilities) to make decisions. This pushes the participant towards more habitual, "model-free" learning. Second, anxiety increases choice determinism (exploitation), making the participant more likely to rigidly stick to the currently perceived best option, further hindering exploration. This combination can robustly explain why a participant might get "stuck" on a suboptimal choice.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs goal-directed (model-based) control while promoting habitual (model-free) behavior. It also increases the tendency to exploit known values rather than explore uncertain options. Anxiety simultaneously reduces the weight 'w' on model-based planning and increases the choice precision 'beta', leading to rigid, habitual choice patterns that are slow to adapt.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          (Learning rate for model-free values)
+    beta: [0, 10]         (Base inverse temperature)
+    w: [0, 1]              (Base weight on model-based control)
+    lambda_trace: [0, 1]   (Eligibility trace for propagating reward prediction errors)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w, self.lambda_trace = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize separate model-free Q-values and anxiety-modulated parameters."""
+        self.q_stage1_mf = np.zeros(self.n_choices)
+        
+        # Anxiety reduces the weight on model-based control
+        self.w_effective = self.w * (1 - self.stai)
+        
+        # Anxiety increases choice determinism (exploitation)
+        self.beta_effective = self.beta * (1 + self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities based on a hybrid of model-based and model-free values."""
+        # 1. Compute model-based values: Q(spaceship) = P(planet|spaceship) * max(Q(aliens))
+        q_stage1_mb = np.zeros(self.n_choices)
+        max_q_stage2 = np.max(self.q_stage2, axis=1) # Max value for each planet
+        for a in range(self.n_choices):
+            q_stage1_mb[a] = np.sum(self.T[a, :] * max_q_stage2)
+            
+        # 2. Combine with model-free values using the anxiety-modulated weight
+        q_policy = self.w_effective * q_stage1_mb + (1 - self.w_effective) * self.q_stage1_mf
+        
+        # 3. Apply softmax with the anxiety-modulated beta
+        return self.softmax(q_policy, self.beta_effective)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update stage-2 values and the model-free component of stage-1."""
+        # Stage 2 update is standard
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update model-free value for stage 1 using an eligibility trace.
+        # This links the first-stage action directly to the final reward prediction error.
+        self.q_stage1_mf[action_1] += self.alpha * self.lambda_trace * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Generalization of Negative Outcomes
+
+This model explores the idea that anxiety affects how learning generalizes. Specifically, it posits that when a negative outcome occurs, anxious individuals are more likely to generalize that negative experience to other, related options. In this task, receiving no reward from one alien on a planet might "sour" the participant's opinion of the *other* alien on the same planet. This over-generalization of punishment can make an entire state (a planet) seem unappealing after only a single bad experience, discouraging the choices that lead there.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety promotes the generalization of negative outcomes. When an action leads to a non-reward, part of that negative prediction error "leaks" to other actions available in the same state (i.e., the other alien on the same planet). The degree of this generalization is scaled by the participant's anxiety level, making them prone to devaluing entire states after a single negative experience.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]  (Inverse temperature)
+    eta: [0, 1]     (Generalization parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values with an anxiety-driven generalization of negative prediction errors."""
+        # Standard update for the chosen stage-2 action
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Generalization step for unrewarded trials
+        if reward < 0.5:
+            other_action_2 = 1 - action_2
+            generalization_strength = self.eta * self.stai
+            
+            # The negative prediction error is also used to update the value of the unchosen alien
+            self.q_stage2[state, other_action_2] += self.alpha * generalization_strength * delta_2
+        
+        # Stage 1 update (spaceship values)
+        # Update is based on the maximum expected value from the resulting state (Q-learning style)
+        # This better propagates the generalized value changes from stage 2 to stage 1.
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

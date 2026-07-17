@@ -1,0 +1,136 @@
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (STAI score) increases the learning rate specifically
+    at the second stage, where immediate rewards are obtained. This reflects a
+    heightened sensitivity to immediate outcomes, potentially leading to more
+    volatile Q-value updates for the aliens. The first-stage learning rate
+    remains constant.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1: [0, 1] - Learning rate for stage 1 Q-values.
+    alpha_stage2_base: [0, 1] - Base learning rate for stage 2 Q-values.
+    stai_alpha_stage2_boost: [0, 2] - How much STAI score boosts the stage 2
+                                      learning rate. The effective stage 2 alpha
+                                      is clipped to [0, 1].
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1, self.alpha_stage2_base, self.stai_alpha_stage2_boost, self.beta = model_parameters
+        # Calculate the effective stage 2 learning rate, boosted by STAI
+        self.alpha_stage2_effective = np.clip(self.alpha_stage2_base + self.stai * self.stai_alpha_stage2_boost, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values with stage-specific learning rates.
+        Stage 2 uses the anxiety-modulated learning rate.
+        Stage 1 uses its own independent learning rate.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2_effective * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety causes participants to disproportionately weigh the
+    actual observed value of the second stage when a rare transition occurs.
+    This could be interpreted as an increased salience or "surprise effect" for
+    unexpected outcomes under anxiety, leading to a stronger backward update for
+    the first-stage choice. This model modifies the target value for the stage 1
+    update conditionally on a rare transition, and scales this modification by anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    rare_value_mod_base: [-2, 2] - Base modulation (bonus or penalty) added to the
+                                   second-stage value when updating stage 1 after a rare transition.
+    stai_rare_value_impact: [-2, 2] - How much STAI score amplifies this modulation.
+                                      The effective modulation is clipped to [-5, 5].
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_value_mod_base, self.stai_rare_value_impact = model_parameters
+        # Calculate the effective rare transition modulation, amplified by STAI
+        self.effective_rare_mod = np.clip(self.rare_value_mod_base + self.stai * self.stai_rare_value_impact, -5.0, 5.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with stage 1 update being modified after rare transitions
+        based on anxiety.
+        """
+        # Stage 2 update (standard TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Determine if the transition was rare
+        # Spaceship 0 (A) commonly to Planet 0 (X), rarely to Planet 1 (Y)
+        # Spaceship 1 (U) commonly to Planet 1 (Y), rarely to Planet 0 (X)
+        # A rare transition occurs if action_1 != state
+        is_rare_transition = (action_1 != state)
+
+        # Stage 1 update
+        target_stage1_value = self.q_stage2[state, action_2]
+        if is_rare_transition:
+            # Modify the target value for the stage 1 update based on anxiety
+            target_stage1_value += self.effective_rare_mod
+            
+        delta_1 = target_stage1_value - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs the ability to effectively assign credit
+    from the second stage outcome back to the first-stage choice. This means
+    that the influence of the observed second-stage value on the first-stage
+    Q-value is attenuated, making stage 1 updates less sensitive to the actual
+    outcome of the trial. This could be due to increased cognitive load or
+    rumination under anxiety. The learning rate for stage 2 remains at the base alpha.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Base learning rate for both stages.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stai_credit_assignment_reduction: [0, 2] - How much STAI score reduces the
+                                            effective learning rate for the stage 1 update.
+                                            A value of 0 means no reduction, a value
+                                            of `1/stai` would mean full reduction for this STAI.
+                                            The effective stage 1 alpha is clipped to [0, 1].
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stai_credit_assignment_reduction = model_parameters
+        # Calculate the effective reduction factor for stage 1 alpha
+        # The reduction is (stai * reduction_coeff), so the multiplier is (1 - stai * reduction_coeff)
+        # Ensure the multiplier is not negative, clipping to [0, 1]
+        self.stage1_alpha_multiplier = np.clip(1.0 - self.stai * self.stai_credit_assignment_reduction, 0.0, 1.0)
+        self.alpha_stage1_effective = self.alpha * self.stage1_alpha_multiplier
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with stage 1 learning rate attenuated by anxiety.
+        """
+        # Stage 2 update (standard TD with base alpha)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update uses the anxiety-modulated effective alpha
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1_effective * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

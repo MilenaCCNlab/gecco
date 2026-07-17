@@ -1,0 +1,184 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant's high anxiety (STAI score = 0.5375) influences their decision-making in the two-step task.
+
+### Cognitive Model 1: Anxiety-Amplified Negative Prediction Error at Stage 1
+
+This model hypothesizes that high anxiety makes participants particularly sensitive to negative surprises at the first stage of the decision process. If the outcome of their first-stage choice (the value of the chosen second-stage action) is worse than what they initially expected for that first-stage option, this discrepancy (negative prediction error) is amplified. This leads to a stronger, more pronounced reduction in the perceived value of that first-stage choice, making anxious individuals react more strongly to initial disappointments.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety amplifies the impact of negative prediction errors
+    at the first stage. If the actual value achieved in the second stage is
+    worse than what was expected from the first-stage choice, this negative
+    prediction error is amplified, leading to a stronger reduction in the
+    Q-value of the first-stage action. This makes participants with high
+    anxiety more sensitive to initial disappointments, leading to more
+    pronounced value updates when expectations are not met negatively.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    neg_pe_amplification_base: [0, 2] - Base factor by which negative stage-1 PEs are amplified.
+                                        A value of 0 means no base amplification, 1 means double impact.
+    stai_neg_pe_impact: [0, 2] - How much STAI score increases the negative PE amplification.
+                                  A positive value implies higher anxiety leads to more amplification.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_pe_amplification_base, self.stai_neg_pe_impact = model_parameters
+        # Calculate the effective amplification factor.
+        # This factor multiplies the negative prediction error.
+        # Ensure it's at least 1 (no dampening, at least standard update).
+        self.effective_neg_pe_factor = np.clip(1 + self.neg_pe_amplification_base + self.stai * self.stai_neg_pe_impact, 1, 5)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with amplified negative prediction errors for stage 1.
+        """
+        # Stage 2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Amplify negative prediction errors at stage 1
+        if delta_1 < 0:
+            delta_1 *= self.effective_neg_pe_factor
+        
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Cognitive Model 2: Anxiety-Driven Avoidance of Rare Transitions (Proactive)
+
+This model proposes that participants with high anxiety proactively try to avoid situations that involve rare or unpredictable transitions. They learn the underlying transition probabilities and, before making a first-stage choice, they apply a penalty to the Q-value of any spaceship that has a higher probability of leading to a rare transition. This penalty is amplified by their anxiety level, reflecting a preference for predictable, common paths over potentially better, but less certain, rare ones.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads participants to proactively devalue first-stage
+    actions that are associated with a higher learned probability of leading to
+    a rare transition. This reflects an anxious avoidance of unpredictable or
+    uncommon paths. The model learns transition probabilities from experience
+    and applies a penalty to Q-values of first-stage actions proportional to
+    their rare transition probability, with the penalty amplified by STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    avoid_rare_penalty_base: [0, 5] - Base penalty (per unit of rare transition probability)
+                                      applied to the Q-value of a first-stage action.
+    stai_avoid_impact: [0, 5] - How much STAI score increases this rare transition avoidance penalty.
+                                A positive value implies higher anxiety leads to stronger avoidance.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.avoid_rare_penalty_base, self.stai_avoid_impact = model_parameters
+        # Calculate the effective penalty multiplier
+        self.effective_avoid_penalty = np.clip(self.avoid_rare_penalty_base + self.stai * self.stai_avoid_impact, 0, 10)
+
+    def init_model(self) -> None:
+        # Initialize an adaptive transition probability matrix using provided pseudocounts.
+        self.adaptive_trans_counts = np.copy(self.trans_counts)
+        self.adaptive_T = self.adaptive_trans_counts / self.adaptive_trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying a penalty for rare transitions.
+        """
+        q_biased = np.copy(self.q_stage1)
+        
+        # Spaceship 0 (A) commonly travels to Planet 0 (X), rarely to Planet 1 (Y).
+        # Spaceship 1 (U) commonly travels to Planet 1 (Y), rarely to Planet 0 (X).
+        
+        # Rare transition probability for Spaceship A (0) is P(Planet 1 | Spaceship 0)
+        rare_prob_A = self.adaptive_T[0, 1]
+        q_biased[0] -= self.effective_avoid_penalty * rare_prob_A
+
+        # Rare transition probability for Spaceship U (1) is P(Planet 0 | Spaceship 1)
+        rare_prob_U = self.adaptive_T[1, 0]
+        q_biased[1] -= self.effective_avoid_penalty * rare_prob_U
+        
+        return self.softmax(q_biased, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update transition counts after each trial to learn adaptive probabilities.
+        """
+        super().post_trial(action_1, state, action_2, reward) # Call base class post_trial
+        
+        # Update transition counts for the observed transition
+        self.adaptive_trans_counts[action_1, state] += 1
+        
+        # Re-calculate adaptive transition probabilities
+        self.adaptive_T = self.adaptive_trans_counts / self.adaptive_trans_counts.sum(axis=1, keepdims=True)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Cognitive Model 3: Anxiety-Impaired Stage 2 Learning After Rare Transitions
+
+This model posits that high anxiety disrupts a participant's ability to effectively learn about rewards at the second stage when they encounter an unexpected situation, specifically a rare transition to a planet. The surprise and potential stress associated with an off-path transition reduce their learning rate for the aliens on that planet, making them less adaptable to the reward probabilities in such unpredictable contexts. This impairment is more pronounced with higher anxiety.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs learning about second-stage values when
+    the participant arrives at an unexpected planet (i.e., a rare transition occurs).
+    Under these potentially stressful and surprising circumstances, the learning
+    rate for the second-stage Q-values is reduced, with this reduction amplified
+    by the participant's STAI (anxiety) score. Learning for the first stage
+    remains at the general learning rate.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - General learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    rare_alpha_reduction_base: [0, 1] - Base factor by which alpha for stage-2 learning
+                                        is reduced after a rare transition (0 means no reduction, 1 means alpha becomes 0).
+    stai_rare_alpha_reduction_impact: [0, 1] - How much STAI score increases this learning rate reduction.
+                                                A positive value implies higher anxiety leads to more reduction.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_alpha_reduction_base, self.stai_rare_alpha_reduction_impact = model_parameters
+        
+        # Calculate the total reduction factor. Clip to ensure it's between 0 and 1.
+        # A reduction factor of 1 means alpha becomes 0 (no learning).
+        # A reduction factor of 0 means alpha is unchanged.
+        self.effective_reduction_factor = np.clip(
+            self.rare_alpha_reduction_base + self.stai * self.stai_rare_alpha_reduction_impact,
+            0, 1
+        )
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with stage-2 learning rate reduced after rare transitions.
+        """
+        # Determine if the current transition was rare
+        is_rare_transition = False
+        # Spaceship 0 (A) commonly travels to Planet 0 (X), rarely to Planet 1 (Y).
+        # Spaceship 1 (U) commonly travels to Planet 1 (Y), rarely to Planet 0 (X).
+        if (action_1 == 0 and state == 1) or \
+           (action_1 == 1 and state == 0):
+            is_rare_transition = True
+        
+        # Calculate the effective alpha for stage 2
+        current_alpha_stage2 = self.alpha
+        if is_rare_transition:
+            current_alpha_stage2 *= (1 - self.effective_reduction_factor)
+        
+        # Stage 2 update with potentially reduced alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha_stage2 * delta_2
+        
+        # Stage 1 update (standard TD learning, uses general alpha)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,137 @@
+As a cognitive scientist and programmer, I've analyzed this participant's data and profile. With a high STAI score of 0.575, this individual is classified as having high anxiety. Cognitive literature suggests that anxiety can impact decision-making in several ways, including promoting cognitive inflexibility (perseveration), creating a bias towards processing negative information, and impairing complex, goal-directed planning. The participant's choice data, showing long streaks of selecting the same spaceship, lends credence to theories involving perseveration or simplified decision strategies.
+
+Based on this, I propose three distinct cognitive models that each formalize a specific hypothesis about how anxiety influences this participant's behavior in the two-step task.
+
+### Model 1: Anxiety-Modulated Perseveration Model
+This model tests the hypothesis that high anxiety fosters cognitive inflexibility, manifesting as a tendency to perseverate, or repeat previous choices, regardless of their recent outcomes. This "stickiness" is a common finding in clinical populations and can be a rational strategy in stable environments, but maladaptive when reward contingencies change.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (stai) increases choice perseveration. The participant
+    relies on a standard, model-free learning strategy but has a strong, anxiety-driven
+    tendency to repeat the last action. This captures cognitive inflexibility often
+    associated with anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]     (Inverse temperature for softmax)
+    perservation_base: [0, 5] (Base strength of the perseveration bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.perservation_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 action probabilities, adding an anxiety-modulated
+        perseveration bonus to the value of the most recent choice.
+        """
+        # Calculate the perseveration bonus, scaled by anxiety
+        perseveration_bonus = self.perservation_base * self.stai
+        
+        # Start with the learned Q-values
+        policy_q_values = self.q_stage1.copy()
+        
+        # If not the first trial, add the bonus to the last chosen action
+        if self.last_action1 is not None:
+            policy_q_values[self.last_action1] += perseveration_bonus
+            
+        return self.softmax(policy_q_values, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Asymmetric Learning Model
+This model formalizes the idea that anxiety creates a learning bias, making the participant more sensitive to negative outcomes than positive ones. According to this "better safe than sorry" hypothesis, individuals with high anxiety learn more readily from events that are worse than expected (negative prediction errors), as a way to avoid future negative consequences.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (stai) causes the participant to be more sensitive
+    to negative outcomes. They learn more strongly from prediction errors where the
+    outcome was worse than expected, compared to when it was better. This reflects
+    an anxiety-related bias in attention and learning.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]      (Learning rate for positive prediction errors)
+    beta: [0, 10]         (Inverse temperature for softmax)
+    neg_sensitivity: [0, 5] (Factor scaling learning from negative errors)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.neg_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values using separate learning rates for positive and negative
+        prediction errors, where the negative learning rate is amplified by anxiety.
+        """
+        # Determine learning rates based on anxiety
+        alpha_pos = self.alpha_base
+        alpha_neg = self.alpha_base * (1 + self.neg_sensitivity * self.stai)
+        alpha_neg = min(alpha_neg, 1.0) # Ensure learning rate does not exceed 1
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_for_s2 = alpha_pos if delta_2 >= 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_for_s2 * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_for_s1 = alpha_pos if delta_1 >= 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_for_s1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Impaired Goal-Directed Planning Model
+This model proposes that anxiety interferes with complex cognitive functions like planning. In the context of the two-step task, this means anxiety reduces the participant's ability to use their knowledge of the task structure (i.e., the spaceship-to-planet transition probabilities) to make farsighted, "model-based" decisions. Instead, they fall back on simpler, less cognitively demanding "model-free" habits.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (stai) impairs goal-directed, model-based planning.
+    The participant's ability to use their knowledge of the task structure to make
+    optimal first-stage choices is reduced by their anxiety level. As anxiety
+    increases, they rely more on simpler, learned stimulus-response (model-free) values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for model-free values)
+    beta: [0, 10]     (Inverse temperature for softmax)
+    w_base: [0, 1]     (Base weight on model-based vs. model-free control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 action probabilities based on a weighted average of
+        model-free and model-based values. The weight given to the model-based
+        system is inversely proportional to the participant's anxiety level.
+        """
+        # 1. Calculate Model-Based (MB) values
+        # Expected value of each first-stage action is the probability-weighted
+        # sum of the maximum values achievable in the resulting second-stage states.
+        q_mb = np.zeros(self.n_choices)
+        for action in range(self.n_choices):
+            # T[action, state] * max_q_at_state
+            q_mb[action] = np.dot(self.T[action, :], [np.max(self.q_stage2[s, :]) for s in range(self.n_states)])
+        
+        # 2. Determine the weighting between MB and MF control
+        # Higher anxiety (stai) reduces the model-based weight 'w'
+        w = self.w_base * (1 - self.stai)
+        
+        # 3. Combine MF and MB values
+        # self.q_stage1 are the model-free (MF) values
+        q_hybrid = w * q_mb + (1 - w) * self.q_stage1
+        
+        # 4. Use the hybrid Q-values for action selection
+        return self.softmax(q_hybrid, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

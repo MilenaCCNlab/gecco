@@ -1,0 +1,141 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Structural Doubt (Distorted Model-Based).
+    
+    This model hypothesizes that the participant uses a Model-Based strategy (planning),
+    but high anxiety degrades their trust in the transition structure of the task.
+    Instead of using the true transition probabilities (e.g., 70/30), they use a 
+    "distorted" transition matrix that is flattened towards uniformity (50/50) 
+    proportional to their anxiety.
+    
+    This reflects a "panic" response where the cognitive map of the world becomes 
+    fuzzy, leading to choices that appear random or less directed when anxiety is high.
+    
+    Q_MB(a) = Sum(P_distorted(s'|a) * V(s'))
+    P_distorted = (1 - distortion*STAI) * P_true + (distortion*STAI) * 0.5
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate for Stage 2 values)
+    beta: [0, 10]       (Inverse temperature)
+    distortion: [0, 1]  (Degree of structural flattening due to anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.distortion = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate max value for each state (planet)
+        # q_stage2 is shape (n_states, n_choices)
+        v_states = np.max(self.q_stage2, axis=1)
+        
+        # Distort the transition matrix based on STAI
+        # self.T is shape (n_choices, n_states)
+        # We blend it with a uniform distribution (0.5)
+        # distortion * stai determines the weight of the uniform noise
+        w = np.clip(self.distortion * self.stai, 0, 1)
+        T_distorted = (1 - w) * self.T + w * 0.5
+        
+        # Compute Model-Based Q-values
+        q_mb = T_distorted @ v_states
+        
+        # Use these values for decision making
+        return self.softmax(q_mb, self.beta)
+
+    # We still update q_stage2 (the state values)
+    # We do NOT update q_stage1 (MF values) as this is a Pure MB model
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        # No Stage 1 update
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Reactive Control (Win-Stay, Lose-Shift).
+    
+    This model hypothesizes that anxiety amplifies a reactive heuristic: 
+    "Win-Stay, Lose-Shift". While the previous "Stickiness" model only captured 
+    perseveration, this model posits that anxious individuals are hyper-sensitive 
+    to the immediate outcome.
+    
+    If the last choice was rewarded, they get a bonus to repeat it.
+    If the last choice was unrewarded, they get a penalty (or negative bonus) to avoid it.
+    
+    Q_net(a) = Q_learned(a) + (reactivity * STAI * OutcomeSign * IsLast(a))
+    Where OutcomeSign is +1 for Reward, -1 for No Reward.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]      (Inverse temperature)
+    reactivity: [0, 5] (Strength of outcome-dependent bias)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.reactivity = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_biased = self.q_stage1.copy()
+        
+        if self.last_action1 is not None:
+            # Determine sign based on last reward (1.0 or 0.0)
+            # If reward 1 -> sign +1. If reward 0 -> sign -1.
+            sign = 1 if self.last_reward == 1.0 else -1
+            
+            bias = self.reactivity * self.stai * sign
+            q_biased[int(self.last_action1)] += bias
+            
+        return self.softmax(q_biased, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Common-Transition Heuristic (Simplified Planning).
+    
+    This model hypothesizes that high anxiety impairs complex model-based calculations 
+    but preserves simple rules. The participant relies on a heuristic: 
+    "Spaceship A goes to Planet X, Spaceship U goes to Planet Y."
+    
+    They bias their Stage 1 choice based on the value of the *commonly associated* 
+    planet, ignoring the rare transition probability. This is a "rigid" form of 
+    planning often seen under stress, distinct from full Model-Based control.
+    
+    Q_net(A) = Q_MF(A) + (weight * STAI * V(Planet X))
+    Q_net(U) = Q_MF(U) + (weight * STAI * V(Planet Y))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate)
+    beta: [0, 10]      (Inverse temperature)
+    heuristic_w: [0, 5] (Weight of the common-transition bias)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.heuristic_w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_biased = self.q_stage1.copy()
+        
+        # Calculate current values of the states (max Q of aliens in that state)
+        v_planet_x = np.max(self.q_stage2[0]) # State 0
+        v_planet_y = np.max(self.q_stage2[1]) # State 1
+        
+        # Apply bias based on common transitions
+        # Spaceship 0 (A) -> Commonly Planet 0 (X)
+        q_biased[0] += self.heuristic_w * self.stai * v_planet_x
+        
+        # Spaceship 1 (U) -> Commonly Planet 1 (Y)
+        q_biased[1] += self.heuristic_w * self.stai * v_planet_y
+        
+        return self.softmax(q_biased, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

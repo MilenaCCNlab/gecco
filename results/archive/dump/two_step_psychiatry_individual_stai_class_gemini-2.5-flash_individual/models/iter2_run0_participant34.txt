@@ -1,0 +1,192 @@
+Here are three new cognitive models, each proposing a distinct mechanism for how this participant, characterized by high anxiety (STAI score of 0.9625), makes decisions in the two-step task.
+
+### Model 1: Model-Based Control with Anxiety-Modulated Planning Horizon
+
+This model posits that participants use a hybrid control system, combining model-free Q-learning with a model-based planning component. High anxiety is hypothesized to shorten the effective planning horizon for the model-based component by reducing its discount factor. This means that as anxiety increases, future rewards are valued less, leading to a more "short-sighted" planning strategy.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Model-Based Control with Anxiety-Modulated Planning Horizon.
+    This model proposes that participants combine model-free (MF) and model-based (MB)
+    control. High anxiety (STAI score) shortens the effective planning horizon for
+    the model-based component by reducing its discount factor (gamma). This leads
+    to a greater emphasis on immediate rewards and less on long-term consequences
+    as anxiety increases.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    w_model_based: [0, 1] (Weight for the model-based component in stage 1 choices)
+    gamma_base: [0, 1] (Base discount factor for model-based planning)
+    stai_gamma_reduction: [0, 1] (Factor by which STAI reduces the discount factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_model_based, self.gamma_base, self.stai_gamma_reduction = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # self.q_stage1 in the base class serves as the model-free Q-values for stage 1.
+        # self.T (transition probabilities) and self.q_stage2 are initialized by the base class.
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a hybrid (MF + MB) value.
+        The model-based component's discount factor is modulated by anxiety.
+        """
+        # Calculate anxiety-modulated discount factor, ensuring it stays within [0, 1]
+        gamma = np.clip(self.gamma_base - self.stai * self.stai_gamma_reduction, 0.0, 1.0)
+
+        # Calculate model-based Q-values (Q_mb)
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Expected value of choosing action a1 at stage 1, then choosing optimally at stage 2
+            # Sum over possible next states (planets) weighted by their transition probabilities
+            expected_next_value = np.sum(self.T[a1, s] * np.max(self.q_stage2[s, :]) for s in range(self.n_states))
+            q_mb[a1] = expected_next_value * gamma # Apply the anxiety-modulated discount factor
+
+        # Combine model-free (self.q_stage1) and model-based (q_mb) values
+        q_hybrid = (1 - self.w_model_based) * self.q_stage1 + self.w_model_based * q_mb
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using standard TD learning for both stages.
+        The hybrid policy only affects choice, not the underlying learning of Q-values.
+        """
+        # Stage 2 Q-value update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 (model-free) Q-value update
+        # The target for stage 1 update is the value of the chosen stage 2 action (TD(0))
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Sensitivity to Transition Regularity
+
+This model proposes that participants develop a bias in their first-stage choices based on whether the previous transition was common (e.g., Spaceship A to Planet X) or rare (e.g., Spaceship A to Planet Y). High anxiety amplifies this sensitivity: it increases the tendency to stick with a first-stage action if it previously led to a common transition, and increases the tendency to switch away (by applying a penalty) from a first-stage action if it previously led to a rare transition. This bias is applied regardless of the reward received.
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Sensitivity to Transition Regularity.
+    This model proposes that participants develop a bias in their first-stage choices
+    based on whether the previous transition was common or rare. High anxiety amplifies
+    this sensitivity: it increases the tendency to stick with a first-stage action
+    if it previously led to a common transition, and increases the tendency to switch
+    away from a first-stage action if it previously led to a rare transition.
+    This bias is applied regardless of the reward received on the previous trial.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    common_bias_base: [0, 1] (Base bonus for repeating an action that led to a common transition)
+    stai_common_boost: [0, 1] (Factor by which STAI amplifies the common transition bonus)
+    rare_penalty_base: [0, 1] (Base penalty for repeating an action that led to a rare transition)
+    stai_rare_boost: [0, 1] (Factor by which STAI amplifies the rare transition penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.common_bias_base, self.stai_common_boost, self.rare_penalty_base, self.stai_rare_boost = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # Initialize last_action1 and last_state to indicate no previous trial
+        self.last_action1 = -1
+        self.last_state = -1
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying a bias to Q-values based on the
+        regularity (common/rare) of the last observed transition, amplified by STAI.
+        """
+        q_stage1_biased = np.copy(self.q_stage1)
+
+        # Apply bias only if there was a previous trial and valid state information
+        if self.last_action1 != -1 and self.last_state != -1:
+            # Common transitions are when action_1 == state (e.g., spaceship 0 to planet 0, spaceship 1 to planet 1)
+            is_common_transition = (self.last_action1 == self.last_state)
+
+            if is_common_transition:
+                # Add a bonus to the last chosen action's Q-value if it led to a common transition
+                bias = self.common_bias_base + self.stai * self.stai_common_boost
+                q_stage1_biased[self.last_action1] += bias
+            else: # Rare transition
+                # Add a penalty to the last chosen action's Q-value if it led to a rare transition
+                penalty = -(self.rare_penalty_base + self.stai * self.stai_rare_boost)
+                q_stage1_biased[self.last_action1] += penalty
+        
+        return self.softmax(q_stage1_biased, self.beta)
+
+    # The base class's value_update method is used for Q-value learning.
+    # The base class's post_trial method correctly stores last_action1 and last_state,
+    # which are used by policy_stage1 on the subsequent trial.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Recency Bias in Second-Stage Learning
+
+This model proposes that high anxiety induces a recency bias in learning, specifically by increasing the learning rate for the second-stage Q-values. This means that for participants with higher anxiety, recent outcomes from specific aliens have a disproportionately large impact on how they value those choices, making their second-stage learning more volatile and reactive. The first-stage learning rate is kept separate and constant.
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Recency Bias in Second-Stage Learning.
+    This model proposes that high anxiety leads to a recency bias in learning,
+    specifically by increasing the learning rate for second-stage Q-values.
+    This makes participants' second-stage choices more reactive to recent
+    outcomes from specific aliens, potentially leading to more volatile
+    second-stage policies. The first-stage learning rate is separate and constant.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1: [0, 1] (Learning rate for Stage 1 Q-values)
+    beta: [0, 10] (Softmax inverse temperature for both stages)
+    alpha_stage2_base: [0, 1] (Base learning rate for Stage 2 Q-values)
+    stai_alpha_stage2_boost: [0, 1] (Factor by which STAI increases Stage 2 learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1, self.beta, self.alpha_stage2_base, self.stai_alpha_stage2_boost = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # No additional state needed beyond base class initialization.
+        # The base class `self.alpha` is effectively `alpha_stage1` in this model,
+        # but we use `self.alpha_stage1` explicitly for clarity in value_update.
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values with anxiety-modulated learning rate for Stage 2,
+        and a separate, constant learning rate for Stage 1.
+        """
+        # Calculate anxiety-modulated learning rate for Stage 2, ensuring it stays within [0, 1]
+        alpha_stage2 = np.clip(self.alpha_stage2_base + self.stai * self.stai_alpha_stage2_boost, 0.0, 1.0)
+
+        # Stage 2 Q-value update using the anxiety-modulated learning rate
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_stage2 * delta_2
+        
+        # Stage 1 Q-value update using its own constant learning rate
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+    # The base class's policy_stage1 and policy_stage2 methods are used with the common beta.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

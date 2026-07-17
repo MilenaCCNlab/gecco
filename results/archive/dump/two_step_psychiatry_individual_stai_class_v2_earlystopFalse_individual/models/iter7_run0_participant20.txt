@@ -1,0 +1,147 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Model-Based Deficit.
+    
+    This model hypothesizes that high anxiety consumes cognitive resources (working memory), 
+    impairing the participant's ability to use Model-Based (planning) strategies. 
+    Consequently, anxious participants rely more heavily on Model-Free (habitual) control.
+    
+    The Stage 1 choice is a weighted mixture of Model-Based (MB) and Model-Free (MF) values.
+    The weight of the MB component (w) is reduced as anxiety (STAI) increases.
+    
+    w_mb = max(0, 1 - (mb_impairment * STAI))
+    Q_net = w_mb * Q_MB + (1 - w_mb) * Q_MF
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         (Learning rate for Stage 1 MF and Stage 2 values)
+    beta: [0, 10]         (Inverse temperature)
+    mb_impairment: [0, 2] (Scaling factor for anxiety's suppression of MB control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.mb_impairment = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values
+        # Q_MB(a) = Sum_s' [ T(s'|a) * max_a' Q_stage2(s', a') ]
+        # self.T is the transition matrix (2x2): [action, next_state]
+        
+        # Calculate V(state) = max_a Q_stage2(state, a)
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Q_MB = T dot V_stage2
+        q_mb = self.T @ v_stage2
+        
+        # 2. Calculate Mixing Weight
+        # Higher STAI -> Lower w_mb (Less planning, more habit)
+        w_mb = 1.0 - (self.mb_impairment * self.stai)
+        w_mb = np.clip(w_mb, 0.0, 1.0)
+        
+        # 3. Combine MB and MF values
+        q_net = w_mb * q_mb + (1.0 - w_mb) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD updates for both stages
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Pessimistic Decay (Unchosen Forgetting).
+    
+    This model hypothesizes that anxious individuals pessimistically devalue options 
+    they do not choose. They "forget" the value of the unchosen spaceship, causing it 
+    to decay towards zero. This decay rate is accelerated by anxiety.
+    
+    This mechanism creates a "safety bubble" around the chosen option: as long as the 
+    chosen option provides some reward, the alternative appears increasingly worse 
+    due to decay, promoting perseveration (stickiness).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       (Learning rate)
+    beta: [0, 10]       (Inverse temperature)
+    decay_rate: [0, 1]  (Base decay factor scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard updates for chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Pessimistic decay for the unchosen Stage 1 action
+        unchosen_action_1 = 1 - action_1
+        
+        # Decay factor depends on STAI. 
+        # New_Value = Old_Value * (1 - (decay_rate * STAI))
+        current_decay = self.decay_rate * self.stai
+        current_decay = np.clip(current_decay, 0.0, 1.0)
+        
+        self.q_stage1[unchosen_action_1] *= (1.0 - current_decay)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Counterfactual Regret.
+    
+    This model hypothesizes that anxious individuals engage in counterfactual reasoning 
+    ("What if I had chosen the other one?"). They simulate the outcome of the unchosen 
+    option based on the inverse of their received reward.
+    
+    - If Reward=1 (Win), they assume the unchosen option would have yielded 0 (Loss).
+    - If Reward=0 (Loss), they assume the unchosen option would have yielded 1 (Win).
+    
+    The strength of this counterfactual update is modulated by STAI, driving a 
+    "Win-Stay, Lose-Shift" dynamic mediated by value updates.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate)
+    beta: [0, 10]        (Inverse temperature)
+    regret_weight: [0, 1] (Weight of the counterfactual update, scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.regret_weight = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard updates for chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Counterfactual update for unchosen Stage 1 action
+        unchosen_action_1 = 1 - action_1
+        
+        # Counterfactual reward: The opposite of what was received
+        counterfactual_reward = 1.0 - reward
+        
+        # The update is driven by the difference between the imagined reward and current value
+        # Scaled by STAI and the regret_weight
+        learning_rate_cf = self.alpha * self.regret_weight * self.stai
+        
+        delta_cf = counterfactual_reward - self.q_stage1[unchosen_action_1]
+        self.q_stage1[unchosen_action_1] += learning_rate_cf * delta_cf
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

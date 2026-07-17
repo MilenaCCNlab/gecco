@@ -1,0 +1,239 @@
+Here are three new cognitive models based on the two-step task, incorporating the STAI anxiety score into the decision-making and learning processes.
+
+### Model 1: Anxiety-Driven Counterfactual Rumination
+This model hypothesizes that high anxiety leads to increased "rumination" or counterfactual thinking. In a standard Q-learning model, only the chosen action is updated. However, anxious individuals may worry about the path not taken. This model updates the *unchosen* Stage 1 option in the opposite direction of the chosen option's prediction error (assuming the two options are competing/anti-correlated), with the strength of this effect scaled by their anxiety.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 1: Anxiety-Driven Counterfactual Rumination.
+    
+    Hypothesis: High anxiety leads to counterfactual updating ("rumination"). 
+    If the agent receives a positive outcome from Choice A, they simultaneously 
+    downgrade Choice B (and vice versa), assuming an antagonistic structure.
+    The strength of this counterfactual update is driven by the STAI score.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate for chosen options.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-Based weight.
+    - cf_base: [0, 1] Base rate of counterfactual updating.
+    - cf_stai_slope: [0, 1] How much STAI increases counterfactual updating.
+      (Effective CF rate = cf_base + cf_stai_slope * stai).
+    """
+    learning_rate, beta, w, cf_base, cf_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate effective counterfactual rate, bounded at 1.0
+    cf_rate = cf_base + (cf_stai_slope * stai_score)
+    if cf_rate > 1.0: cf_rate = 1.0
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+        
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+        
+        # --- Updates ---
+        # Stage 1 Prediction Error
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        
+        # Update CHOSEN Stage 1
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        # Update UNCHOSEN Stage 1 (Counterfactual)
+        # We apply the inverse of the delta to the unchosen option
+        unchosen_a1 = 1 - a1
+        q_stage1_mf[unchosen_a1] -= learning_rate * cf_rate * delta_stage1
+        
+        # Stage 2 Prediction Error & Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Surprise Suppression
+This model tests the hypothesis that anxiety affects how agents learn from "surprising" (rare) transitions. Anxious individuals might view rare transitions as noise or "glitches" to be ignored to maintain a stable world model, or conversely, might over-react to them. Here, we model it as *suppression*: high anxiety reduces the learning rate specifically on trials where a Rare transition occurred, effectively filtering out "unexpected" volatility.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 2: Anxiety-Modulated Surprise Suppression.
+    
+    Hypothesis: High anxiety individuals dampen their learning on 'Rare' 
+    transitions (Surprise). They may treat these as noise to be ignored 
+    to reduce cognitive load or maintain stability.
+    
+    Parameters:
+    - lr_base: [0, 1] Base learning rate for Common transitions.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-Based weight.
+    - surprise_damp_base: [0, 1] Base amount of learning reduction on rare trials.
+    - surprise_damp_stai: [0, 1] How much STAI amplifies this dampening.
+      (Effective LR on Rare = lr_base * (1 - (base + slope*stai))).
+    """
+    lr_base, beta, w, surprise_damp_base, surprise_damp_stai = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        a1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        
+        # Determine if transition was Common or Rare
+        # 0->0 (Common), 0->1 (Rare), 1->1 (Common), 1->0 (Rare)
+        is_rare = (a1 != state_idx) 
+        
+        # Calculate Trial-Specific Learning Rate
+        dampening = surprise_damp_base + (surprise_damp_stai * stai_score)
+        if dampening > 1.0: dampening = 1.0
+        
+        if is_rare:
+            current_lr = lr_base * (1.0 - dampening)
+        else:
+            current_lr = lr_base
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+        
+        # --- Updates ---
+        # Note: We apply the modified learning rate to both stages for this trial
+        # to reflect a global "learning shutdown" caused by the surprise.
+        
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += current_lr * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += current_lr * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Specific Stage 2 Perseveration
+Previous models explored stickiness on the first choice (Spaceship). This model explores "Safety Seeking" on the *second* choice (Alien). It hypothesizes that anxious individuals, once they find a somewhat rewarding Alien, will stick to it more rigidly than non-anxious individuals, regardless of the calculated value. This is a local "safe haven" effect.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model 3: Anxiety-Specific Stage 2 Perseveration.
+    
+    Hypothesis: Anxiety manifests as 'Safety Seeking' in the immediate environment 
+    (Stage 2). High anxiety individuals will exhibit higher stickiness (perseveration) 
+    specifically for the Alien choice, attempting to stick with a known entity.
+    
+    Parameters:
+    - learning_rate: [0, 1]
+    - beta: [0, 10]
+    - w: [0, 1]
+    - stick_s2_base: [0, 5] Base stickiness bonus for Stage 2 choices.
+    - stick_s2_stai_slope: [0, 5] Increase in Stage 2 stickiness per unit of STAI.
+    """
+    learning_rate, beta, w, stick_s2_base, stick_s2_stai_slope = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track last choice for each state (planet) separately
+    last_action_2_per_state = [-1, -1] 
+    
+    stickiness_bonus = stick_s2_base + (stick_s2_stai_slope * stai_score)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        state_idx = int(state[trial])
+        
+        # --- Stage 2 Policy with Anxiety-Modulated Stickiness ---
+        # Copy Q values to add stickiness without modifying the learning Q-table
+        q_stage2_choice = q_stage2_mf[state_idx].copy()
+        
+        # Apply stickiness if we have visited this state before
+        prev_a2 = last_action_2_per_state[state_idx]
+        if prev_a2 != -1:
+            q_stage2_choice[prev_a2] += stickiness_bonus
+
+        exp_q2 = np.exp(beta * q_stage2_choice)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a1 = int(action_1[trial])
+        a2 = int(action_2[trial])
+        
+        # Update history
+        last_action_2_per_state[state_idx] = a2
+        
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

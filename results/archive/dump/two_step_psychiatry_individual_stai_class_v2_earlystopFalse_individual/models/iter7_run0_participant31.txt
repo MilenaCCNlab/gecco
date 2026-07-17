@@ -1,0 +1,143 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety distorts the internal model of the environment (Transition Uncertainty).
+    
+    High anxiety participants may have a "noisier" or less precise mental model of the 
+    transition probabilities (Spaceship -> Planet). Instead of trusting the true 
+    structure (e.g., 70/30), they plan as if the transitions are more random (closer to 50/50).
+    This model uses a Model-Based controller for Stage 1, where the transition matrix 
+    is flattened towards uniform probability by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for Stage 2 values
+    beta: [0, 10]       # Inverse temperature
+    distortion: [0, 1]  # Degree to which STAI flattens the transition matrix
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.distortion = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values
+        # V(state) = max_a Q_stage2(state, a)
+        values_stage2 = np.max(self.q_stage2, axis=1)
+        
+        # True transition matrix (approximate based on task description)
+        # Row 0: Spaceship A -> [Planet X (0.7), Planet Y (0.3)]
+        # Row 1: Spaceship U -> [Planet X (0.3), Planet Y (0.7)]
+        T_true = np.array([[0.7, 0.3], [0.3, 0.7]])
+        
+        # Distort the transition matrix based on anxiety
+        # distortion_eff = 0 -> Use T_true
+        # distortion_eff = 1 -> Use Uniform (0.5, 0.5)
+        distortion_eff = np.clip(self.distortion * self.stai, 0, 1)
+        T_subjective = (1 - distortion_eff) * T_true + distortion_eff * 0.5
+        
+        # Q_MB = T_subjective * V_stage2
+        q_mb = T_subjective @ values_stage2
+        
+        return self.softmax(q_mb, self.beta)
+
+    # policy_stage2 uses default softmax on q_stage2
+    # value_update uses default TD learning (updates q_stage2 and q_stage1)
+    # Note: q_stage1 updated by TD is ignored in policy_stage1, effectively making this a pure MB model at stage 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces "Panic Exploration" after a loss.
+    
+    High anxiety participants may react to a lack of reward (0 coins) with a 
+    temporary "panic" response that increases randomness (exploration) on the 
+    next trial. If the previous outcome was a success, they maintain their 
+    baseline exploitation level.
+    
+    Mechanism: Beta is scaled down (increasing noise) if the last reward was 0.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Baseline inverse temperature
+    panic: [0, 1]       # Factor by which STAI reduces beta after a loss
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.panic = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        beta_eff = self.beta
+        
+        # If the previous trial resulted in no reward, reduce beta (increase exploration)
+        if self.last_reward is not None and self.last_reward == 0.0:
+            # panic_factor scales with STAI. 
+            # If panic=1 and stai=0.5, beta is reduced by 50%.
+            reduction = np.clip(self.panic * self.stai, 0, 0.99)
+            beta_eff = self.beta * (1.0 - reduction)
+            
+        return self.softmax(self.q_stage1, beta_eff)
+
+    # policy_stage2 uses default softmax on q_stage2 (could also apply panic here, but keeping it simple)
+    # value_update uses default TD learning
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety biases choices towards a long-term "Safe Bet" heuristic.
+    
+    Anxious participants may distrust the rapidly fluctuating values learned via 
+    recent reinforcement (TD learning) and instead rely on a long-term frequency 
+    heuristic: "Which spaceship has given me the most wins overall?"
+    
+    Mechanism: A weighted average of the TD Q-values and the long-term Win Rate,
+    where the weight of the Win Rate is modulated by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for TD values
+    beta: [0, 10]       # Inverse temperature
+    w_freq: [0, 5]      # Weight of the frequency heuristic, scaled by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_freq = model_parameters
+
+    def init_model(self) -> None:
+        # Track long-term stats
+        self.wins = np.zeros(self.n_choices)
+        self.counts = np.zeros(self.n_choices)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update long-term stats
+        self.counts[action_1] += 1
+        if reward > 0:
+            self.wins[action_1] += 1
+            
+        # Call parent to store last_action, etc.
+        super().post_trial(action_1, state, action_2, reward)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Win Rate (Frequency Heuristic)
+        # Avoid division by zero
+        win_rate = np.divide(self.wins, self.counts, out=np.zeros_like(self.wins), where=self.counts!=0)
+        
+        # Combine TD value (q_stage1) with Heuristic
+        # The influence of the heuristic increases with STAI
+        heuristic_bonus = self.w_freq * self.stai * win_rate
+        
+        q_combined = self.q_stage1 + heuristic_bonus
+        
+        return self.softmax(q_combined, self.beta)
+
+    # policy_stage2 uses default softmax
+    # value_update uses default TD learning
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

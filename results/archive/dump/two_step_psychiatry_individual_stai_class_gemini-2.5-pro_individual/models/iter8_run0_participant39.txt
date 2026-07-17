@@ -1,0 +1,189 @@
+Here are three new cognitive models.
+
+### Model 1
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety biases the arbitration between goal-directed (model-based)
+    and habitual (model-free) control systems. This model proposes that decision-making
+    is a weighted average of values from both systems. The weight given to the more
+    computationally demanding model-based system is inversely proportional to the
+    participant's anxiety level (stai). Higher anxiety leads to a greater reliance
+    on simpler, less flexible model-free habits, which could explain the participant's
+    initial perseverative behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate for model-free and stage-2 values)
+    beta: [0, 10]    (Inverse temperature for choice stochasticity)
+    w_base: [0, 1]    (Base weighting toward model-based control)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a separate model-free value table."""
+        self.q_mf = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on an anxiety-weighted
+        combination of model-based and model-free values.
+        """
+        # 1. Compute model-based values (goal-directed)
+        # Expected value of each starting choice, based on transitions and best outcome
+        state_values = np.max(self.q_stage2, axis=1)  # [max_q_planet_X, max_q_planet_Y]
+        q_mb = self.T @ state_values
+
+        # 2. Determine anxiety-modulated weight for model-based control
+        # Higher anxiety (stai) reduces the weight on the MB system
+        w = self.w_base * (1 - self.stai)
+
+        # 3. Combine model-based and model-free values
+        q_combined = w * q_mb + (1 - w) * self.q_mf
+        
+        return self.softmax(q_combined, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates stage-2 values and the model-free (q_mf) value table.
+        The model-based values are computed dynamically and do not need updating here.
+        """
+        # Standard TD update for stage-2 values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # TD update for the model-free system's values
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1_mf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to aversive learning from uncertainty. This model
+    proposes that the participant tracks not only the expected reward (value) of
+    each option but also its uncertainty (reward variance). When updating the value
+    of a first-stage choice, the value of the resulting planet is penalized by its
+    learned uncertainty. The magnitude of this penalty is directly proportional
+    to the participant's anxiety (stai), causing highly anxious individuals to
+    strongly avoid options that have led to variable outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                (Learning rate for value and uncertainty)
+    beta: [0, 10]               (Inverse temperature for choice stochasticity)
+    uncertainty_aversion: [0, 5] (Strength of the uncertainty penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.uncertainty_aversion = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a table to track the uncertainty (variance) of stage-2 rewards."""
+        self.q_uncertainty = np.zeros_like(self.q_stage2)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates values and uncertainty estimates. The stage-1 update incorporates
+        an anxiety-modulated penalty for the uncertainty of the reached state.
+        """
+        # Stage-2 value and uncertainty updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update uncertainty as the running average of the squared prediction error
+        delta_uncertainty = delta_2**2 - self.q_uncertainty[state, action_2]
+        self.q_uncertainty[state, action_2] += self.alpha * delta_uncertainty
+
+        # Stage-1 value update, penalized by uncertainty
+        state_max_q = np.max(self.q_stage2[state])
+        state_mean_uncertainty = np.mean(self.q_uncertainty[state])
+        
+        # Anxiety scales the aversion to uncertainty
+        penalty = self.uncertainty_aversion * self.stai
+        
+        # The effective value of the reached state is its best outcome minus the penalty
+        value_of_state = state_max_q - penalty * state_mean_uncertainty
+        
+        delta_1 = value_of_state - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs directed exploration. In addition to random
+    exploration (making noisy choices), individuals are often motivated to choose
+    uncertain options to gain information. This model proposes that such information-
+    seeking is an active process, driven by an "exploration bonus" added to uncertain
+    options. High anxiety (stai) is hypothesized to suppress this drive, reducing the
+    bonus and making the participant less likely to explore uncertain alternatives,
+    thereby promoting exploitation of familiar, seemingly safer options.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]              (Learning rate for value and uncertainty)
+    beta: [0, 10]             (Inverse temperature for exploitation)
+    exploration_bonus: [0, 5] (Base strength of the information-seeking drive)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.exploration_bonus = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a table to track the uncertainty (variance) of stage-2 rewards."""
+        self.q_uncertainty = np.zeros_like(self.q_stage2)
+        # Ensure uncertainty is non-negative for sqrt
+        self.q_uncertainty.fill(1e-6)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes stage-1 policy with an anxiety-dampened exploration bonus."""
+        # Propagate stage-2 uncertainty back to stage-1 actions
+        planet_mean_uncertainty = np.mean(self.q_uncertainty, axis=1)
+        propagated_uncertainty = self.T @ planet_mean_uncertainty
+        
+        # Anxiety reduces the drive to explore
+        exploration_drive = self.exploration_bonus * (1 - self.stai)
+        
+        # Add bonus proportional to standard deviation (sqrt of variance)
+        bonus = exploration_drive * np.sqrt(propagated_uncertainty)
+        q_eff = self.q_stage1 + bonus
+        
+        return self.softmax(q_eff, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Computes stage-2 policy with an anxiety-dampened exploration bonus."""
+        # Anxiety reduces the drive to explore
+        exploration_drive = self.exploration_bonus * (1 - self.stai)
+        
+        # Add bonus proportional to standard deviation (sqrt of variance)
+        bonus = exploration_drive * np.sqrt(self.q_uncertainty[state])
+        q_eff = self.q_stage2[state] + bonus
+
+        return self.softmax(q_eff, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Updates values and uncertainty estimates using standard TD learning."""
+        # Stage-2 value and uncertainty update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_uncertainty = delta_2**2 - self.q_uncertainty[state, action_2]
+        self.q_uncertainty[state, action_2] += self.alpha * delta_uncertainty
+        # Ensure positivity for sqrt
+        self.q_uncertainty[self.q_uncertainty < 1e-6] = 1e-6
+
+        # Standard stage-1 update (from base class)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,191 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about the participant's decision-making process and how their medium anxiety (STAI score of 0.325) might modulate their behavior.
+
+### Participant Data Analysis & Context
+The participant consistently chose `spaceship 1.0` (U) across all observed trials. Spaceship U commonly travels to `planet 1.0` (Y) and rarely to `planet 0.0` (X). This strong preference for a single stage-1 action suggests either a very strong learned value for that action, a high degree of perseveration, or a strong belief in its reliability. The medium anxiety level (0.325) could influence any of these factors.
+
+---
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Outcome-Specific Learning Rates with Anxiety-Modulated Negative Learning.
+    This model proposes that the participant learns from positive (reward=1) and negative
+    (reward=0) outcomes with potentially different learning rates. Specifically, medium
+    anxiety (stai score) is hypothesized to increase the learning rate for negative
+    prediction errors (when outcomes are worse than expected), making the participant
+    more reactive to negative feedback. The learning rate for positive outcomes remains
+    separate, allowing for differential sensitivity to gains and losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg_base: [0, 1] - Base learning rate for negative prediction errors.
+    stai_alpha_neg_factor: [0, 1] - Factor by which STAI score linearly increases the negative learning rate.
+                                    A value of 0 means no STAI modulation.
+    beta: [0, 10] - Inverse temperature for softmax choice, controlling exploration vs. exploitation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_alpha_neg_factor, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective negative learning rate based on base rate and STAI score.
+        # Higher STAI leads to a higher effective_alpha_neg.
+        self.effective_alpha_neg = self.alpha_neg_base + self.stai_alpha_neg_factor * self.stai
+        # Clamp to [0, 1] to ensure it's a valid learning rate.
+        self.effective_alpha_neg = np.clip(self.effective_alpha_neg, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using outcome-specific learning rates.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.effective_alpha_neg * delta_2
+        
+        # Stage 1 update
+        # The Q-value for stage 1 is updated towards the *updated* Q-value of the chosen stage 2 action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += self.effective_alpha_neg * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Biased Transition Perception with Hybrid Control.
+    This model proposes that the participant's stage-1 decisions are a blend of
+    model-free (habitual) and model-based (goal-directed) control. The model-based
+    component relies on perceived transition probabilities. Crucially, medium anxiety
+    is hypothesized to bias these perceived transition probabilities: common transitions
+    (e.g., Spaceship U to Planet Y) are perceived as even more likely, and rare
+    transitions (e.g., U to X) as less likely. This exaggeration of perceived
+    predictability might serve as a coping mechanism for anxiety, making the
+    environment seem more certain and reinforcing habitual choices.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (applied to both model-free updates).
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    omega: [0, 1] - Weight given to the model-based value in stage 1 choice (0=pure model-free, 1=pure model-based).
+    transition_bias_strength_base: [0, 0.5] - Base strength of the transition probability bias.
+                                              A value of 0 means no base bias.
+    stai_transition_bias_factor: [0, 0.5] - Factor by which STAI score linearly increases the transition bias strength.
+                                            A value of 0 means no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.omega, self.transition_bias_strength_base, self.stai_transition_bias_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective bias strength based on base strength and STAI score.
+        self.effective_bias_strength = self.transition_bias_strength_base + self.stai_transition_bias_factor * self.stai
+        # Clamp bias strength to a reasonable range to prevent probabilities from becoming invalid.
+        # Max bias is chosen such that T[0,1] (0.15) or T[1,0] (0.15) doesn't go negative easily.
+        self.effective_bias_strength = np.clip(self.effective_bias_strength, 0, 0.4) 
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities by blending model-free and model-based values,
+        where the model-based component uses anxiety-biased transition probabilities.
+        """
+        # Create a copy of the actual transition matrix to apply the bias
+        T_biased = np.copy(self.T)
+        
+        # Apply bias: boost common transitions, reduce rare ones
+        # Spaceship 0 (A) commonly travels to Planet 0 (X), rarely to Planet 1 (Y)
+        T_biased[0, 0] = np.clip(self.T[0, 0] + self.effective_bias_strength, 0, 1)
+        T_biased[0, 1] = np.clip(self.T[0, 1] - self.effective_bias_strength, 0, 1)
+        
+        # Spaceship 1 (U) commonly travels to Planet 1 (Y), rarely to Planet 0 (X)
+        T_biased[1, 1] = np.clip(self.T[1, 1] + self.effective_bias_strength, 0, 1)
+        T_biased[1, 0] = np.clip(self.T[1, 0] - self.effective_bias_strength, 0, 1)
+
+        # Normalize rows of T_biased to ensure they sum to 1
+        T_biased = T_biased / T_biased.sum(axis=1, keepdims=True)
+        
+        # Calculate model-based value (V_MB) for stage 1 actions
+        v_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # V_MB(a1) = sum_s P_biased(s|a1) * max_a2 Q_stage2(s, a2)
+            # This represents the expected value of reaching each state and then choosing the optimal alien.
+            expected_next_state_value = np.sum([T_biased[a1, s] * np.max(self.q_stage2[s, :]) for s in range(self.n_states)])
+            v_mb[a1] = expected_next_state_value
+
+        # Combine model-free Q-values with model-based values using omega
+        q_stage1_combined = (1 - self.omega) * self.q_stage1 + self.omega * v_mb
+        
+        return self.softmax(q_stage1_combined, self.beta)
+
+    # The value_update method uses the model's alpha for standard TD updates to the model-free Q-values.
+    # The base class's value_update logic is suitable for the model-free component.
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 model-free update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: RPE Asymmetry with Anxiety-Modulated Loss Aversion.
+    This model proposes that participants exhibit an asymmetry in how they process
+    reward prediction errors (RPEs). Specifically, negative RPEs (outcomes worse
+    than expected) are weighted more heavily than positive RPEs (loss aversion).
+    Medium anxiety is hypothesized to exacerbate this loss aversion, making the
+    participant react even more strongly to unexpected negative outcomes, leading
+    to larger decrements in value for options associated with losses. This can lead
+    to more cautious behavior or avoidance of options that have previously led to losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Base learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    loss_aversion_base: [1, 5] - Baseline factor by which negative RPEs are scaled. Must be >= 1
+                                 (1 means no loss aversion, <1 would be 'gain seeking').
+    stai_loss_aversion_factor: [0, 5] - Factor by which STAI score linearly increases the loss aversion.
+                                        A value of 0 means no STAI modulation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_aversion_base, self.stai_loss_aversion_factor = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective loss aversion factor based on base and STAI score.
+        # Higher STAI leads to a higher effective_loss_aversion.
+        self.effective_loss_aversion = self.loss_aversion_base + self.stai_loss_aversion_factor * self.stai
+        # Ensure loss aversion is at least 1 (no less aversion than normal RPE processing).
+        self.effective_loss_aversion = max(1, self.effective_loss_aversion)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values, applying an anxiety-modulated loss aversion factor to negative RPEs.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 < 0:
+            delta_2 *= self.effective_loss_aversion # Scale negative RPEs
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        # The Q-value for stage 1 is updated towards the *updated* Q-value of the chosen stage 2 action.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 < 0:
+            delta_1 *= self.effective_loss_aversion # Scale negative RPEs
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

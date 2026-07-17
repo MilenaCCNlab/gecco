@@ -1,0 +1,183 @@
+As a cognitive scientist and Python programmer, I will now propose three distinct cognitive models to explain this participant's decision-making process. Given the participant's high anxiety score (STAI = 0.5375), each model will incorporate anxiety as a key modulator of a specific cognitive function, reflecting established theories on how anxiety impacts learning, planning, and choice.
+
+### Model 1: Anxiety-Modulated Hybrid Control with Pessimistic Bias
+
+This first model hypothesizes that the participant uses a combination of two decision strategies: a simple, habit-based 'model-free' system and a goal-directed 'model-based' system that uses an internal model of the task transitions. Critically, I propose that this participant's high anxiety introduces a pessimistic bias into the model-based planning process. Instead of evaluating future states by their maximum potential reward, the planner incorporates the minimum potential reward, reflecting a "what's the worst that can happen?" cognitive style. The degree of this pessimistic evaluation is directly proportional to the participant's STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant uses a hybrid of model-based (MB) and model-free (MF) control.
+    High anxiety introduces a pessimistic bias in the model-based system's evaluation of future
+    states. Instead of solely considering the best possible outcome of a second-stage state,
+    the evaluation is a weighted average of the best and worst outcomes, with the weight on the
+    worst outcome scaled by the STAI score. This captures anxiety-related worry and catastrophic
+    thinking during planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for Q-values)
+    beta: [0, 10]      (Softmax inverse temperature)
+    w: [0, 1]          (Weighting of the model-based vs. model-free system)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a weighted average of model-free
+        and anxiety-biased model-based values.
+        """
+        # 1. Model-Free (MF) values are the cached Q-values
+        q_mf = self.q_stage1
+
+        # 2. Model-Based (MB) values are calculated via planning
+        # Anxiety introduces a pessimistic bias in state valuation
+        pessimism_factor = self.stai 
+        
+        # Calculate the value of each second-stage state (planet)
+        state_values = np.zeros(self.n_states)
+        for s in range(self.n_states):
+            best_outcome = np.max(self.q_stage2[s])
+            worst_outcome = np.min(self.q_stage2[s])
+            state_values[s] = (1 - pessimism_factor) * best_outcome + pessimism_factor * worst_outcome
+        
+        # Calculate MB Q-values by planning one step ahead
+        q_mb = self.T @ state_values
+        
+        # 3. Combine MF and MB values
+        q_hybrid = self.w * q_mb + (1 - self.w) * q_mf
+        
+        return self.softmax(q_hybrid, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD learning updates for both stages. The MF component (q_stage1)
+        is updated here, while the MB component is calculated on-the-fly in policy_stage1.
+        """
+        # Update stage-2 value (aliens)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update stage-1 value (spaceships) using the updated value of the reached state
+        # This is the standard TD update for the model-free component
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Aversion to Outcome Uncertainty
+
+This second model proposes that anxiety makes the participant averse to choices that lead to unpredictable outcomes. The model learns not only the expected value (reward) of each first-stage spaceship choice but also tracks the volatility or uncertainty associated with it, measured by the magnitude of prediction errors. A penalty, scaled by the participant's STAI score, is then applied to the value of choices that have historically produced surprising outcomes (both better or worse than expected). This reflects the idea that anxious individuals prefer predictable, stable environments, even if it means sacrificing potential rewards.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety fosters an aversion to outcome uncertainty. The participant tracks
+    both the expected value of a choice and the long-run prediction error (a proxy for
+    uncertainty) associated with it. A penalty is applied to the value of an action
+    proportional to its learned uncertainty. The magnitude of this penalty is scaled
+    by the STAI score, making highly anxious individuals more sensitive to choice
+    unpredictability.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                 (Learning rate for Q-values)
+    beta: [0, 10]                 (Softmax inverse temperature)
+    alpha_U: [0, 1]               (Learning rate for the uncertainty trace)
+    uncertainty_penalty: [0, 10]  (Base magnitude of the uncertainty aversion)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_U, self.uncertainty_penalty = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a trace to track the uncertainty of each stage-1 action."""
+        self.uncertainty_trace = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 action probabilities. The value of each action is penalized
+        by its learned uncertainty, scaled by anxiety.
+        """
+        # Anxiety scales the penalty for uncertainty
+        penalty = self.uncertainty_penalty * self.stai * self.uncertainty_trace
+        q_effective = self.q_stage1 - penalty
+        
+        return self.softmax(q_effective, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates both Q-values and the uncertainty trace.
+        """
+        # Standard stage-2 Q-value update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage-1 prediction error
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Standard stage-1 Q-value update
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update the uncertainty trace based on the magnitude of the prediction error
+        # This learns the expected absolute prediction error for each action
+        abs_pe = np.abs(delta_1)
+        self.uncertainty_trace[action_1] += self.alpha_U * (abs_pe - self.uncertainty_trace[action_1])
+
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Enhanced Reward-Modulated Stickiness
+
+This third model builds on the idea of choice perseveration but proposes a more nuanced mechanism. Instead of a simple tendency to repeat actions, this model suggests that the outcome of the previous trial modulates this tendency. A rewarded outcome strongly encourages repeating the same choice (stickiness), while an unrewarded outcome encourages switching. This model posits that high anxiety amplifies this effect, making the participant over-react to recent feedback. A positive outcome creates a strong "safety signal" to stick with the choice, while a negative outcome creates a stronger impetus to switch, reflecting heightened sensitivity to the valence of recent events.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant exhibits a reward-modulated choice inertia (stickiness).
+    A rewarded trial induces a bias to repeat the previous choice, while an unrewarded
+    trial induces a bias to switch. High anxiety amplifies this effect, making the
+    participant more likely to "double down" on a rewarded action and more quickly
+    abandon an unrewarded one. This captures an anxiety-driven over-weighting of
+    immediate, salient feedback on subsequent behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          (Learning rate for Q-values)
+    beta: [0, 10]          (Softmax inverse temperature)
+    stickiness: [0, 5]     (Base magnitude of the reward-modulated stickiness effect)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stickiness = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 action probabilities. A bonus or penalty is added to the
+        value of the previously chosen action based on the last reward.
+        """
+        q_effective = self.q_stage1.copy()
+        
+        if self.trial > 0:
+            # A modulator that is positive for reward (1) and negative for no reward (0)
+            reward_modulator = self.last_reward - 0.5
+            
+            # Anxiety scales the stickiness/switching effect
+            bonus = self.stickiness * self.stai * reward_modulator
+            
+            # Apply the bonus (or penalty) to the last chosen action
+            q_effective[self.last_action1] += bonus
+            
+        return self.softmax(q_effective, self.beta)
+
+    # This model uses the default value_update method from the base class,
+    # as the core hypothesis is implemented entirely within the stage-1 policy.
+
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

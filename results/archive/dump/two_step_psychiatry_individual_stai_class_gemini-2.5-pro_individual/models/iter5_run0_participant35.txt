@@ -1,0 +1,174 @@
+As a cognitive scientist and programmer, I will now propose three distinct cognitive models to explain this participant's decision-making process. Given the participant's high anxiety score (STAI = 0.725), each model will formalize a specific hypothesis about how anxiety influences learning and choice, building upon established theories in computational psychiatry.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+
+This model tests the hypothesis that high anxiety impairs the computationally expensive process of model-based planning, leading to a greater reliance on less flexible, model-free (habitual) learning. The choice system is a hybrid of both, and anxiety arbitrates the balance between them.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety disrupts goal-directed, model-based planning,
+    favoring simpler, habitual model-free control. This model implements a
+    hybrid reinforcement learning agent where the contribution of the model-based
+    system to choice is inversely weighted by the participant's trait anxiety.
+    A higher STAI score pushes the agent towards model-free valuation, making
+    it less sensitive to the task's transition structure and more reliant on
+    direct stimulus-response associations.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         (Learning rate for both systems)
+    beta: [0, 10]        (Softmax inverse temperature)
+    w_base: [0, 1]       (Base weighting of the model-based system)
+    lambda_trace: [0, 1] (Eligibility trace for model-free learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.lambda_trace = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a separate model-free Q-table for stage 1."""
+        self.q_mf_s1 = np.zeros(self.n_choices)
+        # The weight 'w' for the model-based system is fixed across trials
+        self.w = self.w_base * (1 - self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Computes choice probabilities based on a weighted sum of MB and MF values."""
+        # Model-based valuation: expected value of the best second-stage options
+        q_mb_s1 = self.T @ np.max(self.q_stage2, axis=1)
+        
+        # Composite Q-value is a mix of model-based and model-free values
+        q_composite = self.w * q_mb_s1 + (1 - self.w) * self.q_mf_s1
+        
+        return self.softmax(q_composite, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates both the stage-2 values and the stage-1 model-free values.
+        The model-based value is computed on-the-fly and doesn't need updating.
+        """
+        # Stage-2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage-1 model-free update with an eligibility trace
+        # This update is influenced by both the value of the reached state (delta_1)
+        # and the final reward prediction error (delta_2 via lambda_trace).
+        delta_1 = np.max(self.q_stage2[state]) - self.q_mf_s1[action_1]
+        self.q_mf_s1[action_1] += self.alpha * (delta_1 + self.lambda_trace * delta_2)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Choice Perseveration
+
+This model formalizes the clinical observation that anxiety can lead to cognitive rigidity and inflexible behavior. It proposes that the participant develops a "sticky" choice tendency, where they are more likely to repeat their previous action. The strength of this perseverative bias is directly proportional to their level of trait anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes behavioral rigidity and perseveration.
+    This model augments a standard reinforcement learning agent with a
+    "stickiness" bias, where the value of the action chosen on the previous
+    trial is temporarily increased. The magnitude of this perseverative bonus
+    is scaled by the participant's STAI score, capturing the idea that higher
+    anxiety leads to more repetitive and less adaptive choice patterns.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]  (Softmax inverse temperature)
+    pi: [0, 5]     (Perseveration scaling factor)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pi = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 policy after adding an anxiety-scaled bonus
+        to the value of the action taken on the previous trial.
+        """
+        q_effective = self.q_stage1.copy()
+        
+        # Add the stickiness bonus only after the first trial
+        if self.trial > 0 and self.last_action1 is not None:
+            perseveration_bonus = self.pi * self.stai
+            q_effective[self.last_action1] += perseveration_bonus
+            
+        return self.softmax(q_effective, self.beta)
+
+    # This model uses the default value_update from the CognitiveModelBase class
+    # as the learning mechanism itself is not hypothesized to change.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Enhanced Aversive Learning and Decision Noise
+
+This model posits a dual influence of anxiety. First, it amplifies learning from negative outcomes, reflecting a hypersensitivity to aversive events. Second, it increases randomness in decision-making, reflecting anxious indecision or a strategy to avoid commitment to a single, potentially poor, option.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety has a dual effect on decision-making: it enhances
+    learning from negative prediction errors and increases decision stochasticity.
+    This model implements two mechanisms:
+    1. Asymmetric learning: The learning rate is higher for worse-than-expected
+       outcomes, and this asymmetry is scaled by the STAI score.
+    2. Decision noise: The softmax temperature is modulated by the STAI score,
+       making choices more random (less deterministic) for more anxious individuals.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]    (Base learning rate)
+    beta_base: [0, 10]   (Base inverse temperature)
+    kappa_alpha: [0, 1]  (Anxiety's influence on aversive learning)
+    kappa_beta: [0, 1]   (Anxiety's influence on decision noise)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta_base, self.kappa_alpha, self.kappa_beta = model_parameters
+
+    def init_model(self) -> None:
+        """
+        Calculate an effective beta for the entire session, reduced by anxiety.
+        A lower beta means higher temperature/more random choices.
+        """
+        # kappa_beta scales the reduction; max reduction at stai=1 is kappa_beta
+        reduction_factor = self.stai * self.kappa_beta
+        self.effective_beta = self.beta_base * (1 - reduction_factor)
+        # Ensure beta does not become negative
+        self.effective_beta = max(0, self.effective_beta)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the anxiety-modulated beta."""
+        return self.softmax(self.q_stage1, self.effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using the anxiety-modulated beta."""
+        return self.softmax(self.q_stage2[state], self.effective_beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using an asymmetric learning rate, where learning from
+        negative prediction errors is boosted by the participant's anxiety level.
+        """
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_base
+        if delta_2 < 0:
+            # Increase alpha for negative PEs, scaled by anxiety
+            alpha_2 += self.kappa_alpha * self.stai
+        self.q_stage2[state, action_2] += np.clip(alpha_2, 0, 1) * delta_2
+        
+        # Stage-1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_base
+        if delta_1 < 0:
+            # Increase alpha for negative PEs, scaled by anxiety
+            alpha_1 += self.kappa_alpha * self.stai
+        self.q_stage1[action_1] += np.clip(alpha_1, 0, 1) * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

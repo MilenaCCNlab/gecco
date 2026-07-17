@@ -1,0 +1,180 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces "Post-Error Panic" (Increased Decision Noise).
+    
+    When an anxious participant receives a negative outcome (0 coins), their 
+    anxiety spikes, leading to more erratic/noisy behavior in the subsequent trial.
+    This is modeled by reducing the inverse temperature (beta) for the next trial
+    proportional to their STAI score after a loss.
+
+    Mechanism:
+    If last_reward == 0:
+        beta_effective = beta_base / (1 + panic_sensitivity * STAI)
+    Else:
+        beta_effective = beta_base
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    panic_sens: [0, 10] (Sensitivity of beta modulation to anxiety after loss)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.panic_sens = model_parameters
+        self.current_beta = self.beta_base
+
+    def pre_trial(self) -> None:
+        # If the previous trial resulted in no reward (loss), anxiety increases noise (lowers beta)
+        if self.last_reward is not None and self.last_reward == 0.0:
+            # Denominator > 1 reduces beta, making choices more random
+            self.current_beta = self.beta_base / (1.0 + self.panic_sens * self.stai)
+        else:
+            self.current_beta = self.beta_base
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.q_stage1, self.current_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.softmax(self.q_stage2[state], self.current_beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety drives "Hyper-vigilant Model-Based Learning".
+    
+    Anxious participants may perceive the environment as unstable. Instead of 
+    relying on fixed transition probabilities or slow habit formation, they 
+    actively learn the transition structure (Spaceship -> Planet) with a learning 
+    rate that scales with anxiety. They use this learned model to compute Stage 1 values.
+
+    Mechanism:
+    1. Maintain a learned transition matrix T_learned.
+    2. Update T_learned after every transition:
+       learning_rate_trans = eta_base * (1 + STAI)
+    3. Stage 1 values are computed via Model-Based planning:
+       Q_MB(a1) = T(a1, sX)*V(sX) + T(a1, sY)*V(sY)
+       where V(s) = max(Q_stage2(s, :))
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Stage 2 values)
+    beta: [0, 10]
+    eta_base: [0, 1] (Base learning rate for transition structure)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition probabilities (Action x State) to uniform 0.5
+        # Row 0: Action A, Row 1: Action U
+        # Col 0: Planet X, Col 1: Planet Y
+        self.trans_probs = 0.5 * np.ones((2, 2))
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based Valuation
+        # V(state) is the max Q-value available in that state (greedy estimate)
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Q_MB = T * V
+        # (2x2) @ (2,) -> (2,)
+        q_mb = self.trans_probs @ v_stage2
+        
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 Values (Standard Q-Learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Transition Model (Hyper-vigilant learning)
+        # Effective transition learning rate scales with anxiety
+        eta_eff = self.eta_base * (1.0 + self.stai)
+        eta_eff = min(eta_eff, 1.0) # Cap at 1
+        
+        # Update the row corresponding to the chosen spaceship (action_1)
+        # Increase prob of observed state, decrease prob of unobserved state
+        # We use a simple delta rule: New = Old + eta * (Target - Old)
+        # Target is 1 for the observed state, 0 for the other
+        
+        # Update for the observed state
+        self.trans_probs[action_1, state] += eta_eff * (1.0 - self.trans_probs[action_1, state])
+        
+        # Update for the unobserved state (assuming binary states 0 and 1)
+        other_state = 1 - state
+        self.trans_probs[action_1, other_state] += eta_eff * (0.0 - self.trans_probs[action_1, other_state])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety amplifies "Relief Learning" (Positive Prediction Errors).
+    
+    While some theories suggest anxiety heightens sensitivity to punishment, 
+    others suggest anxious individuals are driven by the relief of avoiding 
+    negative outcomes or securing safety (gold). This model hypothesizes that 
+    anxiety amplifies the learning rate specifically when the outcome is 
+    better than expected (Positive Prediction Error).
+
+    Mechanism:
+    Calculate Prediction Error (PE).
+    If PE > 0:
+        alpha_eff = alpha_base * (1 + relief_amp * STAI)
+    Else:
+        alpha_eff = alpha_base
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]
+    beta: [0, 10]
+    relief_amp: [0, 5] (Amplification factor for positive PEs)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.relief_amp = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # --- Stage 2 Update ---
+        pe_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine alpha based on PE sign
+        if pe_2 > 0:
+            # Relief/Gain amplification
+            alpha_2 = self.alpha_base * (1.0 + self.relief_amp * self.stai)
+            alpha_2 = min(alpha_2, 1.0)
+        else:
+            alpha_2 = self.alpha_base
+            
+        self.q_stage2[state, action_2] += alpha_2 * pe_2
+        
+        # --- Stage 1 Update ---
+        # We apply the same logic: if the transition led to a state with higher value 
+        # than expected, anxiety might amplify that "good news".
+        pe_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        if pe_1 > 0:
+            alpha_1 = self.alpha_base * (1.0 + self.relief_amp * self.stai)
+            alpha_1 = min(alpha_1, 1.0)
+        else:
+            alpha_1 = self.alpha_base
+
+        self.q_stage1[action_1] += alpha_1 * pe_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

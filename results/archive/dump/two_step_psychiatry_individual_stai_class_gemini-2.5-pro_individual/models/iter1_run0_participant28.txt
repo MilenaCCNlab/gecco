@@ -1,0 +1,177 @@
+As a cognitive scientist and Python programmer, I will propose three distinct models to explain this participant's behavior. Given their high score on the STAI anxiety questionnaire (0.6625), each model will formalize a specific hypothesis about how anxiety influences decision-making in this two-step task. The models will explore anxiety's impact on planning strategies, learning from feedback, and choice consistency.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+
+This model tests the hypothesis that anxiety impairs complex, goal-directed planning, causing a shift towards simpler, habitual strategies. In the context of this task, this means relying less on a "model-based" system (which understands the spaceship-to-planet transition probabilities) and more on a "model-free" system (which learns action values directly from rewards).
+
+**Cognitive Hypothesis:** High anxiety biases the arbitration between model-based and model-free reinforcement learning systems, favoring the less cognitively demanding model-free approach. The model implements a hybrid controller where the weight given to the model-based system is inversely proportional to the participant's STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety biases decision-making away from computationally
+    expensive model-based planning towards simpler model-free habits. The model
+    computes stage-1 values as a weighted average of a model-based (MB) and a
+    model-free (MF) controller. The weight on the MB controller, 'w', is
+    inversely scaled by the participant's anxiety score (stai), such that
+    higher anxiety leads to more model-free behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (learning rate for MF and stage-2 values)
+    beta: [0, 10]       (choice temperature)
+    w_base: [0, 1]      (base weighting of the model-based system)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize MF Q-values and calculate anxiety-modulated weight."""
+        # The weight 'w' for the model-based system is scaled down by anxiety.
+        self.w = self.w_base * (1 - self.stai)
+        
+        # We need a separate value table for the model-free stage-1 learner.
+        self.q_mf_stage1 = np.zeros(self.n_choices)
+
+    def pre_trial(self) -> None:
+        """Compute hybrid Q-values before stage-1 choice."""
+        # 1. Compute Model-Based (MB) values for stage 1
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for action in range(self.n_choices):
+            # Q_MB(a) = sum over states s [ P(s|a) * max_a'(Q(s, a')) ]
+            expected_future_value = np.dot(self.T[action], np.max(self.q_stage2, axis=1))
+            q_mb_stage1[action] = expected_future_value
+            
+        # 2. Combine MB and MF values to get the final stage-1 Q-values
+        self.q_stage1 = self.w * q_mb_stage1 + (1 - self.w) * self.q_mf_stage1
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Override the base update rule.
+        Update stage-2 values and the model-free stage-1 values.
+        The hybrid stage-1 values are computed in pre_trial, not updated here.
+        """
+        # Stage-2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Model-Free Stage-1 update
+        # The 'reward' for the stage-1 action is the value of the resulting state
+        stage1_target = np.max(self.q_stage2[state])
+        delta_mf_1 = stage1_target - self.q_mf_stage1[action_1]
+        self.q_mf_stage1[action_1] += self.alpha * delta_mf_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Asymmetric Learning from Outcomes
+
+This model explores the idea that anxiety induces a "better safe than sorry" learning bias. Individuals with high anxiety may be hyper-vigilant to negative feedback, learning more from outcomes that are worse than expected.
+
+**Cognitive Hypothesis:** Anxiety amplifies the impact of negative prediction errors on learning. The model uses a standard reinforcement learning framework but boosts the learning rate (`alpha`) whenever an outcome is worse than expected (a negative prediction error). The magnitude of this boost is proportional to the participant's STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases sensitivity to negative outcomes, leading to
+    faster learning from punishments or omitted rewards. This model implements
+    asymmetric learning rates, where the learning rate for negative prediction
+    errors is amplified as a function of the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (base learning rate)
+    beta: [0, 10]       (choice temperature)
+    neg_bias: [0, 5]    (scales the impact of anxiety on negative PE learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.neg_bias = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate the anxiety-driven multiplier for negative learning."""
+        self.alpha_neg_multiplier = 1 + self.neg_bias * self.stai
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using asymmetric learning rates modulated by anxiety.
+        """
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha * self.alpha_neg_multiplier if delta_2 < 0 else self.alpha
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage-1 update
+        # The base class uses a TD(0) update where the target is the value of the
+        # state reached, which here is the *updated* stage-2 value.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha * self.alpha_neg_multiplier if delta_1 < 0 else self.alpha
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Choice Consistency
+
+This model proposes that anxiety has a dissociable effect on different stages of decision-making. Specifically, it might disrupt high-level, abstract planning (making the initial spaceship choice more random) while simultaneously promoting rigid, focused execution once a sub-goal is established (making the second-stage alien choice more deterministic).
+
+**Cognitive Hypothesis:** Anxiety differentially affects choice consistency at different levels of the decision hierarchy. It degrades the quality of initial, strategic choices (lower stage-1 `beta`) but enhances the exploitation of learned values in subsequent, tactical choices (higher stage-2 `beta`). This effect is scaled by the participant's STAI score.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety has dissociable effects on choice consistency across
+    the decision hierarchy. It is hypothesized to increase randomness in the
+    initial, strategic choice (stage 1) but increase determinism in the
+    subsequent, tactical choice (stage 2). This is modeled by having the STAI
+    score decrease the stage-1 softmax beta and increase the stage-2 beta.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           (learning rate)
+    beta_base: [0, 10]      (baseline choice temperature)
+    beta_anx_effect: [0, 1] (strength of anxiety's modulation on beta)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.beta_anx_effect = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate separate, anxiety-modulated betas for each stage."""
+        anxiety_modulation = self.beta_anx_effect * self.stai
+        
+        # Stage-1 beta decreases with anxiety, leading to more random choices.
+        # Clipped at a small positive value to avoid zero or negative betas.
+        self.beta1 = np.maximum(0.01, self.beta_base * (1 - anxiety_modulation))
+        
+        # Stage-2 beta increases with anxiety, leading to more deterministic choices.
+        self.beta2 = self.beta_base * (1 + anxiety_modulation)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the stage-1 beta."""
+        return self.softmax(self.q_stage1, self.beta1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using the stage-2 beta."""
+        return self.softmax(self.q_stage2[state], self.beta2)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        The learning rule is the standard one from the base class.
+        This model only changes the policy functions.
+        """
+        # We use a slightly different TD update for stage 1 to better reflect
+        # the value of the state reached *before* the stage 2 update.
+        q_s2_max_pre_update = np.max(self.q_stage2[state])
+        
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage-1 update
+        delta_1 = q_s2_max_pre_update - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

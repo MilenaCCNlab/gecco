@@ -1,0 +1,236 @@
+Here are three new cognitive models that incorporate STAI scores into the decision-making process in the two-step task.
+
+### Model 1: Anxiety-Modulated Transition Learning
+This model hypothesizes that high anxiety impairs the ability to learn or update the transition structure of the environment (the map between spaceships and planets). While standard models assume a fixed transition matrix (0.7/0.3), this model assumes participants learn the transition matrix online, but anxiety acts as noise or a dampener on this learning process. High anxiety participants might rely on a "fuzzier" or slower-to-update map of the world.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Transition Learning Model.
+    
+    Hypothesis: Participants learn the transition matrix (Space -> Planet) online rather 
+    than assuming it is fixed. Anxiety interferes with this learning. Specifically, 
+    higher anxiety reduces the learning rate for state transitions, making the 
+    model-based system less responsive to changes or rare transitions.
+
+    Parameters:
+    - learning_rate_reward: [0, 1] Learning rate for reward values (Q-values).
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - lr_transition_base: [0, 1] Base learning rate for the transition matrix.
+    - anxiety_damp: [0, 1] How much STAI reduces the transition learning rate.
+      Effective transition LR = lr_transition_base * (1 - anxiety_damp * stai).
+    """
+    learning_rate_reward, beta, w, lr_transition_base, anxiety_damp = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Effective learning rate for transitions is dampened by anxiety
+    lr_transition = lr_transition_base * (1.0 - (anxiety_damp * stai_score))
+    # Ensure it doesn't go below 0
+    if lr_transition < 0: lr_transition = 0.0
+
+    # Initialize transition matrix (start with uniform or slight prior, here 0.5 for neutrality)
+    # Rows: Action 1 (0 or 1), Cols: State (0 or 1)
+    # We track counts or probabilities. Let's track probabilities directly.
+    trans_probs = np.array([[0.5, 0.5], [0.5, 0.5]]) 
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Policy ---
+        # Model-Based Value: Use current estimated transition matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = trans_probs @ max_q_stage2
+
+        # Net Value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # --- Updates ---
+        # 1. Update Reward Q-values (Standard TD)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate_reward * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate_reward * delta_stage2
+
+        # 2. Update Transition Matrix Estimation
+        # We observed action_1 -> state_idx. Increase prob of this transition, decrease others.
+        # Simple delta rule for probability estimation: P_new = P_old + lr * (Outcome - P_old)
+        # Outcome is 1 if state occurred, 0 otherwise.
+        
+        # Update for the chosen action (row)
+        a1 = action_1[trial]
+        # For the state that happened: target is 1
+        trans_probs[a1, state_idx] += lr_transition * (1 - trans_probs[a1, state_idx])
+        # For the state that didn't happen: target is 0
+        other_state = 1 - state_idx
+        trans_probs[a1, other_state] += lr_transition * (0 - trans_probs[a1, other_state])
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Induced Pessimism Bias
+This model posits that anxiety introduces a "pessimism bias" into the valuation of states. Instead of calculating the expected value of the second stage purely based on learned Q-values, anxious participants subtract a penalty from their expectations, effectively assuming that the environment is less rewarding than it actually is. This affects the Model-Based calculation specifically, as they simulate future possibilities with a pessimistic filter.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Pessimism Bias Model.
+    
+    Hypothesis: Anxiety leads to a pessimistic valuation of future states. When calculating
+    Model-Based values (planning), high-anxiety participants subtract a 'pessimism penalty'
+    from the maximum value of the second stage states. This makes them less likely to 
+    pursue paths that require navigating through uncertain states, or simply undervalue
+    the environment generally.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - pessimism_bias: [0, 2] Base magnitude of the pessimistic penalty.
+      Penalty = pessimism_bias * stai.
+    """
+    learning_rate, beta, w, pessimism_bias = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    penalty = pessimism_bias * stai_score
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        # Calculate max value of stage 2 states
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # Apply Pessimism: Reduce the perceived value of the next states
+        # The penalty is applied to the values before being multiplied by transition probs
+        pessimistic_values = max_q_stage2 - penalty
+        
+        q_stage1_mb = transition_matrix @ pessimistic_values
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Retreat to Habit (Dynamic W)
+This model suggests that the balance between Model-Based (goal-directed) and Model-Free (habitual) control is not static but fluctuates based on recent negative outcomes, mediated by anxiety. Specifically, when an anxious participant experiences a "loss" (reward = 0), they retreat to the safety of the habitual (Model-Free) system more aggressively than low-anxiety participants. The parameter `w` (weight) becomes dynamic.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Retreat to Habit Model.
+    
+    Hypothesis: The weight between Model-Based and Model-Free control (w) is dynamic.
+    High anxiety participants are more sensitive to lack of reward. When they receive
+    0 reward, their 'w' decreases (shifting to Model-Free/Habit) more significantly 
+    than low anxiety participants. 'w' slowly recovers to a baseline.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w_base: [0, 1] The baseline/resting weight for Model-Based control.
+    - retreat_factor: [0, 1] How much 'w' drops after a loss, scaled by STAI.
+      New w = current_w * (1 - retreat_factor * stai).
+    - recovery_rate: [0, 1] How quickly 'w' returns to w_base on each trial.
+    """
+    learning_rate, beta, w_base, retreat_factor, recovery_rate = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Initialize dynamic w at the baseline
+    current_w = w_base
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        # Use dynamic current_w
+        q_net = current_w * q_stage1_mb + (1 - current_w) * q_stage1_mf
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # --- Stage 2 Policy ---
+        state_idx = state[trial]
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # --- Dynamic W Update ---
+        # 1. Recovery step: move towards baseline
+        current_w += recovery_rate * (w_base - current_w)
+        
+        # 2. Reaction to outcome: if reward is 0, retreat towards MF (reduce w)
+        # The magnitude of retreat depends on STAI.
+        if reward[trial] == 0:
+            drop = retreat_factor * stai_score
+            # Apply multiplicative reduction
+            current_w = current_w * (1.0 - drop)
+        
+        # Clip to ensure bounds
+        if current_w < 0: current_w = 0
+        if current_w > 1: current_w = 1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

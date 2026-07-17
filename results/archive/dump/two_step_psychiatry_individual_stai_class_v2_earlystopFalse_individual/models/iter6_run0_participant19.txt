@@ -1,0 +1,133 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Stiffened Exploration
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Stiffened Exploration]
+    This model hypothesizes that anxiety reduces exploration by increasing the 
+    determinism of choices (stiffening). Anxious participants are assumed to be 
+    less tolerant of uncertainty and thus exploit perceived high-value options 
+    more rigidly. This is modeled by modulating the inverse temperature (beta) 
+    parameter with the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta_base: [0, 10]
+    stiff_scale: [0, 10] (Scaling factor for anxiety's effect on beta)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, beta_base, stiff_scale = model_parameters
+        # Calculate the effective beta once, as STAI is constant for the participant
+        # Higher anxiety -> Higher beta -> More deterministic (stiff) choices
+        self.beta = beta_base * (1.0 + stiff_scale * self.stai)
+
+    # No need to override policy methods; they use self.beta which is now modulated.
+    # No need to override value_update; standard TD learning is assumed.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Transition Instability
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Modulated Transition Instability]
+    This model hypothesizes that anxiety leads to instability in the participant's 
+    internal model of the environment. Specifically, anxious participants update 
+    their beliefs about spaceship-planet transitions (the "world model") too 
+    rapidly in response to outcomes. This is implemented as a Model-Based controller 
+    where the learning rate for the transition matrix T is proportional to STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Stage 2 reward values)
+    beta: [0, 10]
+    lr_trans_scale: [0, 1] (Scaling factor for transition learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lr_trans_scale = model_parameters
+        self.lr_trans = self.lr_trans_scale * self.stai
+
+    def policy_stage1(self) -> np.ndarray:
+        # Pure Model-Based Valuation for Stage 1
+        # Q_MB(a1) = Sum_s2 [ T(s2|a1) * Max_a2(Q_stage2(s2, a2)) ]
+        
+        # Calculate max value of each state (planet)
+        max_q2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Compute expected value for each spaceship using current transition matrix T
+        q_mb = np.dot(self.T, max_q2)
+        
+        return self.softmax(q_mb, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update Transition Matrix T based on observed transition
+        # T[action, state] moves towards 1.0
+        # T[action, other_state] moves towards 0.0
+        
+        # Current probability of the observed transition
+        curr_prob = self.T[action_1, state]
+        
+        # Update rule: New = Old + LR * (Target - Old)
+        # Target is 1 for the observed state
+        self.T[action_1, state] += self.lr_trans * (1.0 - curr_prob)
+        
+        # The other state's probability must decrease to maintain sum=1
+        other_state = 1 - state
+        self.T[action_1, other_state] = 1.0 - self.T[action_1, state]
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Direct Reinforcement
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    [HYPOTHESIS: Anxiety-Driven Direct Reinforcement]
+    This model hypothesizes that anxiety impairs the formation of complex 
+    model-based or chained associations (Stage 1 -> State -> Stage 2 -> Reward). 
+    Instead, anxiety promotes a simpler "Direct Reinforcement" mechanism where 
+    the Stage 1 choice is reinforced directly by the final reward, ignoring the 
+    intermediate step. The weight of this direct reinforcement relative to 
+    standard TD chaining is modulated by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    direct_scale: [0, 1] (Weight of direct reinforcement, scaled by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.direct_scale = model_parameters
+        # Calculate mixing weight w. 
+        # w=0 -> Pure TD (Standard). w=1 -> Pure Direct Reinforcement.
+        self.w = np.clip(self.direct_scale * self.stai, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 values (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # 2. Update Stage 1 values (Hybrid)
+        
+        # Path A: Standard TD Chaining (Model-Free)
+        # Reinforce action_1 based on the value of the state it led to
+        delta_td = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Path B: Direct Reinforcement
+        # Reinforce action_1 based directly on the final reward obtained
+        delta_direct = reward - self.q_stage1[action_1]
+        
+        # Combined Update
+        combined_delta = (1 - self.w) * delta_td + self.w * delta_direct
+        self.q_stage1[action_1] += self.alpha * combined_delta
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

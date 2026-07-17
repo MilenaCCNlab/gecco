@@ -1,0 +1,229 @@
+Here are three cognitive models that incorporate the participant's high anxiety score (STAI = 0.6625) into the decision-making process. The models hypothesize different ways anxiety might affect learning and choice in this two-step task.
+
+### Model 1: Anxiety-Modulated Model-Based vs. Model-Free Control
+This model hypothesizes that high anxiety impairs model-based planning (goal-directed behavior) and increases reliance on model-free (habitual) learning. The STAI score is used to determine the mixing weight (`w`) between the two systems. A higher STAI score reduces `w` (less model-based influence).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid Model-Based/Model-Free RL with Anxiety-Modulated Mixing Weight.
+    
+    Hypothesis: High anxiety (STAI) reduces cognitive resources for model-based planning,
+    shifting control towards model-free habits. The mixing parameter 'w' is scaled
+    down by the STAI score.
+    
+    Bounds:
+    learning_rate: [0,1]
+    beta_1: [0,10] (inverse temp for step 1)
+    beta_2: [0,10] (inverse temp for step 2)
+    w_baseline: [0,1] (baseline mixing weight)
+    """
+    learning_rate, beta_1, beta_2, w_baseline = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0] # 0.6625 for this participant
+  
+    # Anxiety modulation: Higher anxiety reduces the effective mixing weight (w).
+    # We clip to ensure w stays in [0, 1].
+    # If stai is high, (1-stai) is small, reducing the model-based contribution.
+    # We use a simple multiplicative scaling.
+    w = w_baseline * (1.0 - (stai_val * 0.5)) # Scaling factor to allow variability
+    w = np.clip(w, 0.0, 1.0)
+
+    # Fixed transition matrix as per task description (A->X 0.7, U->Y 0.7)
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Q-values
+    q_stage1_mf = np.zeros(2) # Model-free values for stage 1
+    q_stage2_mf = np.zeros((2, 2)) # Model-free values for stage 2 (State x Action)
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        # Model-Based Value Calculation
+        # Max Q-value available at stage 2 for each state
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        # Bellman equation: Transition prob * val of next state
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Hybrid Value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Softmax Policy Stage 1
+        exp_q1 = np.exp(beta_1 * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        # Transition
+        a1 = int(action_1[trial])
+        s_idx = int(state[trial]) # The planet we actually arrived at
+
+        # --- Stage 2 Choice ---
+        # Standard Model-Free Q-learning for the second step
+        qs_stage2 = q_stage2_mf[s_idx]
+        exp_q2 = np.exp(beta_2 * qs_stage2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        # --- Updates ---
+        a2 = int(action_2[trial])
+        r = reward[trial]
+        
+        # TD Errors
+        # Stage 2 update (standard Q-learning)
+        delta_stage2 = r - q_stage2_mf[s_idx, a2]
+        q_stage2_mf[s_idx, a2] += learning_rate * delta_stage2
+        
+        # Stage 1 update (SARSA-style TD(1) for model-free component)
+        # Note: In pure MF, we update q1 based on q2.
+        # But commonly in 2-step tasks, we update Q1 based on the Q2 value of the chosen action 
+        # or the raw reward (direct reinforcement). Here we use standard TD(0) from Q2.
+        delta_stage1 = q_stage2_mf[s_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Learning Rate Asymmetry (Punishment Sensitivity)
+This model hypothesizes that high anxiety leads to hypersensitivity to negative outcomes (lack of reward). The STAI score amplifies the learning rate specifically when the reward is zero (which acts as a "punishment" or omission in this context), causing the participant to abandon choices faster after failure.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model-Free RL with Anxiety-Modulated Punishment Sensitivity.
+    
+    Hypothesis: High anxiety increases the learning rate for negative prediction errors 
+    (loss/no reward). The STAI score boosts 'alpha_neg'.
+    
+    Bounds:
+    alpha_pos: [0,1] (learning rate for positive RPE)
+    alpha_base_neg: [0,1] (base learning rate for negative RPE)
+    beta: [0,10]
+    lambda_eligibility: [0,1] (eligibility trace for stage 1 update)
+    """
+    alpha_pos, alpha_base_neg, beta, lambda_eligibility = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    # Anxiety modulation: Boost negative learning rate.
+    # If STAI is high (e.g., 0.66), alpha_neg becomes significantly larger than base.
+    # We clip it to ensure it remains a valid probability.
+    alpha_neg = alpha_base_neg * (1.0 + stai_val)
+    alpha_neg = np.clip(alpha_neg, 0.0, 1.0)
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1 = np.zeros(2)
+    q_stage2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 ---
+        exp_q1 = np.exp(beta * q_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        a1 = int(action_1[trial])
+        s_idx = int(state[trial])
+
+        # --- Stage 2 ---
+        exp_q2 = np.exp(beta * q_stage2[s_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Updates ---
+        # Stage 2 Prediction Error
+        delta_2 = r - q_stage2[s_idx, a2]
+        
+        # Determine Learning Rate based on sign of PE
+        lr_2 = alpha_pos if delta_2 >= 0 else alpha_neg
+        
+        q_stage2[s_idx, a2] += lr_2 * delta_2
+        
+        # Stage 1 Prediction Error (using eligibility trace lambda)
+        # We update Stage 1 based on the reward received at Stage 2
+        # This is a simplified TD(lambda) logic often used in these tasks.
+        delta_1 = r - q_stage1[a1]
+        
+        lr_1 = alpha_pos if delta_1 >= 0 else alpha_neg
+        
+        q_stage1[a1] += lr_1 * lambda_eligibility * delta_1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Induced Exploration Noise (Inverse Temperature Modulation)
+This model hypothesizes that high anxiety creates "noise" or uncertainty in decision-making, effectively lowering the inverse temperature parameter ($\beta$). A high STAI score makes choice behavior more stochastic (random) rather than strictly value-maximizing, reflecting difficulty in concentrating or decisional conflict.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Pure Model-Based RL with Anxiety-Modulated Exploration (Beta).
+    
+    Hypothesis: Anxiety acts as a distractor, increasing decision noise.
+    The effective beta (inverse temperature) is reduced by the STAI score.
+    Higher anxiety = Lower beta = More random choices.
+    
+    Bounds:
+    learning_rate: [0,1]
+    beta_base: [0,10] (baseline inverse temperature)
+    beta_stai_param: [0,5] (how strongly STAI reduces beta)
+    """
+    learning_rate, beta_base, beta_stai_param = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+  
+    # Anxiety modulation: Reduce beta based on anxiety.
+    # Effective Beta = Base / (1 + param * STAI)
+    # If STAI is 0, beta = beta_base.
+    # If STAI is high, beta decreases (more exploration/noise).
+    beta = beta_base / (1.0 + (beta_stai_param * stai_val))
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Pure Model-Based typically doesn't track Q1 directly, 
+    # it calculates it on the fly from Q2 and the transition matrix.
+    q_stage2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 (Model-Based Calculation) ---
+        max_q_stage2 = np.max(q_stage2, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        exp_q1 = np.exp(beta * q_stage1_mb)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[int(action_1[trial])]
+        
+        s_idx = int(state[trial])
+
+        # --- Stage 2 ---
+        qs_stage2 = q_stage2[s_idx]
+        exp_q2 = np.exp(beta * qs_stage2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[int(action_2[trial])]
+        
+        # --- Updates ---
+        a2 = int(action_2[trial])
+        r = reward[trial]
+        
+        # Update Stage 2 values
+        delta = r - q_stage2[s_idx, a2]
+        q_stage2[s_idx, a2] += learning_rate * delta
+        
+        # Note: In pure Model-Based, we don't update a separate Q1 table.
+        # Q1 is derived dynamically in the next loop iteration.
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

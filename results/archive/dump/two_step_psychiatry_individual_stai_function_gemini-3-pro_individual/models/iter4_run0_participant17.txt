@@ -1,0 +1,226 @@
+Here are three new cognitive models that explore different mechanisms by which anxiety (STAI) might influence decision-making in the two-step task.
+
+### Model 1: Anxiety-Modulated Inverse Temperature (Exploration/Exploitation)
+This model hypothesizes that high anxiety leads to "noise" or increased exploration (or paradoxically, rigid exploitation depending on the sign) in decision-making. Instead of modulating the learning rate or the mixture weight directly, STAI scales the `beta` (inverse temperature) parameter. A high STAI score might lower `beta`, making choices more random (representing uncertainty or panic), or raise it (representing rigid, risk-averse adherence to current values).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Inverse Temperature Model.
+
+    Hypothesis: Anxiety (STAI) affects the balance between exploration and exploitation.
+    Here, the effective beta (inverse temperature) is modulated by the STAI score.
+    Higher anxiety might lead to lower beta (more randomness/uncertainty) or higher beta (rigidity).
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta_base: [0, 10] Baseline inverse temperature.
+    - w: [0, 1] Weight for model-based control (fixed).
+    - beta_mod: [0, 5] Magnitude of STAI modulation on beta. 
+      Effective beta = beta_base * (1 + beta_mod * (0.5 - stai)) 
+      (Centered around medium anxiety 0.5 to allow bidirectional effects).
+    """
+    learning_rate, beta_base, w, beta_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Modulate beta based on anxiety. 
+    # If stai > 0.5 (high anxiety), the term (0.5 - stai) is negative, potentially reducing beta.
+    # We clip to ensure beta stays non-negative.
+    effective_beta = max(0.0, beta_base * (1.0 + beta_mod * (0.5 - stai_score)))
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(effective_beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = int(state[trial])
+        a1 = int(action_1[trial])
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(effective_beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Updates ---
+        # Stage 2 update (Standard Q-learning)
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        # Stage 1 update (TD(0) / SARSA-like using Stage 2 Q-value)
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Dependent Eligibility Trace (Lambda)
+This model tests the hypothesis that anxiety affects how deeply participants link outcomes back to initial choices. In Reinforcement Learning, an eligibility trace ($\lambda$) controls how much the Stage 1 value is updated by the final reward (Stage 2 outcome). A high anxiety participant might have a "short-sighted" learning process (low $\lambda$), focusing only on immediate states, or a "ruminative" process (high $\lambda$), over-attributing outcomes to the very first decision.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Dependent Eligibility Trace (Lambda) Model.
+
+    Hypothesis: Anxiety influences the credit assignment process. 
+    Instead of a fixed mixture of MB/MF, this model uses a pure Model-Free approach 
+    but with an eligibility trace (lambda) that is determined by the STAI score.
+    
+    Parameters:
+    - learning_rate: [0, 1] Learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - lambda_base: [0, 1] Baseline eligibility trace parameter.
+    - lambda_mod: [0, 1] Strength of STAI modulation on lambda.
+      lambda = lambda_base + lambda_mod * (stai - 0.5)
+    """
+    learning_rate, beta, lambda_base, lambda_mod = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate lambda based on anxiety. 
+    # High anxiety (stai > 0.5) increases lambda (ruminative credit assignment) 
+    # or decreases it depending on the sign of lambda_mod found during fitting.
+    # We clip to [0, 1].
+    eligibility_lambda = np.clip(lambda_base + lambda_mod * (stai_score - 0.5), 0.0, 1.0)
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1 = np.zeros(2)
+    q_stage2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        # Pure Model-Free choice at Stage 1 for this specific hypothesis
+        exp_q1 = np.exp(beta * q_stage1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        a1 = int(action_1[trial])
+        state_idx = int(state[trial])
+
+        # --- Stage 2 Choice ---
+        exp_q2 = np.exp(beta * q_stage2[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Updates using Eligibility Trace (TD(lambda)) ---
+        
+        # 1. Prediction error at Stage 2 (Reward - Expectation)
+        delta_2 = r - q_stage2[state_idx, a2]
+        
+        # 2. Prediction error at Stage 1 (Stage 2 Value - Stage 1 Value)
+        # Note: We use the value of the chosen state/action in stage 2 as the target
+        delta_1 = q_stage2[state_idx, a2] - q_stage1[a1]
+
+        # Update Stage 2
+        q_stage2[state_idx, a2] += learning_rate * delta_2
+        
+        # Update Stage 1
+        # In TD(lambda), Stage 1 is updated by its own error (delta_1) 
+        # PLUS a portion (lambda) of the Stage 2 error (delta_2).
+        q_stage1[a1] += learning_rate * (delta_1 + eligibility_lambda * delta_2)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Perseveration (Stickiness)
+This model posits that anxiety manifests as "perseveration" or "stickiness"—a tendency to repeat the previous choice regardless of reward history, potentially as a safety behavior or cognitive inflexibility. The `stickiness` parameter is directly derived from the STAI score.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Perseveration (Stickiness) Model.
+
+    Hypothesis: High anxiety leads to repetitive behavior (perseveration/stickiness) 
+    regardless of reward outcomes. We add a 'stickiness' bonus to the Q-value 
+    of the previously chosen action, scaled by STAI.
+
+    Parameters:
+    - learning_rate: [0, 1] Learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Model-based weight.
+    - stick_base: [0, 5] Baseline stickiness parameter.
+    - stick_stai_scale: [0, 5] How much STAI amplifies stickiness.
+    """
+    learning_rate, beta, w, stick_base, stick_stai_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Stickiness increases with STAI
+    stickiness_bonus = stick_base + (stick_stai_scale * stai_score)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    # Track previous choice (initialize to -1 or handle first trial separately)
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # --- Stage 1 Choice ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Add stickiness bonus to the Q-values before softmax
+        q_net_sticky = q_net.copy()
+        if last_action_1 != -1:
+            q_net_sticky[last_action_1] += stickiness_bonus
+        
+        exp_q1 = np.exp(beta * q_net_sticky)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        a1 = int(action_1[trial])
+        last_action_1 = a1 # Update for next trial
+        state_idx = int(state[trial])
+
+        # --- Stage 2 Choice ---
+        # (Stickiness usually modeled primarily at Stage 1 in this task literature, 
+        # but could apply to Stage 2. Here we keep Stage 2 standard for simplicity).
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Updates ---
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

@@ -1,0 +1,148 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant makes decisions in the two-step task, incorporating their medium anxiety (STAI score = 0.35) into the decision-making process.
+
+### Participant Data Summary and Key Observations:
+The participant initially shows a strong preference for `spaceship 0.0`, but around trial 23, they switch to `spaceship 1.0`. There's also some switching between aliens within a planet, especially later on. The participant experiences a mix of rewards (1.0 coins) and losses (0.0 coins). The STAI score of 0.35 places them in the "medium anxiety" category.
+
+### Cognitive Models
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant learns differently from positive
+    and negative reward prediction errors (RPEs). Specifically, they are more sensitive
+    to negative outcomes (losses), and this sensitivity is amplified by their anxiety
+    level (STAI score). Higher anxiety leads to a greater learning rate when outcomes
+    are worse than expected (negative RPEs), making them devalue options more quickly
+    after negative experiences. Positive RPEs are learned at a fixed rate.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive reward prediction errors.
+    alpha_neg_base: [0, 1] - Base learning rate for negative reward prediction errors.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    stai_neg_rpe_factor: [0, 1] - Factor by which STAI score increases the negative RPE learning rate.
+                                  (e.g., effective_alpha_neg = alpha_neg_base + stai_neg_rpe_factor * stai)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta, self.stai_neg_rpe_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective negative learning rate, ensuring it stays within [0, 1]
+        effective_alpha_neg = np.clip(self.alpha_neg_base + self.stai_neg_rpe_factor * self.stai, 0, 1)
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += effective_alpha_neg * delta_2
+
+        # Stage 1 update (model-free TD learning with the updated Stage 2 value as target)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += effective_alpha_neg * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants combine model-free (habitual)
+    and model-based (goal-directed) control for their Stage 1 decisions. Anxiety
+    (STAI score) modulates the weighting of these two systems, with higher anxiety
+    leading to a reduced reliance on the more computationally intensive model-based
+    planning, favoring simpler model-free strategies.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    w_base: [0, 1] - Base weight for model-based control (0 = pure MF, 1 = pure MB).
+    stai_w_mod_factor: [0, 1] - Factor by which STAI score reduces the model-based weight.
+                                (e.g., effective_w = w_base - stai_w_mod_factor * stai)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_w_mod_factor = model_parameters
+        
+    def init_model(self) -> None:
+        # Initialize model-based Q-values
+        self.q_mb = np.zeros(self.n_choices)
+        # Ensure T (transition probabilities) are normalized from counts
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+    def pre_trial(self) -> None:
+        # Calculate effective model-based weight, bounded between 0 and 1
+        self.w_effective = np.clip(self.w_base - self.stai_w_mod_factor * self.stai, 0, 1)
+
+        # Re-calculate model-based Q-values for the current trial
+        # Q_MB(s1, a1) = sum_s2 P(s2|s1, a1) * max_a2 Q_MF(s2, a2)
+        for a1 in range(self.n_choices):
+            expected_future_value = 0
+            for s2 in range(self.n_states):
+                # Maximize over second-stage actions for each possible second state
+                # This assumes optimal play at stage 2 for model-based calculation
+                max_q_s2_a2 = np.max(self.q_stage2[s2])
+                expected_future_value += self.T[a1, s2] * max_q_s2_a2
+            self.q_mb[a1] = expected_future_value
+
+    def policy_stage1(self) -> np.ndarray:
+        # Combine model-free (self.q_stage1) and model-based (self.q_mb) values
+        blended_q_stage1 = (1 - self.w_effective) * self.q_stage1 + self.w_effective * self.q_mb
+        return self.softmax(blended_q_stage1, self.beta)
+    
+    # The default value_update method is suitable for updating model-free Q-values.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants are sensitive to rare (unexpected)
+    transitions between the first and second stages. For this participant, who has medium
+    anxiety (STAI score), rare transitions induce a stronger negative reaction, leading
+    to an increased penalty on the value of the first-stage action that led to the rare
+    transition. This makes them more likely to avoid that first-stage action in the future.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    rare_trans_penalty_base: [0, 1] - Base penalty applied to Stage 1 Q-value upon a rare transition.
+    stai_rare_trans_penalty_factor: [0, 1] - Factor by which STAI score increases this penalty.
+                                             (e.g., effective_penalty = rare_trans_penalty_base + stai_rare_trans_penalty_factor * stai)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_trans_penalty_base, self.stai_rare_trans_penalty_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Perform default TD update for both stages
+        super().value_update(action_1, state, action_2, reward)
+
+        # Check for rare transition
+        is_rare_transition = False
+        # Spaceship A (0) commonly travels to planet X (0), so A->Y (1) is rare
+        if action_1 == 0 and state == 1: 
+            is_rare_transition = True
+        # Spaceship U (1) commonly travels to planet Y (1), so U->X (0) is rare
+        elif action_1 == 1 and state == 0:
+            is_rare_transition = True
+        
+        if is_rare_transition:
+            # Calculate effective penalty, ensuring it's non-negative
+            effective_penalty = np.clip(self.rare_trans_penalty_base + self.stai_rare_trans_penalty_factor * self.stai, 0, None)
+            
+            # Apply penalty to the Stage 1 Q-value of the chosen action
+            self.q_stage1[action_1] -= effective_penalty
+            
+            # Clip Q-value to prevent it from becoming unrealistically low (e.g., below 0 if rewards are binary 0/1)
+            self.q_stage1[action_1] = np.clip(self.q_stage1[action_1], 0, 1) # Assuming Q-values should generally reflect reward probabilities
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

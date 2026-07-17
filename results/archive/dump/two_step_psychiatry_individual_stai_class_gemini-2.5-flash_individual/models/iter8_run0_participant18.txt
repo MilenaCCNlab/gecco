@@ -1,0 +1,200 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how this low-anxiety participant makes decisions, with the STAI score modulating a specific aspect of their behavior.
+
+### Model 1: Q-Value Decay Modulated by STAI
+
+This model proposes that participants' value estimates (Q-values) naturally decay over time, representing a form of forgetting or uncertainty increase. For individuals with low anxiety, this decay rate is hypothesized to be slower. This means they maintain more stable and persistent value estimates, especially for options that have historically been rewarding, making them less prone to overreacting to occasional negative outcomes. This aligns with a less volatile or more confident decision-making style often associated with lower anxiety.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Q-values decay over time (forgetting). Low anxiety individuals 
+    exhibit slower Q-value decay, particularly for options that have previously 
+    been rewarding. This allows them to maintain stable value estimates, leading 
+    to sustained exploitation of seemingly good options despite occasional 
+    negative outcomes, characteristic of less anxious individuals who might be 
+    less prone to overreacting to setbacks.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta: [0, 10] - Inverse temperature for softmax.
+    decay_rate_base: [0, 1] - Base rate at which Q-values decay towards 0.5 (initial value).
+    stai_decay_reduction: [0, 1] - How much low STAI reduces the effective decay rate.
+                                   A value of 0 means STAI has no effect.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate_base, self.stai_decay_reduction = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, applying Q-value decay before the standard TD update.
+        """
+        # Calculate effective decay rate, reduced for lower STAI
+        # (1 - self.stai) is higher for low STAI.
+        # This term reduces the decay_rate_base, making decay_effective smaller.
+        decay_reduction_factor = (1 - self.stai) * self.stai_decay_reduction
+        decay_effective = self.decay_rate_base * np.clip(1 - decay_reduction_factor, 0, 1)
+
+        # Apply decay to Q-values before TD update
+        # Q-values decay towards the initial neutral value of 0.5
+        self.q_stage1 = self.q_stage1 * (1 - decay_effective) + 0.5 * decay_effective
+        self.q_stage2[state, :] = self.q_stage2[state, :] * (1 - decay_effective) + 0.5 * decay_effective
+
+        # Standard TD updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Model-Based Transition Sharpening by STAI
+
+This model posits that participants combine model-free (MF) learning (direct reward association) with model-based (MB) planning (using knowledge of task structure). For low-anxiety individuals, their internal representation of the environment's transition probabilities (e.g., how likely spaceship A is to go to planet X) is sharpened. This means they perceive common transitions as even more common and rare transitions as even rarer, leading to more confident and accurate model-based predictions for first-stage decisions. This enhanced clarity in their mental model makes their planning more influential in guiding choices.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Participants utilize a hybrid model-free (MF) and model-based (MB) 
+    control strategy. Low anxiety is associated with a more precise internal model 
+    of the environment's transition probabilities. This "sharpening" of transition 
+    probabilities means low-anxiety individuals are more confident in their 
+    understanding of which first-stage actions lead to which second-stage states, 
+    making their model-based planning more accurate and influential.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for MF Q-values.
+    beta: [0, 10] - Inverse temperature for softmax.
+    w_mb: [0, 1] - Weight given to the model-based component in stage 1.
+    stai_trans_sharpness: [0, 5] - How much low STAI sharpens the effective 
+                                    transition probabilities. Higher values make 
+                                    common transitions more common and rare 
+                                    transitions rarer.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb, self.stai_trans_sharpness = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, combining MF and STAI-modulated MB values.
+        """
+        # 1. Get MF Q-values (self.q_stage1 is updated by MF TD in value_update)
+        q_mf_stage1 = np.copy(self.q_stage1)
+
+        # 2. Calculate effective transition probabilities, sharpened by low STAI
+        t_effective = np.copy(self.T)
+        if self.stai < 0.31 and self.stai_trans_sharpness > 0: # Apply sharpening for low anxiety
+            # Sharpening factor: higher for lower STAI
+            # (1 - self.stai) is > 0 for low STAI.
+            # An exponent > 1 will make probabilities further from 0.5 more extreme.
+            sharpening_exponent = 1 + (1 - self.stai) * self.stai_trans_sharpness
+            
+            # Apply exponentiation and re-normalize
+            t_effective = t_effective ** sharpening_exponent
+            # Avoid division by zero if a row sums to zero after exponentiation (unlikely for probabilities > 0)
+            row_sums = t_effective.sum(axis=1, keepdims=True)
+            # If a row sums to zero (e.g., all values were 0), default to uniform probabilities (0.5)
+            t_effective = np.where(row_sums == 0, 0.5, t_effective / row_sums)
+            
+            # Ensure probabilities are not exactly 0 or 1 to avoid numerical issues
+            t_effective = np.clip(t_effective, 1e-6, 1 - 1e-6)
+
+        # 3. Calculate MB Q-values for stage 1
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Q_mb(a1) = sum_s [ P(s|a1) * max_a2(Q(s,a2)) ]
+            q_mb_stage1[a1] = np.sum([t_effective[a1, s] * np.max(self.q_stage2[s, :]) 
+                                      for s in range(self.n_states)])
+        
+        # 4. Combine MF and MB Q-values
+        # The base class's value_update only updates self.q_stage1 (MF).
+        # So we use self.q_stage1 as the MF component here.
+        q_combined_stage1 = (1 - self.w_mb) * q_mf_stage1 + self.w_mb * q_mb_stage1
+        
+        return self.softmax(q_combined_stage1, self.beta)
+
+    # The value_update method from the base class handles the model-free learning
+    # for q_stage1 and q_stage2, which is sufficient for this model.
+    # No need to override value_update unless the MF learning itself changes.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Dynamic Beta (Exploration/Exploitation) Modulated by STAI and Reward History
+
+This model proposes that the participant's balance between exploration (trying new things) and exploitation (sticking to known good options), captured by the inverse temperature `beta`, is not static but dynamically adjusts based on recent reward history. For low-anxiety individuals, this dynamic adjustment is more pronounced: they are highly responsive to recent rewards, increasing their exploitation when outcomes are good, and only increasing exploration when rewards diminish. This leads to an adaptive and efficient strategy of focusing on currently rewarding options.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: The balance between exploration and exploitation (controlled by 
+    inverse temperature beta) is dynamic and influenced by recent reward history. 
+    Low anxiety individuals are hypothesized to be more responsive to recent 
+    rewards, increasing their exploitation (higher beta) when rewards are 
+    frequent, and only increasing exploration (lower beta) when rewards diminish. 
+    This leads to adaptive and efficient exploitation of currently rewarding options.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta_min: [0, 10] - Minimum inverse temperature (more exploration).
+    beta_max: [0, 10] - Maximum inverse temperature (more exploitation). Must be beta_max >= beta_min.
+    stai_reward_responsiveness: [0, 1] - How much low STAI enhances the shift 
+                                         towards beta_max when rewards are high. 
+                                         A value of 0 means STAI has no effect.
+    reward_decay: [0, 1] - Decay rate for the running average of reward.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_min, self.beta_max, self.stai_reward_responsiveness, self.reward_decay = model_parameters
+        # Ensure beta_max is not less than beta_min
+        if self.beta_min > self.beta_max:
+            self.beta_max = self.beta_min # Clamp beta_max to beta_min if it's smaller
+
+    def init_model(self) -> None:
+        """Initialize running average of reward."""
+        self.current_reward_avg = 0.5 # Start at a neutral expectation
+
+    def _get_effective_beta(self) -> float:
+        """Calculate the dynamic beta based on reward history and STAI."""
+        # Calculate how much low STAI boosts responsiveness to reward
+        # (1 - self.stai) is higher for low STAI.
+        stai_boost = (1 - self.stai) * self.stai_reward_responsiveness
+        
+        # Factor for beta adjustment: higher for higher reward_avg and lower STAI
+        # This term increases the influence of current_reward_avg for low STAI.
+        beta_factor = self.current_reward_avg * (1 + stai_boost)
+        
+        # Clip the factor to [0, 1] to ensure beta stays within min/max bounds
+        beta_factor_clipped = np.clip(beta_factor, 0, 1)
+
+        # Interpolate between beta_min (more exploration) and beta_max (more exploitation)
+        effective_beta = self.beta_min + (self.beta_max - self.beta_min) * beta_factor_clipped
+        return effective_beta
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using dynamic beta."""
+        effective_beta = self._get_effective_beta()
+        return self.softmax(self.q_stage1, effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using dynamic beta."""
+        effective_beta = self._get_effective_beta()
+        return self.softmax(self.q_stage2[state], effective_beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Called after each trial. Updates last_action/state/reward and reward history.
+        """
+        super().post_trial(action_1, state, action_2, reward) # Call base method first
+        
+        # Update running average of reward using exponential decay
+        self.current_reward_avg = self.current_reward_avg * (1 - self.reward_decay) + reward * self.reward_decay
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

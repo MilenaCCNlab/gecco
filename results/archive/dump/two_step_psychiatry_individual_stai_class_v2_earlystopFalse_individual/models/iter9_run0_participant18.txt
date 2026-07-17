@@ -1,0 +1,164 @@
+Here are three new cognitive models that explore different mechanisms for how anxiety (STAI) might influence decision-making in this task, specifically addressing the participant's observed behavior.
+
+### Model 1: Anxiety-Modulated Model-Based Weighting
+This model hypothesizes that anxiety affects the balance between model-based (planning) and model-free (habitual) control. The standard "hybrid" model in this task uses a mixing parameter `w`. Here, we propose that `w` is not static but is a function of the participant's anxiety level. Given the participant's low anxiety score but repetitive behavior, this model tests if low anxiety actually leads to *less* model-based control (more reliance on simple habits) or if the relationship is inverted.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    
+    We implement a hybrid reinforcement learning model where the Stage 1 Q-values are a weighted 
+    sum of MF and MB values: Q_net = w * Q_MB + (1-w) * Q_MF.
+    
+    The weighting parameter 'w' is derived from a base parameter and the STAI score.
+    We hypothesize that anxiety might impair model-based planning (reducing w).
+    
+    w = sigmoid(w_logit_base + w_stai_slope * stai)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_logit_base: [-5, 5] # Base logit for mixing weight
+    w_stai_slope: [-5, 5] # Effect of anxiety on mixing weight
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_logit_base, self.w_stai_slope = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate mixing weight w based on STAI
+        logit = self.w_logit_base + self.w_stai_slope * self.stai
+        self.w = 1.0 / (1.0 + np.exp(-logit))
+        
+        # Initialize Model-Based transition matrix (fixed prior for simplicity here, 
+        # though often learned)
+        # 0->1 (70%), 0->2 (30%); 1->1 (30%), 1->2 (70%)
+        # Indices: Action 0 -> State 0 (common), Action 1 -> State 1 (common)
+        # Note: The base class defines states as 0 and 1.
+        # Let's assume Action 0 -> State 0 is 0.7, Action 1 -> State 1 is 0.7 based on task description.
+        self.T_model = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based Valuation: Q_MB(a) = sum(P(s|a) * max(Q_stage2(s, :)))
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            # Expected value of best action at next stage
+            expected_val = 0
+            for s_next in range(self.n_states):
+                expected_val += self.T_model[a, s_next] * np.max(self.q_stage2[s_next])
+            q_mb[a] = expected_val
+            
+        # Hybrid Valuation
+        q_net = self.w * q_mb + (1.0 - self.w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (TD - Model Free)
+        # Note: In hybrid models, Stage 1 MF Q-values are usually updated via TD(1) or TD(0)
+        # Here we use simple TD(0) from the stage 2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Asymmetric Learning Rates
+This model hypothesizes that anxiety biases how participants learn from positive versus negative prediction errors. High anxiety is often associated with a negativity bias (learning more from punishment/lack of reward) or a safety bias. Since this participant has low anxiety, this model tests if they exhibit the opposite: a "positivity bias" or symmetric learning, modulated by their STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates learning asymmetry (Positive vs Negative Prediction Errors).
+    
+    We use two learning rates: alpha_pos for positive PEs and alpha_neg for negative PEs.
+    The balance between them is controlled by a bias parameter modulated by STAI.
+    
+    alpha_pos = alpha_base * (1 + bias_param * stai)
+    alpha_neg = alpha_base * (1 - bias_param * stai)
+    
+    If bias_param is positive and STAI is high, the agent learns more from rewards.
+    If bias_param is negative, high anxiety leads to learning more from omissions (0 reward).
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]   # Base learning rate
+    beta: [0, 10]        # Inverse temperature
+    bias_param: [-1, 1]  # Modulation direction and strength
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.bias_param = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate specific learning rates
+        # We clip to ensure they stay in [0, 1]
+        mod = self.bias_param * self.stai
+        self.alpha_pos = np.clip(self.alpha_base * (1.0 + mod), 0.0, 1.0)
+        self.alpha_neg = np.clip(self.alpha_base * (1.0 - mod), 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 > 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 > 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Random Exploration (Epsilon-Greedy Hybrid)
+This model hypothesizes that anxiety affects the "noise" or randomness in decision-making, distinct from the directed exploration of softmax temperature. It implements an epsilon-greedy strategy where the probability of choosing a random action (epsilon) is a function of the STAI score. Low anxiety might correlate with lower noise (more deterministic exploitation) or higher strategic exploration.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates random exploration (epsilon-greedy noise).
+    
+    Instead of pure softmax, the policy is a mixture of softmax and uniform random choice.
+    The weight of the random component (epsilon) depends on STAI.
+    
+    P(a) = (1 - epsilon) * Softmax(Q) + epsilon * (1 / n_choices)
+    
+    epsilon = base_epsilon + slope_epsilon * stai
+    
+    This captures "lapses" or undirected exploration that might vary with anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          # Learning rate
+    beta: [0, 10]          # Inverse temperature for the non-random part
+    base_epsilon: [0, 0.5] # Base noise level
+    slope_epsilon: [-0.5, 0.5] # How anxiety affects noise
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.base_epsilon, self.slope_epsilon = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate epsilon and clip to valid probability range [0, 1]
+        raw_eps = self.base_epsilon + self.slope_epsilon * self.stai
+        self.epsilon = np.clip(raw_eps, 0.0, 1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        softmax_probs = self.softmax(self.q_stage1, self.beta)
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        return (1.0 - self.epsilon) * softmax_probs + self.epsilon * random_probs
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        softmax_probs = self.softmax(self.q_stage2[state], self.beta)
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        return (1.0 - self.epsilon) * softmax_probs + self.epsilon * random_probs
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

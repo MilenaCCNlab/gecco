@@ -1,0 +1,142 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Counterfactual Learning.
+    
+    Anxious participants may engage in "fictitious play" or "regret-based" learning. 
+    When they choose an option and observe an outcome, they simultaneously update the 
+    value of the unchosen option assuming they would have received the opposite outcome 
+    (e.g., if chosen=0 and reward=0, assume unchosen would have yielded reward=1).
+    The strength of this counterfactual update is modulated by anxiety (STAI).
+    
+    Mechanism:
+    - Update chosen option: Q(chosen) += alpha * (Reward - Q(chosen))
+    - Update unchosen option: Q(unchosen) += alpha * (cf_strength * stai) * ((1-Reward) - Q(unchosen))
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    cf_strength: [0, 2]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.cf_strength = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update for the chosen action
+        # Note: Using Q-learning (max of next stage) or TD (value of next stage)
+        # Base class uses TD: value of state reached. We stick to that for the chosen one.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Counterfactual update for the unchosen action in Stage 1
+        unchosen_action_1 = 1 - action_1
+        
+        # Assume the unchosen path would have yielded the opposite reward (1 - reward)
+        # This is a heuristic often found in regret models
+        counterfactual_reward = 1.0 - reward
+        
+        # The effective learning rate for the counterfactual is scaled by anxiety
+        cf_alpha = self.alpha * self.cf_strength * self.stai
+        
+        # We update the unchosen Q-value towards this counterfactual outcome
+        # We approximate the prediction error using the counterfactual reward directly against the current Q
+        delta_cf = counterfactual_reward - self.q_stage1[unchosen_action_1]
+        self.q_stage1[unchosen_action_1] += cf_alpha * delta_cf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Transition Uncertainty (Blurred Model-Based).
+    
+    This model assumes the participant uses a Model-Based strategy (planning based on 
+    transition probabilities), but high anxiety degrades the precision of their internal 
+    model of the environment. Anxious participants perceive the transition probabilities 
+    as more uncertain (closer to 50/50) than they really are, effectively "blurring" 
+    their planning.
+    
+    Mechanism:
+    - Construct a subjective transition matrix T_subj that is a mix of the true T 
+      and a uniform distribution.
+    - Mixing weight w = blur_factor * STAI.
+    - Calculate Stage 1 values purely via planning: Q(a) = Sum(T_subj(s|a) * max(Q_stage2(s))).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    blur_factor: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.blur_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate max value of each stage 2 state
+        # V(s) = max_a Q(s, a)
+        values_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # 2. Determine subjective transition matrix
+        # True T is self.T (2x2 matrix: rows=actions, cols=states)
+        # Uniform T is 0.5 everywhere
+        w = np.clip(self.blur_factor * self.stai, 0, 1)
+        T_uniform = 0.5 * np.ones_like(self.T)
+        T_subjective = (1 - w) * self.T + w * T_uniform
+        
+        # 3. Calculate Model-Based Q-values for Stage 1
+        # Q_MB(a) = Sum_s ( P(s|a) * V(s) )
+        q_mb = T_subjective @ values_stage2
+        
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Only update Stage 2 values. Stage 1 values are computed on the fly in policy_stage1.
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Flight Response (Inverse Stickiness).
+    
+    Anxious participants may exhibit a "flight" response or restlessness, leading to 
+    a tendency to switch away from their previous choice regardless of the outcome. 
+    This is modeled as a negative stickiness (or repulsion) bias applied to the 
+    previously chosen Stage 1 action.
+    
+    Mechanism:
+    - Q_net(a) = Q_learning(a) - (flight_rate * STAI) if a == last_action else Q_learning(a)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    flight_rate: [0, 2]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.flight_rate = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_values = self.q_stage1.copy()
+        
+        # Apply flight penalty (negative stickiness) to the last chosen action
+        if self.last_action1 is not None:
+            penalty = self.flight_rate * self.stai
+            q_values[int(self.last_action1)] -= penalty
+            
+        return self.softmax(q_values, self.beta)
+
+    # Uses default value_update (TD learning) and default policy_stage2
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

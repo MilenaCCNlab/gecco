@@ -1,0 +1,134 @@
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Value Decay (Forgetting).
+    High anxiety consumes cognitive resources (e.g., via worry), leading to a faster decay 
+    of learned value representations (Q-values) towards a neutral prior (0.5). 
+    This model posits that anxious individuals struggle to maintain value estimates 
+    over time, resulting in a "leaky" learning process.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    decay_k: [0, 1]     # Decay scaling factor. Effective decay rate = decay_k * stai
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_k = model_parameters
+
+    def pre_trial(self) -> None:
+        # Calculate effective decay rate based on anxiety
+        decay_rate = self.decay_k * self.stai
+        # Ensure decay_rate is within valid bounds [0, 1]
+        decay_rate = np.clip(decay_rate, 0.0, 1.0)
+        
+        # Decay Q-values towards the neutral value of 0.5
+        # Q_new = (1 - decay) * Q_old + decay * 0.5
+        self.q_stage1 = self.q_stage1 * (1.0 - decay_rate) + 0.5 * decay_rate
+        self.q_stage2 = self.q_stage2 * (1.0 - decay_rate) + 0.5 * decay_rate
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Transition Learning (Hyper-vigilance).
+    Anxious individuals are hyper-vigilant to changes in environmental structure.
+    While they use a Model-Based strategy (planning based on transition probabilities),
+    their internal model of these transitions is unstable. They update their belief 
+    about spaceship transitions (A->X vs A->Y) more aggressively than low-anxiety 
+    individuals, reacting strongly to rare transitions.
+    
+    This model uses a hybrid architecture with a fixed mixing weight (w=0.5),
+    but the transition learning rate 'eta' is scaled by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Value learning rate
+    beta: [0, 10]       # Inverse temperature
+    eta_k: [0, 1]       # Transition learning rate scaler. eta = eta_k * stai
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta_k = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize subjective transition matrix with the common prior (70/30)
+        # This represents the instruction that A->X and U->Y are common.
+        self.T_est = np.array([[0.7, 0.3], [0.3, 0.7]])
+        
+        # Fixed mixing weight for this hypothesis to isolate the transition learning effect
+        # w=0.5 implies an equal mix of Model-Based and Model-Free values.
+        self.w = 0.5 
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Free values
+        q_mf = self.q_stage1
+        
+        # Model-Based values: Q_MB(a) = Sum_s' T_est(a, s') * Max_a' Q2(s', a')
+        # First, calculate the value of the second stage states (V_stage2)
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Calculate Q_MB using the estimated transition matrix
+        q_mb = self.T_est @ v_stage2 # Matrix multiplication: (2,2) @ (2,) -> (2,)
+        
+        # Combine MB and MF values
+        q_net = self.w * q_mb + (1 - self.w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Calculate effective transition learning rate
+        eta = self.eta_k * self.stai
+        eta = np.clip(eta, 0.0, 1.0)
+        
+        # Create one-hot observation vector for the state we landed on
+        obs = np.zeros(self.n_states)
+        obs[state] = 1.0
+        
+        # Update the transition probabilities for the chosen spaceship (action_1)
+        # T_new = T_old + eta * (Observed_State - T_old)
+        self.T_est[action_1] += eta * (obs - self.T_est[action_1])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Win-Stay Bias.
+    Anxious individuals exhibit a specific "safety-seeking" perseveration.
+    Unlike general stickiness (repeating any choice), this model hypothesizes that 
+    anxiety specifically amplifies the tendency to repeat a choice *only if it was rewarded*.
+    This reflects a strategy to maintain a "safe" status quo and avoid the risk of switching 
+    after a positive outcome.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    phi: [0, 5]         # Win-Stay bonus scaler. Bonus = phi * stai
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.phi = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_mod = self.q_stage1.copy()
+        
+        # Apply bonus only if the previous trial existed and resulted in a reward (Win)
+        if self.last_action1 is not None and self.last_reward == 1.0:
+            # Calculate bonus based on anxiety
+            bonus = self.phi * self.stai
+            # Add bonus to the previously chosen action
+            q_mod[int(self.last_action1)] += bonus
+            
+        return self.softmax(q_mod, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,147 @@
+Here are 3 cognitive models, each with a distinct hypothesis about how the participant, with their high anxiety (STAI score 0.675), makes decisions in the two-step task.
+
+### Model 1: Anxiety-Modulated Value Decay (General Forgetting)
+
+This model proposes that high anxiety leads to a general decay of learned values over time. This could reflect impaired memory, increased distractibility, or a tendency to focus on recent experiences. On each trial, before any new learning occurs, all Q-values are slightly reduced. The rate of this decay is modulated by the participant's STAI score, with higher anxiety leading to faster forgetting.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Value Decay (General Forgetting)
+    This model posits that high anxiety leads to a general decay of learned
+    Q-values over time. This could represent impaired memory or increased
+    distractibility, causing values to "fade" unless reinforced. On each trial,
+    before value updates, all Q-values are multiplied by a decay factor (1 - gamma_decay).
+    The decay rate (gamma_decay) is modulated by the participant's STAI score:
+    higher anxiety leads to a stronger decay.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    gamma_decay_base: [0, 0.5] (Base rate of value decay, applied on each trial)
+    stai_decay_multiplier: [0, 0.5] (How much STAI score increases the decay rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gamma_decay_base, self.stai_decay_multiplier = model_parameters
+        # Calculate the effective decay rate, modulated by STAI
+        self.gamma_decay = self.gamma_decay_base + self.stai_decay_multiplier * self.stai
+        # Ensure decay rate is within reasonable bounds (e.g., not decaying more than 100%)
+        self.gamma_decay = np.clip(self.gamma_decay, 0.0, 0.99) 
+
+    def pre_trial(self) -> None:
+        """
+        Apply value decay to all Q-values before choices and updates for the current trial.
+        """
+        decay_factor = (1 - self.gamma_decay)
+        self.q_stage1 *= decay_factor
+        self.q_stage2 *= decay_factor
+        
+        # Ensure values don't become negative or too small if they were initialized at 0.5 and decay
+        # Values should represent expected rewards [0, 1] if rewards are binary
+        self.q_stage1 = np.clip(self.q_stage1, 0.0, 1.0)
+        self.q_stage2 = np.clip(self.q_stage2, 0.0, 1.0)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Perseveration/Switching at Stage 1
+
+This model proposes that high anxiety influences the participant's tendency to either stick with (perseverate) or switch from their previous first-stage choice. Anxious individuals might exhibit more rigid, habitual behaviors (perseveration) or, conversely, increased switching due to heightened sensitivity to negative outcomes or uncertainty. This is modeled by adding a bonus (or penalty) to the Q-value of the previously chosen first-stage action, which is scaled by anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Perseveration/Switching at Stage 1
+    This model suggests that high anxiety affects the participant's tendency to
+    either perseverate (stick with) or switch from their previously chosen
+    first-stage action. A 'perseveration bonus' (or penalty if negative) is
+    added to the Q-value of the action chosen on the immediately preceding trial
+    at Stage 1, before the softmax decision. This bonus/penalty is modulated by
+    the STAI score, allowing anxiety to either increase perseveration or encourage switching.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    k_base: [-2, 2] (Base perseveration bonus; positive for perseveration, negative for switching)
+    stai_k_effect: [-2, 2] (How much STAI score modulates the perseveration bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.k_base, self.stai_k_effect = model_parameters
+        # Calculate the effective perseveration bonus, modulated by STAI
+        self.perseveration_bonus = self.k_base + self.stai_k_effect * self.stai
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, incorporating a perseveration bonus
+        if a previous action exists.
+        """
+        q_values_with_perseveration = np.copy(self.q_stage1)
+        if self.last_action1 is not None:
+            # Add bonus to the last chosen action's Q-value
+            q_values_with_perseveration[self.last_action1] += self.perseveration_bonus
+        
+        return self.softmax(q_values_with_perseveration, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Transition-Dependent Credit Assignment
+
+This model proposes that anxiety specifically influences how the first-stage choice is updated based on the *type* of transition that occurred. If a rare transition occurs (e.g., spaceship A goes to planet Y), an anxious participant might attribute credit or blame to their initial choice differently than for a common transition. This could reflect a heightened sensitivity to unexpected events, leading to a modified learning rate for the first stage depending on whether the transition was common or rare, and this modification is scaled by anxiety.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Transition-Dependent Credit Assignment
+    This model suggests that high anxiety influences how much credit (or blame)
+    is assigned to the first-stage choice based on whether the transition to the
+    second stage was common or rare. The learning rate for the first stage (alpha_1)
+    is modulated by the type of transition (common vs. rare). Specifically, the
+    impact of rare transitions on first-stage learning is scaled by anxiety,
+    reflecting a heightened sensitivity to unexpected outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values in general and for common transitions)
+    beta: [0, 10] (Inverse temperature for softmax choice)
+    rare_alpha_base: [0, 2] (Base learning rate multiplier for rare transitions)
+    stai_rare_effect: [-2, 2] (How much STAI score modulates the rare transition learning multiplier)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_alpha_base, self.stai_rare_effect = model_parameters
+        # Calculate the effective multiplier for rare transition learning, modulated by STAI
+        self.rare_alpha_multiplier = self.rare_alpha_base + self.stai_rare_effect * self.stai
+        # Ensure the multiplier is non-negative
+        self.rare_alpha_multiplier = max(0.0, self.rare_alpha_multiplier)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome, with anxiety-modulated,
+        transition-dependent credit assignment for stage 1.
+        """
+        # Stage 2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Determine if the transition was common or rare
+        # Spaceship 0 (A) commonly to Planet 0 (X)
+        # Spaceship 1 (U) commonly to Planet 1 (Y)
+        is_common_transition = (action_1 == state)
+
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Apply a different learning rate for stage 1 based on transition type and anxiety
+        if is_common_transition:
+            self.q_stage1[action_1] += self.alpha * delta_1
+        else: # Rare transition
+            # The effective learning rate for rare transitions is alpha * rare_alpha_multiplier
+            self.q_stage1[action_1] += (self.alpha * self.rare_alpha_multiplier) * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

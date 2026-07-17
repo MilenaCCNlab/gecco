@@ -1,0 +1,129 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety accelerates cumulative habit formation. 
+    Instead of a static perseverance bonus, this model posits that anxious individuals 
+    form habits faster. The "stickiness" of a choice increases with the number of 
+    consecutive times it has been chosen, scaled by the participant's anxiety (STAI).
+    This explains the strong persistence in choosing Spaceship 1.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate
+    beta: [0, 10]        # Inverse temperature
+    habit_accel: [0, 5]  # Rate at which consecutive choices increase stickiness, modulated by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.habit_accel = model_parameters
+
+    def init_model(self) -> None:
+        self.consecutive_choices = 0
+        self.last_choice_idx = -1
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate habit bonus
+        # Bonus is proportional to how many times we've done this in a row, scaled by anxiety
+        habit_bonus = np.zeros(self.n_choices)
+        
+        if self.last_choice_idx != -1:
+            bonus_val = self.consecutive_choices * self.habit_accel * self.stai
+            habit_bonus[self.last_choice_idx] = bonus_val
+        
+        # Add bonus to Q-values for decision making (does not affect stored Q-values)
+        net_values = self.q_stage1 + habit_bonus
+        return self.softmax(net_values, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update consecutive counter
+        if action_1 == self.last_choice_idx:
+            self.consecutive_choices += 1
+        else:
+            self.consecutive_choices = 1
+            self.last_choice_idx = action_1
+            
+        super().post_trial(action_1, state, action_2, reward)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety induces a "Relief" signal or distorted reward processing.
+    Anxious participants may perceive the absence of a negative outcome (or just getting through the trial)
+    as partially rewarding, even when the objective reward is 0. 
+    This "relief" prevents the extinction of the chosen option's value, causing them to stick 
+    with an option even if it yields 0 coins, because 0 is subjectively treated as > 0.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    relief_val: [0, 1]  # The subjective value assigned to a 0-reward outcome, scaled by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.relief_val = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective reward
+        # If reward is 1, it's 1.
+        # If reward is 0, it is perceived as (relief_val * STAI).
+        # This creates a floor for the reward signal.
+        
+        effective_reward = reward
+        if reward == 0:
+            effective_reward = self.relief_val * self.stai
+            
+        # Standard TD update with effective reward
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety drives active devaluation of unchosen options ("Sour Grapes" effect).
+    To reduce cognitive dissonance or regret, anxious participants actively reduce the value 
+    of the option they did *not* choose. This creates a widening gap between the chosen 
+    and unchosen options, locking them into their current behavior regardless of the actual outcome.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         # Learning rate for chosen option
+    beta: [0, 10]         # Inverse temperature
+    deval_rate: [0, 1]    # Rate at which unchosen option decays, scaled by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.deval_rate = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize Q-values to 0.5 so that devaluation (decay) has an effect.
+        # If they start at 0, multiplying by a decay factor does nothing.
+        self.q_stage1 = 0.5 * np.ones(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard update for the chosen path
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Devaluation of the UNCHOSEN Stage 1 option
+        unchosen_action_1 = 1 - action_1
+        decay_factor = 1.0 - (self.deval_rate * self.stai)
+        
+        # Ensure decay factor is within reasonable bounds [0, 1]
+        decay_factor = np.clip(decay_factor, 0.0, 1.0)
+        
+        self.q_stage1[unchosen_action_1] *= decay_factor
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,174 @@
+As a cognitive scientist and Python programmer, I will now propose three distinct cognitive models to explain the decision-making patterns of this participant. Given the participant's high anxiety score (STAI = 0.6875) and their behavioral pattern of long choice sequences followed by an abrupt switch, these models will explore how anxiety might influence outcome valuation, beliefs about the world, and exploratory strategies.
+
+### Model 1: Anxiety-Driven Pessimism
+
+This model hypothesizes that high anxiety leads to a pessimistic evaluation of outcomes. Instead of treating a non-reward as neutral (value of 0), the participant perceives it as a negative event or a punishment. The magnitude of this negativity is amplified by their trait anxiety. This persistent negative feedback for the chosen option eventually drives its value down far enough to trigger a switch, explaining the long periods of perseveration followed by a change in strategy.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety induces a pessimistic bias, causing the participant
+    to treat non-rewards as punishing outcomes. The subjective penalty for not
+    receiving a reward is scaled by the individual's anxiety level (stai).
+    This leads to a faster devaluation of options that fail to pay off.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           (learning rate)
+    beta: [0, 10]          (inverse temperature for softmax)
+    pessimism_bias: [0, 5]   (base magnitude of the penalty for non-reward)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pessimism_bias = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate an effective penalty for non-reward based on anxiety."""
+        # Higher stai score increases the perceived negativity of a non-reward.
+        self.effective_penalty = self.pessimism_bias * self.stai
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using a standard TD rule, but with a modified reward signal
+        where non-rewards are treated as penalties.
+        """
+        # Transform the reward signal based on the pessimism hypothesis
+        effective_reward = reward if reward > 0 else -self.effective_penalty
+        
+        # Stage-2 update (alien value)
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage-1 update (spaceship value), propagating the learned stage-2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Biased World Model
+
+This model proposes that anxiety distorts the participant's internal model of the task's structure. Specifically, it embodies a "catastrophic thinking" bias where the participant overestimates the likelihood of rare, negative events. When a rare transition occurs (e.g., choosing the spaceship for Planet X but landing on Planet Y) and is followed by no reward, their belief that this "unlucky" event will happen again is disproportionately strengthened. This anxiety-driven bias in their world model affects their planning and subsequent choices at the first stage.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety biases the learning of the task's transition structure.
+    Specifically, when a rare transition is followed by a non-reward, the
+    participant overweights this experience, increasing their subjective belief
+    that this "unlucky" event will reoccur. This bias is scaled by anxiety (stai).
+    Stage-1 choices are purely model-based, using this subjective transition model.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (learning rate for alien values)
+    beta: [0, 10]     (inverse temperature for softmax)
+    eta_T: [0, 1]      (learning rate for the transition matrix)
+    bias_T: [0, 10]    (anxiety-driven bias strength for transition learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta_T, self.bias_T = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a subjective transition model that the agent will learn."""
+        self.T_subjective = np.copy(self.T)
+        # Use a count-like representation for stable learning
+        self.trans_counts_subjective = np.copy(self.trans_counts)
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action values based on the subjective world model."""
+        # Find the max expected value for each planet (stage-2 state)
+        q_stage2_max = np.max(self.q_stage2, axis=1)
+        # Weight these values by the subjective transition probabilities
+        q_model_based = self.T_subjective @ q_stage2_max
+        return self.softmax(q_model_based, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update only the stage-2 values, as stage-1 is computed dynamically."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update the subjective transition model after observing the outcome."""
+        super().post_trial(action_1, state, action_2, reward)
+        
+        is_common_transition = (action_1 == state)
+        update_strength = self.eta_T
+        
+        # If a rare, unrewarded event occurs, apply the anxiety-driven bias
+        if not is_common_transition and reward == 0:
+            update_strength *= (1 + self.stai * self.bias_T)
+        
+        # Update the subjective transition counts using a decay-and-increment rule
+        counts_for_action = self.trans_counts_subjective[action_1, :]
+        counts_for_action *= (1 - update_strength)
+        counts_for_action[state] += update_strength
+        self.trans_counts_subjective[action_1, :] = counts_for_action
+        
+        # Re-normalize to get the updated transition probabilities
+        self.T_subjective = self.trans_counts_subjective / self.trans_counts_subjective.sum(axis=1, keepdims=True)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Uncertainty Aversion
+
+This model suggests that high anxiety fosters an aversion to uncertainty. The participant prefers known options, even if they are suboptimal, over options with unknown reward probabilities. The model tracks both the value of each alien and the uncertainty associated with that value (inversely related to how often it has been chosen). While a typical agent might receive an "exploration bonus" for choosing uncertain options, this model proposes that anxiety *reduces* this bonus, making the participant less likely to explore. This leads to sticking with one spaceship for a long time to fully resolve the uncertainty on its associated planet before considering the unknown alternative.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to uncertainty aversion, reducing the drive
+    to explore. This is modeled via a UCB-like mechanism where the exploration
+    bonus for uncertain options is inversely scaled by the participant's anxiety
+    level (stai). The participant avoids the uncertainty of the unchosen
+    spaceship's planet, leading to extended periods of exploiting one option.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]    (learning rate for alien values)
+    beta: [0, 10]   (inverse temperature for softmax)
+    c: [0, 5]       (base weight for the uncertainty/exploration bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.c = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize choice counts and calculate an anxiety-modulated exploration bonus."""
+        # Higher anxiety reduces the drive to explore uncertain options
+        self.effective_c = self.c * (1 - self.stai)
+        # Track how many times each stage-2 option has been chosen
+        self.q_stage2_counts = np.ones((self.n_states, self.n_choices))
+
+    def policy_stage1(self) -> np.ndarray:
+        """A model-based policy that propagates uncertainty-aware values from stage 2."""
+        # Calculate the uncertainty bonus for each stage-2 option
+        uncertainty = 1.0 / np.sqrt(self.q_stage2_counts)
+        q_stage2_ucb = self.q_stage2 + self.effective_c * uncertainty
+        
+        # Find the maximum potential value for each planet
+        q_stage2_max = np.max(q_stage2_ucb, axis=1)
+        
+        # Calculate stage-1 values based on the task structure
+        q_model_based = self.T @ q_stage2_max
+        return self.softmax(q_model_based, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Policy for stage 2 includes the uncertainty bonus."""
+        uncertainty = 1.0 / np.sqrt(self.q_stage2_counts[state])
+        policy_values = self.q_stage2[state] + self.effective_c * uncertainty
+        return self.softmax(policy_values, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update stage-2 values and increment choice counts."""
+        # Standard Q-learning update for the chosen alien
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Increment the count for the chosen alien to reduce its uncertainty
+        self.q_stage2_counts[state, action_2] += 1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

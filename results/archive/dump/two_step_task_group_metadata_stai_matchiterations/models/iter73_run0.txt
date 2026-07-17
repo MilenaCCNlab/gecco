@@ -1,0 +1,214 @@
+Here are 3 new cognitive models based on the provided template and data.
+
+### Model 1: Anxiety-Driven Spatial Generalization
+**Hypothesis:** High anxiety leads to a reliance on low-level spatial heuristics that generalize inappropriately across contexts. If a participant finds a "lucky" alien on the left side of Planet X, they may irrationally increase the value of the alien on the left side of Planet Y, ignoring the fact that they are different aliens. This "spatial bleed" increases with STAI score.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Spatial Generalization Model.
+    
+    Hypothesis: Anxiety promotes spatial generalization across distinct states.
+    When an alien (Action 2) is rewarded in one state (e.g., Planet X), 
+    the participant also updates the value of the same spatial action 
+    in the *other* state (e.g., Planet Y), assuming 'Left' or 'Right' 
+    is the lucky choice globally.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] MB/MF weighting.
+    - spatial_gen: [0, 1] The proportion of the RPE applied to the other state, scaled by STAI.
+    """
+    learning_rate, beta, w, spatial_gen = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2)) # State x Action
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Update Stage 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Update Stage 2 with Spatial Generalization
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Generalize to the OTHER state (0->1 or 1->0) for the SAME action index
+        other_state_idx = 1 - state_idx
+        gen_rate = learning_rate * spatial_gen * stai_score
+        q_stage2_mf[other_state_idx, action_2[trial]] += gen_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Probability Neglect
+**Hypothesis:** Anxious individuals attempt to reduce cognitive load and uncertainty by simplifying the internal model of the task. During Model-Based planning, they "sharpen" the transition probabilities, treating the common transition (0.7) as nearly deterministic (approaching 1.0) and neglecting the rare transition. This results in rigid planning that fails to account for the risk of rare transitions.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Probability Neglect Model.
+    
+    Hypothesis: High anxiety causes participants to ignore low-probability 
+    transitions during Model-Based planning. They perceive the 'Common' 
+    transition as more certain than it is, effectively pruning the 'Rare' 
+    branch of the decision tree to reduce uncertainty.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] MB/MF weighting.
+    - neglect_rate: [0, 1] How much STAI distorts the transition matrix towards determinism.
+    """
+    learning_rate, beta, w, neglect_rate = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Base transition matrix
+    base_prob = 0.7
+    # Distort probability based on anxiety: pushes 0.7 towards 1.0
+    # If neglect_rate * stai is 1, prob becomes 1.0.
+    perceived_prob = base_prob + (1.0 - base_prob) * neglect_rate * stai_score
+    
+    # Construct the subjective transition matrix used for planning
+    # Row 0: A -> X (Common), Y (Rare)
+    # Row 1: U -> Y (Common), X (Rare)
+    subjective_matrix = np.array([
+        [perceived_prob, 1.0 - perceived_prob], 
+        [1.0 - perceived_prob, perceived_prob]
+    ])
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # Use the distorted/subjective matrix for MB planning
+        q_stage1_mb = subjective_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Driven Win-Stay Bias
+**Hypothesis:** While general perseveration (stickiness) applies to all previous choices, anxious individuals are specifically sensitive to "relief" signals. This model proposes a specific "Win-Stay" heuristic: if the previous trial was rewarded, anxiety amplifies the tendency to repeat the Stage 1 choice, overriding calculated values. This is distinct from general stickiness as it does not apply after losses.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Win-Stay Bias Model.
+    
+    Hypothesis: Anxiety increases reliance on a simple 'Win-Stay' heuristic 
+    at Stage 1. If the previous trial resulted in a reward, anxious participants 
+    receive a 'relief bonus' added to the value of the previously chosen 
+    spaceship, regardless of whether the transition was rare or common.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] MB/MF weighting.
+    - win_stay_strength: [0, 5] Magnitude of the bias added after a win, scaled by STAI.
+    """
+    learning_rate, beta, w, win_stay_strength = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = 0
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply Win-Stay Bias
+        if last_action_1 != -1 and last_reward == 1:
+            # Only apply if the last trial was a WIN
+            bias = win_stay_strength * stai_score
+            q_net[last_action_1] += bias
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # Record for next trial
+        last_action_1 = action_1[trial]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        last_reward = reward[trial]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

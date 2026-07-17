@@ -1,0 +1,145 @@
+Here are three new cognitive models exploring different mechanisms for how anxiety (STAI) might influence decision-making in this task, specifically focusing on the observed behavior of sticking to one option.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model tests the hypothesis that anxiety shifts the balance between goal-directed (Model-Based) and habitual (Model-Free) control. High anxiety is often associated with reduced cognitive flexibility and increased reliance on habits. Here, the mixing weight `w` is not a free parameter but is directly determined by the STAI score and a sensitivity parameter.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the trade-off between Model-Based (MB) and Model-Free (MF) control.
+    Higher anxiety (STAI) reduces the contribution of the Model-Based system, leading to more habitual behavior.
+    
+    The mixing weight 'w' is calculated as: w = w_max * (1 - stai)
+    If STAI is high, w is low (pure MF). If STAI is low, w approaches w_max (more MB).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    w_max: [0, 1]      # Maximum possible model-based weight (at 0 anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Value (Q_MF) - standard TD learning
+        q_mf = self.q_stage1
+        
+        # 2. Model-Based Value (Q_MB) - Bellman equation using transition matrix
+        # Q_MB(a) = sum(P(s|a) * max(Q_stage2(s, :)))
+        # We use the max of stage 2 values as the estimate of the state value
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        q_mb = np.zeros(self.n_choices)
+        
+        # Transition matrix T is shape (2, 2) -> [action, state]
+        # T[0] is probs for action 0 -> [p(s0|a0), p(s1|a0)]
+        q_mb[0] = np.dot(self.T[0], v_stage2)
+        q_mb[1] = np.dot(self.T[1], v_stage2)
+        
+        # 3. Anxiety-modulated Mixing
+        # Higher STAI -> Lower w -> More MF
+        w = self.w_max * (1.0 - self.stai)
+        
+        q_net = w * q_mb + (1 - w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (TD-0 / MF)
+        # Note: MB values are computed on the fly, so we only update MF values here
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced "Safe" Option Bias
+This model hypothesizes that anxiety creates a specific bias towards one option perceived as "safer" or "default," regardless of reward history. Instead of general stickiness (repeating *any* last action), this model assumes anxiety adds a fixed bias to a specific spaceship (e.g., Spaceship 1), perhaps because it was the first successful one or simply an arbitrary safety signal.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety introduces a static bias towards a specific 'safety' option (Spaceship 1).
+    The magnitude of this bias is proportional to the STAI score.
+    This explains the participant's tendency to choose Spaceship 1 repeatedly.
+    
+    Q_net(a) = Q_learned(a) + (stai * bias_magnitude * I(a == 1))
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Learning rate
+    beta: [0, 10]           # Inverse temperature
+    bias_magnitude: [0, 5]  # Strength of the bias towards Spaceship 1
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.bias_magnitude = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_vals = self.q_stage1.copy()
+        
+        # Apply bias specifically to Action 1 (Spaceship 1)
+        # The bias is scaled by anxiety level
+        bias = self.bias_magnitude * self.stai
+        q_vals[1] += bias
+        
+        return self.softmax(q_vals, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Learning Rate Asymmetry (Punishment Sensitivity)
+This model hypothesizes that anxiety affects how the participant learns from positive vs. negative prediction errors. Specifically, anxious individuals might be hypersensitive to "missing out" (negative prediction errors) or less sensitive to gains, causing them to lock into a suboptimal strategy if they stop exploring.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the learning rate specifically for negative prediction errors.
+    Anxious participants might over-weight negative outcomes (or lack of reward), 
+    causing rapid devaluation of options, or conversely, under-weight them to maintain a status quo.
+    
+    alpha_neg = alpha_base * (1 + stai * sensitivity)
+    alpha_pos = alpha_base
+    
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]     # Base learning rate for positive errors
+    beta: [0, 10]          # Inverse temperature
+    neg_sensitivity: [0, 5] # Multiplier for anxiety's effect on negative learning rate
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.neg_sensitivity = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate dynamic alpha for negative errors based on STAI
+        # If sensitivity is high, anxiety drastically increases learning from failure
+        alpha_neg = self.alpha_base * (1.0 + self.stai * self.neg_sensitivity)
+        # Clip to ensure stability
+        alpha_neg = np.clip(alpha_neg, 0.0, 1.0)
+        
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_base if delta_2 >= 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_base if delta_1 >= 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

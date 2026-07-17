@@ -1,0 +1,141 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the highly anxious participant (STAI score 0.5375) makes decisions in the two-step task.
+
+### Model 1: Anxiety-modulated Stage-specific Learning Rates
+
+This model hypothesizes that high anxiety specifically impairs learning at the first stage of decision-making, where the participant must learn about the transition probabilities between spaceships and planets. This could make them less flexible in adapting their initial choices. However, learning at the second stage, which is more directly tied to immediate rewards, is governed by a separate, unmodulated learning rate.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a reduced learning rate at the first stage,
+    making participants less adaptable to changes in which spaceship leads to which planet.
+    Learning at the second stage is governed by a separate, unmodulated learning rate.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1_base: [0, 1] - Base learning rate for stage 1 Q-values.
+    stai_alpha_stage1_reduction: [0, 1] - How much STAI score reduces the stage 1 learning rate.
+                                         (effective alpha_stage1 = max(0, alpha_stage1_base - stai * stai_alpha_stage1_reduction))
+    alpha_stage2: [0, 1] - Learning rate for stage 2 Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1_base, self.stai_alpha_stage1_reduction, self.alpha_stage2, self.beta = model_parameters
+        # Calculate effective alpha_stage1, ensuring it's not negative
+        self.alpha_stage1 = np.clip(self.alpha_stage1_base - self.stai * self.stai_alpha_stage1_reduction, 0.0, 1.0)
+        # alpha_stage2 is directly used
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using stage-specific learning rates.
+        alpha_stage1 is modulated by STAI, alpha_stage2 is fixed.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_stage2 * delta_2
+        
+        # Stage 1 update
+        # Q-value of the chosen stage 1 action is updated towards the Q-value of the chosen stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-modulated Sensitivity to Rare Transitions
+
+This model proposes that high anxiety makes participants particularly sensitive to unexpected events. When a chosen spaceship leads to a "rare" (uncommon) planet, the participant might discount the value propagated back to the first stage. This reflects an anxious tendency to avoid unpredictable paths, making them less likely to choose that initial spaceship again, even if the second stage on the rare planet yielded a reward.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a reduced credit assignment for first-stage
+    actions when they result in a rare (uncommon) transition to a planet.
+    This makes participants less likely to choose a spaceship again if it led
+    to an unexpected planet, reflecting an avoidance of unpredictable paths.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    rare_transition_discount_base: [0, 1] - Base discount applied to delta_1 for rare transitions.
+                                           (0 = no discount, 1 = full discount).
+    stai_rare_discount_impact: [0, 1] - How much STAI score amplifies the rare transition discount.
+                                        (effective_discount = clip(rare_transition_discount_base + stai * stai_rare_discount_impact, 0, 1))
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_transition_discount_base, self.stai_rare_discount_impact = model_parameters
+        # Calculate effective rare transition discount, ensuring it's within [0, 1]
+        self.effective_rare_discount = np.clip(self.rare_transition_discount_base + self.stai * self.stai_rare_discount_impact, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, discounting the stage-1 update if the transition was rare.
+        """
+        # Stage 2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+
+        # Check if the transition was rare:
+        # Spaceship 0 (A) commonly travels to Planet 0 (X). Rare is Planet 1 (Y).
+        # Spaceship 1 (U) commonly travels to Planet 1 (Y). Rare is Planet 0 (X).
+        # So, if action_1 == state, it's a common transition. If action_1 != state, it's a rare transition.
+        is_rare_transition = (action_1 != state)
+
+        if is_rare_transition:
+            # Apply discount to delta_1 for rare transitions
+            delta_1 *= (1 - self.effective_rare_discount)
+        
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-modulated Reward Sensitivity
+
+This model posits that high anxiety leads to a reduced internal perception or valuation of rewards. Even when a participant receives gold coins, the actual reward signal used for learning is attenuated. This means they learn less effectively from positive outcomes, reflecting a general difficulty in appreciating or being driven by positive reinforcement under an anxious state.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a reduced sensitivity to received rewards.
+    The actual reward value is attenuated before being used for learning,
+    meaning participants learn less effectively from positive outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    reward_sensitivity_base: [0, 1] - Base factor by which rewards are internally scaled.
+                                      (1 = full sensitivity, 0 = no sensitivity).
+    stai_reward_reduction_factor: [0, 1] - How much STAI score reduces reward sensitivity.
+                                           (effective_sensitivity = clip(reward_sensitivity_base - stai * stai_reward_reduction_factor, 0, 1))
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.reward_sensitivity_base, self.stai_reward_reduction_factor = model_parameters
+        # Calculate effective reward sensitivity, ensuring it's within [0, 1]
+        self.effective_reward_sensitivity = np.clip(self.reward_sensitivity_base - self.stai * self.stai_reward_reduction_factor, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using an anxiety-modulated reward signal.
+        """
+        # Scale the actual reward by the effective sensitivity
+        modulated_reward = reward * self.effective_reward_sensitivity
+
+        # Stage 2 update using modulated reward
+        delta_2 = modulated_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Q-value of stage 1 action updated towards the Q-value of the chosen stage 2 action)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

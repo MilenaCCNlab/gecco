@@ -1,0 +1,174 @@
+As a cognitive scientist and programmer, I've analyzed this participant's data, noting their high state-trait anxiety inventory (STAI) score of 0.725. High anxiety is often associated with distinct patterns in learning and decision-making, such as increased reliance on habits, heightened sensitivity to negative feedback, and distorted beliefs about environmental uncertainty. The participant's initial strong preference for one option, followed by more varied choices, suggests a dynamic learning process influenced by outcomes.
+
+Here are three distinct cognitive models that formalize different hypotheses about how this participant's anxiety might shape their decision-making process.
+
+### Model 1: Anxiety-Driven Perseveration
+This model proposes that anxiety drives a conflict between goal-directed action (choosing the spaceship with the highest expected reward) and a simpler, habitual tendency to repeat the last action. High trait anxiety biases the decision system towards this perseverative, stimulus-response habit, particularly in situations of uncertainty. This captures the clinical observation that anxiety can lead to rigid or "stuck" behaviors.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety arbitrates between a goal-directed (RL) system and a
+    simple perseverative system. High trait anxiety (stai) increases the weight
+    given to repeating the previous action, irrespective of its learned value.
+    This reflects a shift from flexible, goal-directed control to more rigid,
+    habitual control under anxiety. The model interpolates between the learned
+    Q-values and a vector representing the last action.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      (Learning rate for the RL system)
+    beta: [0, 10]     (Inverse softmax temperature)
+    kappa: [0, 1]     (Anxiety sensitivity parameter, scales influence of perseveration)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a vector to track the most recent stage-1 action."""
+        self.perseveration_vector = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes a policy by mixing learned Q-values with a perseveration tendency.
+        The mixing weight is determined by the participant's trait anxiety.
+        """
+        # kappa scales the raw stai score to a weight between 0 and 1
+        # This weight determines the influence of the perseveration vector
+        w_anxiety = np.clip(self.kappa * self.stai, 0, 1)
+
+        # The final action value is a weighted average of the learned Q-value
+        # and the tendency to repeat the last action.
+        q_combined = (1 - w_anxiety) * self.q_stage1 + w_anxiety * self.perseveration_vector
+        
+        return self.softmax(q_combined, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        After the trial, update the perseveration vector to reflect the choice
+        that was just made.
+        """
+        super().post_trial(action_1, state, action_2, reward)
+        # Set the value for the chosen action to 1, others to 0
+        self.perseveration_vector.fill(0)
+        self.perseveration_vector[action_1] = 1.0
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Asymmetric Learning
+This model hypothesizes that anxiety creates a learning bias, making the participant more sensitive to negative outcomes than positive ones. A neutral outcome (0 coins) is treated as a significant failure, prompting a larger update to value estimates than a positive outcome (1 coin). This "pessimistic learning" style means that non-rewards have a disproportionately strong influence on subsequent choices, a common feature in anxiety where potential threats and losses are overweighted.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety leads to asymmetric learning, where the agent learns
+    more from negative prediction errors (outcomes worse than expected) than
+    from positive ones. Trait anxiety (stai) determines the degree of this
+    asymmetry, boosting the learning rate specifically for negative events. This
+    reflects a cognitive bias to overweight failures and punishments.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   (Learning rate for positive prediction errors)
+    beta: [0, 10]      (Inverse softmax temperature)
+    lambda_anxiety: [0, 1] (Scales anxiety's effect on negative learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.beta, self.lambda_anxiety = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using separate learning rates for positive and negative
+        prediction errors, with the negative learning rate boosted by anxiety.
+        """
+        # The learning rate for negative outcomes is the base rate plus an
+        # anxiety-dependent term.
+        alpha_neg = np.clip(self.alpha_pos + self.lambda_anxiety * self.stai, 0, 1)
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update
+        # The prediction error is based on the updated stage 2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        # The same learning rate (driven by reward outcome) is applied
+        alpha_1 = self.alpha_pos if delta_2 >= 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Corrupted World Model
+This model posits that the participant uses a sophisticated, model-based strategy, but their anxiety corrupts their internal "world model." Specifically, anxiety amplifies learning from surprising events when updating their beliefs about the spaceship-to-planet transitions. A rare transition (a surprising event) will be overweighted, causing the participant to believe the environment is more random and unpredictable than it actually is. This distorted mental map of the task structure will lead to suboptimal planning and choice.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety distorts the learning of the task's transition
+    structure. The participant is a model-based agent who learns the
+    transition probabilities online. Anxiety amplifies the impact of surprising
+    transitions (rare events), causing an overestimation of their likelihood.
+    This leads to a corrupted 'world model' and consequently flawed planning.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     (Learning rate for stage-2 values)
+    beta: [0, 10]    (Inverse softmax temperature for planning)
+    gamma: [0, 5]     (Scales the anxiety-driven surprise bonus for transition learning)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gamma = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a subjective transition matrix learned by the participant."""
+        # Start with a weak, uniform prior over transitions
+        self.subjective_trans_counts = np.ones((self.n_choices, self.n_states))
+        self.T_subjective = self.subjective_trans_counts / self.subjective_trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        A pure model-based policy. It calculates stage-1 values by planning
+        through the (distorted) subjective transition model.
+        """
+        # Find the best action available at each stage-2 state
+        max_q_stage2 = np.max(self.q_stage2, axis=1)
+        
+        # Calculate expected value of stage-1 actions using the subjective model
+        q_model_based = self.T_subjective @ max_q_stage2
+        
+        return self.softmax(q_model_based, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        The value update is purely model-free for stage 2. Stage 1 values are
+        not stored but computed via planning in policy_stage1.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        After the trial, update the subjective transition model based on what
+        was just observed, with a surprise bonus modulated by anxiety.
+        """
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Calculate surprise as 1 minus the predicted probability of the event
+        p_observed = self.T_subjective[action_1, state]
+        surprise = 1.0 - p_observed
+        
+        # Anxiety amplifies the learning update, especially for surprising events
+        update_bonus = self.gamma * self.stai * surprise
+        
+        # Update transition counts and re-normalize to get new probabilities
+        self.subjective_trans_counts[action_1, state] += 1.0 + update_bonus
+        self.T_subjective = self.subjective_trans_counts / self.subjective_trans_counts.sum(axis=1, keepdims=True)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

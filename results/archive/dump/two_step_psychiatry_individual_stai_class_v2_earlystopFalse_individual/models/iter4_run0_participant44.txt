@@ -1,0 +1,122 @@
+Here are three new cognitive models exploring different mechanisms for how anxiety (STAI) might influence decision-making in this task, particularly focusing on the observed behavior of sticking to one option.
+
+### Model 1: Anxiety-Modulated Perseveration (Stickiness)
+This model hypothesizes that anxiety increases "stickiness" or choice perseveration. Instead of a static bias towards a specific option (like the previous best model), this model assumes high anxiety makes participants more likely to repeat their *previous* choice, regardless of which option it was. This reflects a strategy of minimizing cognitive load or avoiding the regret of switching.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety increases choice perseveration (stickiness).
+    High anxiety individuals are more likely to repeat their last choice to minimize 
+    decision conflict or cognitive effort. The degree of stickiness scales with STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature)
+    stick_base: [0, 5] (Base level of perseveration)
+    stick_stai_mult: [0, 5] (How much STAI amplifies stickiness)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stick_base, self.stick_stai_mult = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate stickiness bonus
+        # Bonus is added to the Q-value of the previously chosen action
+        stickiness = self.stick_base + (self.stick_stai_mult * self.stai)
+        
+        biased_q = self.q_stage1.copy()
+        if self.last_action1 is not None:
+            biased_q[int(self.last_action1)] += stickiness
+            
+        return self.softmax(biased_q, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Model-Based Suppression
+This model tests the hypothesis that anxiety consumes working memory resources, impairing complex "model-based" planning. In the two-step task, model-based reinforcement learning (MB) uses the transition structure (A->X, U->Y) to update values, while model-free (MF) learning relies only on direct reward history. This model implements a hybrid MF/MB agent where the mixing weight `w` (0=pure MF, 1=pure MB) is reduced by anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety suppresses model-based planning.
+    The agent uses a hybrid Model-Based (MB) and Model-Free (MF) strategy.
+    The weight 'w' determines the balance (1=MB, 0=MF).
+    Higher anxiety reduces 'w', pushing the participant towards simpler MF strategies.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate)
+    beta: [0, 10] (Inverse temperature)
+    w_max: [0, 1] (Maximum model-based weight for low anxiety)
+    stai_suppression: [0, 1] (How strongly STAI reduces w)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max, self.stai_suppression = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate Model-Based values
+        # Q_MB(s1, a) = sum(T(s1, a, s2) * max(Q_stage2(s2)))
+        q_mb = np.zeros(self.n_choices)
+        for a in range(self.n_choices):
+            for s_next in range(self.n_states):
+                # Transition probability T[a, s_next]
+                prob = self.T[a, s_next]
+                # Value of next state is max of its stage 2 Q-values
+                val = np.max(self.q_stage2[s_next])
+                q_mb[a] += prob * val
+        
+        # Calculate mixing weight w
+        # w decreases as STAI increases
+        w = self.w_max * (1.0 - (self.stai_suppression * self.stai))
+        w = np.clip(w, 0.0, 1.0)
+        
+        # Combined Q-values
+        q_net = (1 - w) * self.q_stage1 + w * q_mb
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Punishment Sensitivity
+This model hypothesizes that anxiety creates a hypersensitivity to negative outcomes (lack of reward). Instead of a single learning rate, the model splits learning into positive (`alpha_pos`) and negative (`alpha_neg`) updates. The negative learning rate is modulated by STAI, meaning anxious individuals react more strongly when they *don't* get a coin, potentially driving them to abandon options quickly or stick to "safe" ones if the environment is volatile.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety increases sensitivity to negative prediction errors (punishment).
+    The model uses separate learning rates for positive and negative prediction errors.
+    The negative learning rate is amplified by STAI.
+    
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] (Learning rate for positive RPEs)
+    alpha_neg_base: [0, 1] (Base learning rate for negative RPEs)
+    beta: [0, 10] (Inverse temperature)
+    neg_sens_stai: [0, 2] (Amplification of negative learning rate by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta, self.neg_sens_stai = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective negative learning rate
+        alpha_neg = self.alpha_neg_base * (1.0 + self.neg_sens_stai * self.stai)
+        alpha_neg = np.clip(alpha_neg, 0.0, 1.0)
+        
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

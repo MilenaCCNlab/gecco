@@ -1,0 +1,142 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Enhanced Relief Learning
+    
+    This model hypothesizes that anxious participants experience a heightened sense of 
+    relief or safety when receiving a reward, leading to stronger reinforcement 
+    from positive outcomes compared to negative ones.
+    
+    Mechanism:
+    The learning rate for positive prediction errors (rewards) is boosted by the STAI score.
+    alpha_pos = alpha * (1 + relief_scale * stai)
+    alpha_neg = alpha
+    
+    This asymmetry causes the participant to "latch on" to rewarding options 
+    more strongly, explaining the long streaks of choices even when interspersed with losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    relief_scale: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.relief_scale = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        # Apply relief scaling if outcome was positive (reward > expectation roughly, or just reward=1)
+        # Here we apply it if the reward is 1 (success)
+        eff_alpha_2 = self.alpha
+        if reward == 1.0:
+            eff_alpha_2 = self.alpha * (1.0 + self.relief_scale * self.stai)
+            # Clip to ensure stability, though not strictly required by bounds
+            eff_alpha_2 = min(eff_alpha_2, 1.0)
+            
+        self.q_stage2[state, action_2] += eff_alpha_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        # We apply the same logic to the transfer of value to stage 1
+        eff_alpha_1 = self.alpha
+        if self.q_stage2[state, action_2] > self.q_stage1[action_1]: # Positive prediction error
+             eff_alpha_1 = self.alpha * (1.0 + self.relief_scale * self.stai)
+             eff_alpha_1 = min(eff_alpha_1, 1.0)
+
+        self.q_stage1[action_1] += eff_alpha_1 * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Pessimistic Decay
+    
+    This model hypothesizes that high anxiety consumes working memory resources and 
+    promotes a pessimistic view of unchosen options. The value of the spaceship 
+    NOT chosen decays towards 0 (pessimism) on every trial.
+    
+    The rate of this decay is modulated by the STAI score.
+    
+    Mechanism:
+    Q_unchosen = Q_unchosen * (1 - decay_rate * stai)
+    
+    This explains the lack of switching: the alternative option's value continuously 
+    erodes, making the current option appear relatively better even if it yields occasional losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    decay_rate: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate = model_parameters
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Identify the unchosen stage-1 action
+        unchosen_action = 1 - action_1
+        
+        # Decay the value of the unchosen action towards 0
+        decay_factor = self.decay_rate * self.stai
+        # Ensure factor is within [0, 1]
+        decay_factor = np.clip(decay_factor, 0.0, 1.0)
+        
+        self.q_stage1[unchosen_action] *= (1.0 - decay_factor)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Habituation
+    
+    This model hypothesizes that anxiety promotes a shift from goal-directed (RL) 
+    control to habitual control. Unlike simple "stickiness" (repeating the last choice), 
+    this model builds a long-term habit trace based on the history of choices.
+    
+    Mechanism:
+    A habit trace H is updated every trial: H(a) moves towards 1 if chosen, 0 otherwise.
+    The decision policy is a softmax over: Q_stage1 + (habit_weight * stai * H).
+    
+    High anxiety increases the influence of this historical habit trace, leading to 
+    strong inertia (long blocks of the same choice) as seen in the data.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    habit_weight: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.habit_weight = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize habit trace at 0
+        self.habit_trace = np.zeros(self.n_choices)
+        # Fixed learning rate for the habit trace itself to avoid over-parameterization
+        self.habit_learning_rate = 0.3 
+
+    def policy_stage1(self) -> np.ndarray:
+        # Combine Q-values with the Habit trace, scaled by anxiety
+        habit_influence = self.habit_weight * self.stai * self.habit_trace
+        combined_values = self.q_stage1 + habit_influence
+        return self.softmax(combined_values, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update habit trace
+        # Chosen action moves towards 1, unchosen towards 0
+        self.habit_trace[action_1] += self.habit_learning_rate * (1.0 - self.habit_trace[action_1])
+        self.habit_trace[1 - action_1] += self.habit_learning_rate * (0.0 - self.habit_trace[1 - action_1])
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

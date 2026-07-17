@@ -1,0 +1,209 @@
+Here are three cognitive models, each proposing a distinct hypothesis about how the participant makes decisions in the two-step task, with anxiety modulating their behavior.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety leads to a biased perception
+    of transition probabilities, specifically overweighting common transitions and
+    underweighting rare ones. This bias is applied to the Model-Based (MB)
+    component of decision-making. The overall control is a mixture of Model-Free (MF)
+    and this anxiety-biased Model-Based system. Anxious individuals might find
+    comfort in perceiving the environment as more predictable.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (both MF and for stage 1 value).
+    beta: [0, 10] - Softmax inverse temperature.
+    w_mb: [0, 1] - Weight for the Model-Based component.
+    transition_bias_base: [0, 0.5] - Baseline factor for biasing common transitions.
+                                     Added to common transition prob, subtracted from rare.
+    anxiety_transition_amplification: [0, 1] - Factor by which STAI score amplifies this bias.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb, self.transition_bias_base, self.anxiety_transition_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Ensure parameters are within bounds
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.beta = np.clip(self.beta, 0.0, 10.0)
+        self.w_mb = np.clip(self.w_mb, 0.0, 1.0)
+        self.transition_bias_base = np.clip(self.transition_bias_base, 0.0, 0.5)
+        self.anxiety_transition_amplification = np.clip(self.anxiety_transition_amplification, 0.0, 1.0)
+
+        # Calculate the effective transition bias based on STAI
+        self.effective_transition_bias = self.transition_bias_base + self.stai * self.anxiety_transition_amplification
+        # Clip the effective bias to prevent probabilities from going out of [0, 1] range after adjustment
+        self.effective_transition_bias = np.clip(self.effective_transition_bias, 0.0, 0.4) 
+        
+        # Initialize biased transition probabilities
+        self.T_biased = np.copy(self.T)
+        
+        # Apply the bias to common and rare transitions
+        # Spaceship 0 commonly travels to Planet 0, Spaceship 1 commonly travels to Planet 1
+        for a1 in range(self.n_choices):
+            common_state = a1
+            rare_state = 1 - a1
+            
+            # Increase common transition probability
+            self.T_biased[a1, common_state] = np.clip(self.T[a1, common_state] + self.effective_transition_bias, 0.0, 1.0)
+            # Decrease rare transition probability
+            self.T_biased[a1, rare_state] = np.clip(self.T[a1, rare_state] - self.effective_transition_bias, 0.0, 1.0)
+            
+            # Renormalize to ensure probabilities sum to 1 for each action
+            self.T_biased[a1, :] = self.T_biased[a1, :] / np.sum(self.T_biased[a1, :])
+
+        # Q-values for model-free learning (equivalent to q_stage1 in base class before mixing)
+        self.q_mf = 0.5 * np.ones(self.n_choices) 
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a mixture of Model-Free
+        and anxiety-biased Model-Based values.
+        """
+        # Model-Based (MB) Q-values using biased transitions
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Expected value of reaching a state, then choosing the best action in that state
+            q_mb[a1] = np.sum([self.T_biased[a1, s2] * np.max(self.q_stage2[s2]) for s2 in range(self.n_states)])
+        
+        # Combine MF and MB values to get the final Stage 1 Q-values for softmax
+        self.q_stage1 = self.w_mb * q_mb + (1 - self.w_mb) * self.q_mf
+        
+        return self.softmax(self.q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Model-Free Q-values and Stage 2 Q-values.
+        """
+        # Stage 2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Model-Free update (using the updated value of the chosen stage-2 action)
+        delta_mf = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_mf
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety shifts the subjective
+    reference point for rewards. Participants with high anxiety treat not
+    receiving a reward (0 coins) more like a "loss" due to an elevated
+    internal reference point. This makes them more averse to options that
+    yield 0 coins, leading to stronger devaluation of such options.
+    Q-values will learn these subjective expected values.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    r_ref_base: [0, 0.5] - Baseline subjective reference point for rewards.
+                           A reward R is compared to this reference point.
+    anxiety_r_ref_shift: [0, 0.5] - Factor by which STAI score shifts the
+                                    reference point upwards.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.r_ref_base, self.anxiety_r_ref_shift = model_parameters
+
+    def init_model(self) -> None:
+        self.alpha = np.clip(self.alpha, 0.0, 1.0)
+        self.beta = np.clip(self.beta, 0.0, 10.0)
+        self.r_ref_base = np.clip(self.r_ref_base, 0.0, 0.5)
+        self.anxiety_r_ref_shift = np.clip(self.anxiety_r_ref_shift, 0.0, 0.5)
+
+        # Calculate the effective reference point based on STAI
+        # The higher the STAI, the higher the reference point, making 0.0 rewards feel more negative.
+        self.effective_r_ref = np.clip(self.r_ref_base + self.stai * self.anxiety_r_ref_shift, 0.0, 1.0)
+        
+        # Initialize Q-values to reflect the shifted value scale
+        # If the reference point is 0.5, a 0.5 expected actual reward would be 0.
+        # Initializing to 0.5 - effective_r_ref makes sense for subjective values.
+        self.q_stage1 = (0.5 - self.effective_r_ref) * np.ones(self.n_choices)
+        self.q_stage2 = (0.5 - self.effective_r_ref) * np.ones((self.n_states, self.n_choices))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values. The prediction error is calculated using a reward that is
+        transformed by the anxiety-modulated reference point. Q-values thus
+        represent subjective expected values.
+        """
+        # Transform the observed reward based on the reference point
+        # A reward of 1 becomes (1 - r_ref), a reward of 0 becomes (0 - r_ref)
+        transformed_reward = reward - self.effective_r_ref
+
+        # Stage 2 update
+        delta_2 = transformed_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update: target is the current (subjective) Q-value of the chosen Stage 2 action
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that high anxiety makes participants
+    hypersensitive to surprising events. The learning rate is dynamically
+    adjusted upwards when a surprising event occurs (e.g., a rare transition
+    or a large prediction error). This amplification of the learning rate
+    in response to surprise is increased by the participant's anxiety level,
+    leading to over-reaction and potentially volatile value updates.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1] - Baseline learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    surprise_sensitivity_base: [0, 1] - Baseline sensitivity to surprising events.
+    anxiety_surprise_amplification: [0, 1] - Factor by which STAI score amplifies
+                                            the learning rate adjustment due to surprise.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.surprise_sensitivity_base, self.anxiety_surprise_amplification = model_parameters
+
+    def init_model(self) -> None:
+        self.alpha_base = np.clip(self.alpha_base, 0.0, 1.0)
+        self.beta = np.clip(self.beta, 0.0, 10.0)
+        self.surprise_sensitivity_base = np.clip(self.surprise_sensitivity_base, 0.0, 1.0)
+        self.anxiety_surprise_amplification = np.clip(self.anxiety_surprise_amplification, 0.0, 1.0)
+
+        # Calculate effective surprise amplification
+        self.effective_surprise_amplification = self.surprise_sensitivity_base + self.stai * self.anxiety_surprise_amplification
+        self.effective_surprise_amplification = np.clip(self.effective_surprise_amplification, 0.0, 2.0) 
+        
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values with an anxiety-modulated, surprise-dependent learning rate.
+        """
+        # Calculate prediction errors
+        pe_stage2 = reward - self.q_stage2[state, action_2]
+        pe_stage1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+
+        # Determine if the transition was rare
+        # Assuming common transitions are prob > 0.5, rare are prob < 0.5 based on self.T
+        is_rare_transition = (self.T[action_1, state] < 0.5) 
+        
+        # Calculate surprise magnitude
+        # Combines absolute prediction error from both stages and a bonus for rare transitions
+        surprise_magnitude = np.abs(pe_stage2) + np.abs(pe_stage1)
+        if is_rare_transition:
+            surprise_magnitude += 0.5 # Add a fixed bonus for rare transitions
+
+        # Calculate dynamic learning rate based on surprise and anxiety amplification
+        alpha_dynamic = self.alpha_base * (1 + self.effective_surprise_amplification * surprise_magnitude)
+        alpha_dynamic = np.clip(alpha_dynamic, 0.0, 1.0) # Ensure alpha doesn't exceed 1
+
+        # Apply the dynamic learning rate to update Q-values
+        self.q_stage2[state, action_2] += alpha_dynamic * pe_stage2
+        self.q_stage1[action_1] += alpha_dynamic * pe_stage1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,147 @@
+Here are 3 new cognitive models exploring different mechanisms for how anxiety (STAI) might influence decision-making in this task.
+
+### Model 1: Anxiety-Modulated Reward Sensitivity
+This model hypothesizes that anxiety affects how subjectively valuable rewards are. High anxiety might blunt the perception of reward (anhedonia-like) or heighten sensitivity to negative outcomes (loss aversion), while low anxiety (like this participant) might lead to standard or heightened reward sensitivity. Here, we scale the reward term in the update rule based on STAI.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates reward sensitivity.
+    
+    The effective reward perceived by the agent is scaled by an anxiety-dependent factor.
+    R_effective = R_actual * (sensitivity_base + sensitivity_mod * STAI)
+    
+    Low anxiety participants (low STAI) might have higher reward sensitivity, 
+    making them learn faster from positive outcomes compared to high anxiety individuals.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]           # Learning rate
+    beta: [0, 10]           # Inverse temperature
+    sens_base: [0.5, 2.0]   # Base reward sensitivity
+    sens_mod: [-1.0, 1.0]   # Modulation of sensitivity by STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.sens_base, self.sens_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective sensitivity constant for this participant
+        self.effective_sensitivity = self.sens_base + (self.sens_mod * self.stai)
+        # Ensure sensitivity doesn't go negative or become too extreme
+        self.effective_sensitivity = np.clip(self.effective_sensitivity, 0.1, 5.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Scale the reward
+        effective_reward = reward * self.effective_sensitivity
+        
+        # Stage 2 Update
+        delta_2 = effective_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (TD)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Learning Rate Asymmetry (Positive vs Negative)
+This model posits that anxiety changes the balance between learning from positive prediction errors (better than expected) versus negative prediction errors (worse than expected). A low anxiety participant might learn equally from both, or favor positive updates, whereas high anxiety is often associated with a "negativity bias" (learning more from negative outcomes).
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the asymmetry between learning from positive 
+    vs. negative prediction errors.
+    
+    We define two learning rates: alpha_pos and alpha_neg.
+    The ratio or balance between them is determined by STAI.
+    
+    alpha_pos = alpha_base
+    alpha_neg = alpha_base * (1 + asymmetry_param * STAI)
+    
+    If asymmetry_param > 0, higher anxiety leads to stronger learning from negative errors.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]      # Base learning rate
+    beta: [0, 10]           # Inverse temperature
+    asym_param: [-2, 2]     # How STAI affects negative learning rate scaling
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.asym_param = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate positive and negative learning rates
+        self.alpha_pos = self.alpha_base
+        
+        # Modulate negative learning rate by STAI
+        # We use a multiplier centered around 1.0
+        neg_multiplier = 1.0 + (self.asym_param * self.stai)
+        self.alpha_neg = np.clip(self.alpha_base * neg_multiplier, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update
+        pe2 = reward - self.q_stage2[state, action_2]
+        alpha2 = self.alpha_pos if pe2 >= 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha2 * pe2
+        
+        # Stage 1 Update
+        # Note: In standard TD, the PE is (Q2 - Q1).
+        pe1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha1 = self.alpha_pos if pe1 >= 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha1 * pe1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Exploration (Inverse Temperature Modulation)
+This model suggests that anxiety directly impacts the exploration-exploitation trade-off (randomness of choice). The "Yerkes-Dodson" law or similar theories might suggest that very low or very high arousal/anxiety impairs performance, or that anxiety leads to more rigid (less random) behavior. Here we model `beta` (inverse temperature) as a function of STAI.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the exploration-exploitation trade-off (beta).
+    
+    High anxiety might lead to more deterministic (rigid) choices (higher beta),
+    while low anxiety might allow for more flexible/random exploration (lower beta).
+    
+    beta_effective = beta_base * exp(stiff_param * STAI)
+    
+    If stiff_param > 0, anxiety increases rigidity (higher beta).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          # Learning rate
+    beta_base: [0, 10]     # Base inverse temperature
+    stiff_param: [-5, 5]   # Sensitivity of beta to STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stiff_param = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective beta
+        # Using exponential to ensure beta stays positive
+        self.beta_effective = self.beta_base * np.exp(self.stiff_param * self.stai)
+        # Clip to prevent numerical overflow in softmax
+        self.beta_effective = np.clip(self.beta_effective, 0.0, 20.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.q_stage1, self.beta_effective)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.softmax(self.q_stage2[state], self.beta_effective)
+
+    # Standard value update
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

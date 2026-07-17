@@ -1,0 +1,152 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) affects decision-making in this task.
+
+### Model 1: Anxiety-Modulated Ambiguity Aversion
+This model tests the hypothesis that anxious individuals are intolerant of uncertainty (ambiguity). They penalize options that they have visited fewer times, preferring familiar "safe" options even if they are not the most rewarding.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates Ambiguity Aversion.
+    Anxious individuals are intolerant of uncertainty. They penalize options 
+    that have been visited fewer times (high uncertainty).
+    
+    Mechanism:
+    A penalty is subtracted from the Q-values in Stage 1 based on visit counts.
+    penalty = nu * stai / sqrt(count + 1)
+    
+    If nu > 0: Ambiguity Aversion (Anxious people avoid rare options).
+    If nu < 0: Novelty Seeking.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    nu: [-5, 5]   # Ambiguity sensitivity parameter
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.nu = model_parameters
+
+    def init_model(self) -> None:
+        # Track how many times each spaceship (Stage 1 action) has been chosen
+        self.counts = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate ambiguity penalty
+        # 1 / sqrt(N + 1) is a proxy for uncertainty (standard error of the mean)
+        uncertainty = 1.0 / np.sqrt(self.counts + 1.0)
+        
+        # The penalty scales with anxiety (stai) and the parameter nu
+        penalty = self.nu * self.stai * uncertainty
+        
+        # Effective Q-values for decision making
+        q_eff = self.q_stage1 - penalty
+        
+        return self.softmax(q_eff, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Increment count for the chosen spaceship
+        self.counts[action_1] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Attentional Lapses
+This model tests the hypothesis that high anxiety leads to "noise" or "panic" in decision-making. Instead of consistently following value-based preferences, anxious participants are more prone to random attentional lapses where they pick options uniformly at random.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety increases Attentional Lapses (Noise).
+    High anxiety leads to moments of disengagement or panic, resulting in 
+    random choices regardless of learned value.
+    
+    Mechanism:
+    The final choice probability is a mixture of the Softmax policy (value-based) 
+    and a uniform random distribution. The weight of the random component (epsilon)
+    scales with STAI.
+    
+    epsilon = xi * stai
+    P(choice) = (1 - epsilon) * Softmax + epsilon * 0.5
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    xi: [0, 1]    # Lapse scaling factor (ensures epsilon stays <= 1 given STAI < 1)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.xi = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Standard value-based probabilities
+        softmax_probs = self.softmax(self.q_stage1, self.beta)
+        
+        # Calculate lapse rate based on anxiety
+        epsilon = self.xi * self.stai
+        epsilon = np.clip(epsilon, 0.0, 1.0) # Ensure valid probability
+        
+        # Uniform random probabilities
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        
+        # Mixture model
+        return (1 - epsilon) * softmax_probs + epsilon * random_probs
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Apply the same lapse logic to stage 2
+        softmax_probs = self.softmax(self.q_stage2[state], self.beta)
+        
+        epsilon = self.xi * self.stai
+        epsilon = np.clip(epsilon, 0.0, 1.0)
+        
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        return (1 - epsilon) * softmax_probs + epsilon * random_probs
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Impaired Distal Learning
+This model tests the hypothesis that anxiety consumes cognitive resources (working memory), making it harder to link outcomes to distal causes (the spaceship choice in Stage 1) while preserving learning for immediate causes (the alien choice in Stage 2).
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety impairs Distal Credit Assignment (Stage 1 Learning).
+    Anxiety consumes working memory resources required to link outcomes back 
+    to the initial choice (Stage 1), while immediate learning (Stage 2) 
+    remains intact.
+    
+    Mechanism:
+    The learning rate for Stage 1 is dampened by STAI, while Stage 2 uses
+    the base learning rate.
+    
+    alpha_1 = alpha / (1 + eta * stai)
+    alpha_2 = alpha
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    eta: [0, 20]  # Distal impairment factor
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.eta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (Immediate) - Uses standard Alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (Distal) - Uses Dampened Alpha
+        # The higher the anxiety (stai) and impairment factor (eta), 
+        # the less the participant learns about the spaceship choice.
+        alpha_1 = self.alpha / (1.0 + self.eta * self.stai)
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,171 @@
+As a cognitive scientist and Python programmer, I will propose three distinct models to explain this participant's decision-making process. Given their high score on the anxiety questionnaire (stai = 0.6625), each model will articulate a different hypothesis for how anxiety influences learning and choice in this two-step task.
+
+### Model 1: Anxiety-Modulated Credit Assignment
+This model tests the hypothesis that anxiety affects how the participant assigns credit for outcomes to their initial choices. Specifically, it proposes that higher anxiety leads to a more "short-sighted" credit assignment, where the final reward on a trial has an outsized influence on the value of the first-stage choice, bypassing the learned value of the intermediate planetary state. This is implemented using a TD(λ) learning framework, where the eligibility trace parameter `λ` is directly scaled by the participant's anxiety level.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety promotes a simpler, more reactive credit assignment
+    strategy. This model uses an eligibility trace (lambda) to allow the final
+    reward to directly update the value of the first-stage choice. The strength
+    of this direct update is controlled by the lambda parameter, which is scaled
+    by the participant's STAI score. Higher anxiety thus makes the model-free
+    learner more sensitive to the most recent reward, and less sensitive to the
+    learned value of the intermediate state (the planet).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate)
+    beta: [0, 10]       (Softmax inverse temperature)
+    lambda_base: [0, 1] (Base eligibility trace parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize the anxiety-modulated eligibility trace parameter."""
+        # Higher anxiety (stai) increases the lambda parameter, strengthening the
+        # link between the final reward and the first-stage action's value.
+        self.lambda_param = self.lambda_base * self.stai
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Implements a TD(lambda) update rule.
+        The stage-1 value update is a combination of the standard TD update
+        and a direct update from the stage-2 prediction error, weighted by lambda.
+        """
+        # Stage-2 update (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Stage-1 TD error, based on the value of the reached state
+        stage1_target = np.max(self.q_stage2[state])
+        delta_1 = stage1_target - self.q_stage1[action_1]
+
+        # Update stage-1 value using the combined error
+        self.q_stage1[action_1] += self.alpha * (delta_1 + self.lambda_param * delta_2)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Pessimism and Loss Aversion
+This model formalizes the clinical observation that anxiety is associated with a pessimistic worldview and heightened sensitivity to negative events. It proposes that the participant (1) initializes the value of all options pessimistically (assuming they will yield no reward), and (2) learns more rapidly from outcomes that are worse than expected (negative prediction errors) than from those that are better. The degree of this learning asymmetry is scaled by the participant's anxiety score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety fosters a pessimistic bias. This is captured in
+    two ways: first, the agent initializes all action values to zero, assuming
+    the worst until proven otherwise. Second, the agent uses separate learning
+    rates for positive and negative prediction errors. Higher anxiety (stai)
+    specifically increases the learning rate for negative errors, making the
+    agent over-weight disappointing outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]    (Base learning rate for positive outcomes)
+    beta: [0, 10]       (Softmax inverse temperature)
+    anx_sensitivity: [0, 1] (Multiplier for anxiety's effect on negative learning rate)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.anx_sensitivity = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize pessimistic values and anxiety-modulated learning rates."""
+        # Pessimistic initialization: All Q-values start at 0 instead of 0.5
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = np.zeros((self.n_states, self.n_choices))
+
+        # Learning rate for positive prediction errors is the base rate
+        self.alpha_pos = self.alpha_base
+        # Learning rate for negative errors is boosted by anxiety
+        alpha_neg_raw = self.alpha_base + self.anx_sensitivity * self.stai
+        self.alpha_neg = min(1.0, alpha_neg_raw) # Cap learning rate at 1.0
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Implements value updating with separate learning rates for positive
+        and negative prediction errors.
+        """
+        # Stage-2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+
+        # Stage-1 update
+        stage1_target = np.max(self.q_stage2[state])
+        delta_1 = stage1_target - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Indecisiveness under Uncertainty
+This model explores the idea that anxiety degrades the quality of decision-making, particularly when the choice is difficult. It posits that when the estimated values of two options are very close, the participant's high anxiety leads to increased behavioral randomness, as if they are "paralyzed by indecision." Computationally, this is modeled as a dynamic softmax `beta` parameter that decreases (making choices more random) when the difference in Q-values is small. The magnitude of this effect is scaled by the participant's anxiety level.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to inconsistent or random choices,
+    particularly when faced with difficult decisions (i.e., when options have
+    similar perceived values). This model implements a dynamic choice temperature
+    (beta) that is reduced when value estimates are close. The degree of this
+    "uncertainty penalty" on choice consistency is scaled by the participant's
+    STAI score, such that higher anxiety leads to more random behavior during
+    high-conflict decisions.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]                   (Learning rate)
+    beta_base: [0, 10]              (Base choice temperature)
+    uncertainty_sensitivity: [0, 5] (How strongly value difference affects beta)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.uncertainty_sensitivity = model_parameters
+
+    def _get_effective_beta(self, q_values: np.ndarray) -> float:
+        """Calculates a dynamic beta based on value difference and anxiety."""
+        value_diff = np.abs(q_values[0] - q_values[1])
+        
+        # Penalty increases as value difference shrinks.
+        uncertainty_penalty = np.exp(-value_diff * self.uncertainty_sensitivity)
+        
+        # The reduction in beta is scaled by anxiety.
+        beta_reduction = self.stai * uncertainty_penalty
+        
+        # Effective beta is the base beta minus the anxiety-driven reduction.
+        effective_beta = self.beta_base * (1 - beta_reduction)
+        return max(0, effective_beta) # Ensure beta is non-negative
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using dynamic beta."""
+        effective_beta = self._get_effective_beta(self.q_stage1)
+        return self.softmax(self.q_stage1, effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using dynamic beta."""
+        effective_beta = self._get_effective_beta(self.q_stage2[state])
+        return self.softmax(self.q_stage2[state], effective_beta)
+    
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Uses the standard TD learning rule from the base class to update values.
+        The core hypothesis of this model is about policy, not value updates.
+        """
+        # Standard SARSA-like update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage-1 value is updated towards the value of the action taken at stage 2
+        # This is a different update from pure MF, it's more like SARSA(0)
+        td_target = self.q_stage2[state, action_2]
+        delta_1 = td_target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

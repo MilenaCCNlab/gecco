@@ -1,0 +1,154 @@
+Here are three cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in the two-step task.
+
+### Model 1: Anxiety-Impaired Model-Based Control
+This model tests the hypothesis that anxiety acts as a cognitive load that interferes with computationally expensive "Model-Based" (planning) strategies. Low anxiety participants (like this one) are hypothesized to rely more heavily on Model-Based control, while higher anxiety shifts the balance toward "Model-Free" (habitual) control.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: The participant uses a hybrid Model-Based (MB) and Model-Free (MF) strategy.
+    Anxiety (STAI) is hypothesized to impair MB planning capacity.
+    The weight of the MB system (w) decreases as anxiety increases.
+    
+    w_mb = max(0, 1 - (stai * w_penalty))
+    
+    Low anxiety -> High w_mb (More planning)
+    High anxiety -> Low w_mb (More habit)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate for MF values and Stage 2 values
+    beta: [0, 10]       # Inverse temperature
+    w_penalty: [0, 5]   # How strongly anxiety penalizes MB control
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_penalty = model_parameters
+
+    def init_model(self) -> None:
+        # q_stage1 in base class will serve as Q_MF (Model-Free values)
+        # We need a separate structure for transition learning if we were learning T, 
+        # but here we use the fixed T from base class for the MB calculation.
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based values (Q_MB)
+        # Q_MB(a) = Sum_s' [ T(s'|a) * max_a' Q_stage2(s', a') ]
+        # self.T is shape (2, 2) -> [action, state]
+        # self.q_stage2 is shape (2, 2) -> [state, action]
+        
+        max_q2 = np.max(self.q_stage2, axis=1) # Max value of each state (X, Y)
+        q_mb = self.T @ max_q2 # Expected value of each spaceship
+        
+        # 2. Calculate Mixing Weight based on Anxiety
+        # Low anxiety (stai ~0.26) results in higher w_mb
+        w_mb = 1.0 - (self.stai * self.w_penalty)
+        w_mb = np.clip(w_mb, 0.0, 1.0)
+        
+        # 3. Combine MB and MF values
+        # self.q_stage1 stores the MF values (updated via TD in value_update)
+        q_net = (w_mb * q_mb) + ((1 - w_mb) * self.q_stage1)
+        
+        return self.softmax(q_net, self.beta)
+
+    # policy_stage2 uses default softmax on q_stage2
+    # value_update uses default TD learning which updates q_stage1 (MF) and q_stage2
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Asymmetric Learning
+This model tests the hypothesis that anxiety specifically alters sensitivity to negative outcomes. It posits that anxiety amplifies the learning rate for negative prediction errors (losses), making anxious individuals quicker to devalue options after failure. Low anxiety participants are expected to have more balanced learning rates.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: The participant learns differently from positive vs negative prediction errors.
+    Anxiety (STAI) modulates the learning rate specifically for negative errors (losses).
+    
+    alpha_pos = alpha_base
+    alpha_neg = alpha_base * (1 + neg_bias * stai)
+    
+    Higher anxiety -> Stronger reaction to worse-than-expected outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]  # Base learning rate
+    beta: [0, 10]       # Inverse temperature
+    neg_bias: [0, 10]   # Multiplier for anxiety's effect on negative learning
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.neg_bias = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective learning rates
+        alpha_pos = self.alpha_base
+        alpha_neg = self.alpha_base * (1.0 + self.neg_bias * self.stai)
+        # Clip alpha_neg to ensure stability
+        alpha_neg = min(alpha_neg, 1.0)
+
+        # --- Stage 2 Update ---
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += alpha_neg * delta_2
+        
+        # --- Stage 1 Update ---
+        # TD(0) update: target is the updated Stage 2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += alpha_neg * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Value Decay
+This model tests the hypothesis that anxiety correlates with "noisier" memory maintenance. It proposes that value representations for unchosen options decay (forgetting) over time, and the rate of this decay is proportional to anxiety. Low anxiety participants maintain stable values for longer periods, explaining long streaks of exploitation.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Unchosen option values decay over time (forgetting).
+    Anxiety (STAI) accelerates this decay rate.
+    
+    decay_rate = decay_factor * stai
+    Q(unchosen) = Q(unchosen) * (1 - decay_rate)
+    
+    Low anxiety -> Low decay -> Stable preferences (Exploitation streaks)
+    High anxiety -> High decay -> Volatile preferences
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         # Learning rate
+    beta: [0, 10]         # Inverse temperature
+    decay_factor: [0, 1]  # Scaling factor for anxiety-driven decay
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_factor = model_parameters
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Call base method to store last actions
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Calculate anxiety-dependent decay
+        decay = self.decay_factor * self.stai
+        decay = np.clip(decay, 0.0, 1.0)
+        
+        # Decay Stage 1 unchosen option
+        unchosen_1 = 1 - action_1
+        self.q_stage1[unchosen_1] *= (1.0 - decay)
+        
+        # Decay Stage 2 unchosen option (in the visited state)
+        unchosen_2 = 1 - action_2
+        self.q_stage2[state, unchosen_2] *= (1.0 - decay)
+        
+        # Note: We do not decay the unvisited state's values in this model, 
+        # assuming context-dependent memory.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

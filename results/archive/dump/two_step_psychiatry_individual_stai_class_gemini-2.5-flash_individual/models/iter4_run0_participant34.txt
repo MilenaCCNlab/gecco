@@ -1,0 +1,181 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the highly anxious participant (STAI score 0.9625) makes decisions in the two-step task, and how anxiety modulates their behavior.
+
+### Model 1: Anxious Perseveration Model
+
+This model proposes that high anxiety leads to increased perseveration in Stage 1 choices. Participants are more likely to repeat their previous Stage 1 action, with this tendency being amplified by their anxiety level, regardless of the previous trial's outcome. This represents a reduced cognitive flexibility or an increased reliance on habitual responses under stress.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Perseveration Model.
+    High anxiety leads to increased perseveration in Stage 1 choices. Participants
+    are more likely to repeat their previous Stage 1 action, with this tendency
+    being amplified by their anxiety level, regardless of the previous trial's
+    outcome. This represents a reduced cognitive flexibility or an increased
+    reliance on habitual responses under stress.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    perseveration_bonus_base: [0, 1] (Base bonus added to the Q-value of the last chosen Stage 1 action)
+    stai_perseveration_factor: [0, 1] (Factor by which STAI amplifies the perseveration bonus)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.perseveration_bonus_base, self.stai_perseveration_factor = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # Initialize last_action1 to an invalid value to indicate no previous choice
+        self.last_action1 = -1 
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying an anxiety-amplified
+        perseveration bonus to the last chosen action's Q-value, irrespective of outcome.
+        """
+        q_stage1_biased = np.copy(self.q_stage1)
+
+        if self.last_action1 != -1: # Apply bias only if there was a previous trial
+            # Calculate the anxiety-amplified perseveration bonus
+            perseveration_bonus = self.perseveration_bonus_base + (self.stai * self.stai_perseveration_factor)
+            q_stage1_biased[self.last_action1] += perseveration_bonus
+        
+        return self.softmax(q_stage1_biased, self.beta)
+    
+    # The value_update and post_trial methods from the base class are sufficient.
+    # value_update performs standard TD learning.
+    # post_trial correctly stores self.last_action1 for the next trial.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxious Rare-Transition Aversion with Outcome-Dependent Learning
+
+This model posits that high anxiety makes participants particularly averse to rare transitions. They apply a penalty to the Q-value of a Stage 1 action based on its probability of leading to a rare transition, and this aversion is amplified by their anxiety level. Furthermore, anxiety also influences learning by making participants update Q-values more strongly for negative outcomes (no reward) than positive outcomes across both stages.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Rare-Transition Aversion with Outcome-Dependent Learning.
+    High anxiety makes participants particularly averse to rare transitions. They
+    apply a penalty to the Q-value of a Stage 1 action based on its probability
+    of leading to a rare transition, and this aversion is amplified by their
+    anxiety level. Additionally, anxiety also influences learning by making
+    participants update Q-values more strongly for negative outcomes (no reward)
+    than positive outcomes across both stages.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] (Learning rate for positive prediction errors)
+    alpha_neg_base: [0, 1] (Base learning rate for negative prediction errors)
+    stai_alpha_neg_boost: [0, 1] (Factor by which STAI amplifies alpha_neg)
+    beta: [0, 10] (Softmax inverse temperature)
+    rare_transition_penalty_base: [0, 1] (Base penalty applied to Stage 1 Q-value for rare transition probability)
+    stai_rare_penalty_factor: [0, 1] (Factor by which STAI amplifies this rare transition penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_alpha_neg_boost, \
+        self.beta, self.rare_transition_penalty_base, self.stai_rare_penalty_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying an anxiety-amplified
+        penalty for the probability of rare transitions.
+        """
+        q_stage1_biased = np.copy(self.q_stage1)
+        
+        # Calculate the total rare transition penalty
+        total_rare_penalty = self.rare_transition_penalty_base + (self.stai * self.stai_rare_penalty_factor)
+        
+        # Apply penalty to each action's Q-value based on its rare transition probability
+        # Spaceship 0 (A) commonly to Planet 0 (X), rarely to Planet 1 (Y) -> T[0,1] is rare prob
+        # Spaceship 1 (U) commonly to Planet 1 (Y), rarely to Planet 0 (X) -> T[1,0] is rare prob
+        q_stage1_biased[0] -= total_rare_penalty * self.T[0, 1] # Penalty for A (0) if averse to Y (1)
+        q_stage1_biased[1] -= total_rare_penalty * self.T[1, 0] # Penalty for U (1) if averse to X (0)
+        
+        return self.softmax(q_stage1_biased, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using outcome-dependent learning rates, with anxiety
+        boosting the learning rate for negative prediction errors.
+        """
+        # Determine the effective learning rate based on reward outcome
+        effective_alpha_neg = self.alpha_neg_base + (self.stai * self.stai_alpha_neg_boost)
+        alpha_current = self.alpha_pos if reward == 1 else effective_alpha_neg
+        
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += alpha_current * delta_2
+        
+        # Stage 1 update
+        # For stage 1, the "reward" is the value of the chosen stage 2 action
+        # The delta for stage 1 is based on the updated Q_stage2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_current * delta_1
+
+    # The post_trial method from the base class is sufficient.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxious Stage-1 Exploitation
+
+This model hypothesizes that high anxiety leads to increased exploitation and reduced exploration specifically at Stage 1 (spaceship choice). This is modeled by an anxiety-modulated increase in the Stage 1 inverse temperature (`beta_stage1`), making choices more deterministic based on learned Q-values. Stage 2 choices (alien choice) are governed by a separate, unmodulated inverse temperature. This suggests anxiety primarily impacts the initial, more complex decision.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Stage-1 Exploitation.
+    High anxiety leads to increased exploitation and reduced exploration
+    specifically at Stage 1 (spaceship choice). This is modeled by an
+    anxiety-modulated increase in the Stage 1 inverse temperature (beta_stage1),
+    making choices more deterministic based on learned Q-values. Stage 2 choices
+    (alien choice) are governed by a separate, unmodulated inverse temperature.
+    This suggests anxiety primarily impacts the initial, more complex decision.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta_stage1_base: [0, 10] (Base inverse temperature for Stage 1 choices)
+    stai_beta_stage1_boost: [0, 10] (Factor by which STAI amplifies beta_stage1)
+    beta_stage2: [0, 10] (Inverse temperature for Stage 2 choices)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_stage1_base, self.stai_beta_stage1_boost, self.beta_stage2 = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using an anxiety-modulated beta.
+        Higher anxiety leads to a higher beta, promoting exploitation.
+        """
+        # Calculate the effective beta for Stage 1, boosted by anxiety
+        effective_beta_stage1 = self.beta_stage1_base + (self.stai * self.stai_beta_stage1_boost)
+        return self.softmax(self.q_stage1, effective_beta_stage1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities using a fixed beta_stage2.
+        """
+        return self.softmax(self.q_stage2[state], self.beta_stage2)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using a single learning rate (alpha) for both stages.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    # The post_trial method from the base class is sufficient.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

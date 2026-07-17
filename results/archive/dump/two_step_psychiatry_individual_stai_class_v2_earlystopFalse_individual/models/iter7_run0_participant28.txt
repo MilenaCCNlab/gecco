@@ -1,0 +1,149 @@
+### Cognitive Model 1: Anxious Planning Impairment
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety specifically impairs decision-making at the planning stage (Stage 1),
+    while leaving immediate consumption decisions (Stage 2) relatively intact.
+    
+    This models "anxious indecision" or reduced cognitive control at the choice point
+    where future planning is required.
+    
+    Mechanism:
+    Stage 1 Beta = Beta_Stage2 * (1 - STAI * impairment_factor)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10] (Base inverse temperature for Stage 2)
+    impairment: [0, 1] (Scaling factor for anxiety's effect on Stage 1 precision)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.impairment = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate effective beta for stage 1
+        # High anxiety reduces beta (increases randomness/indecision)
+        # We clip the multiplier to be non-negative
+        beta_multiplier = max(0.0, 1.0 - (self.stai * self.impairment))
+        beta_stage1 = self.beta * beta_multiplier
+        return self.softmax(self.q_stage1, beta_stage1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Stage 2 uses the base beta (unimpaired consumption)
+        return self.softmax(self.q_stage2[state], self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Cognitive Model 2: Anxiety-Modulated Eligibility Trace
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety impairs the "credit assignment" process that links 
+    outcomes (Stage 2 rewards) back to initial choices (Stage 1 actions).
+    
+    This is modeled using an eligibility trace (lambda) in a TD-learning framework,
+    where the trace decay parameter is negatively modulated by STAI.
+    High anxiety -> Weaker link between Stage 1 choice and Stage 2 outcome.
+
+    Mechanism:
+    Lambda = lambda_max * (1 - STAI)
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    lambda_max: [0, 1] (Maximum eligibility trace strength for a non-anxious person)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_max = model_parameters
+        # Calculate the fixed lambda for this participant based on their STAI
+        self.lambda_val = self.lambda_max * max(0.0, (1.0 - self.stai))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Prediction Error
+        # delta_2 = R - Q2(s, a2)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Update Stage 2 Value
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Prediction Error (TD(0) part)
+        # delta_1 = Q2(s, a2) - Q1(a1)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Update Stage 1 Value using TD(lambda)
+        # The update includes the immediate transition error (delta_1)
+        # plus the eligibility trace of the second stage error (lambda * delta_2)
+        combined_error = delta_1 + (self.lambda_val * delta_2)
+        self.q_stage1[action_1] += self.alpha * combined_error
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Cognitive Model 3: Anxiety-Driven Transition Instability (Model-Based)
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxious individuals are hyper-sensitive to "rare" transitions,
+    interpreting them as structural changes in the environment rather than noise.
+    
+    This model is a Model-Based learner that updates its internal transition matrix
+    after every trial. The rate of this update is scaled by STAI.
+    High anxiety -> Faster updating of transition probabilities (instability).
+
+    Mechanism:
+    T_counts[a1, s] += learning_rate_trans * STAI
+    Q_stage1 is computed via the Bellman equation using the dynamic T.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for reward values Q2)
+    beta: [0, 10]
+    lr_trans: [0, 5] (Learning rate scaler for transition counts)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lr_trans = model_parameters
+        # Initialize transition counts from the base class defaults (70/30 split)
+        self.current_counts = self.trans_counts.astype(float)
+
+    def pre_trial(self) -> None:
+        # Model-Based Step: Recompute Q_stage1 based on current Transition Matrix and Q_stage2
+        
+        # 1. Normalize counts to get probabilities
+        # Add epsilon to avoid division by zero if counts degrade (unlikely here)
+        row_sums = self.current_counts.sum(axis=1, keepdims=True)
+        T_probs = self.current_counts / row_sums
+        
+        # 2. Compute max value of next stage states: V(s) = max_a Q2(s, a)
+        # q_stage2 is (n_states, n_choices)
+        max_q2 = np.max(self.q_stage2, axis=1) # Shape: (2,)
+        
+        # 3. Bellman equation: Q1(a) = sum_s T(a, s) * V(s)
+        # T_probs is (2, 2) -> (actions, states)
+        # max_q2 is (2,) -> (states)
+        self.q_stage1 = np.dot(T_probs, max_q2)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update Transition Matrix
+        # Anxious participants update their structural beliefs more aggressively
+        update_magnitude = self.lr_trans * self.stai
+        
+        # Increment the count for the observed transition
+        self.current_counts[action_1, state] += update_magnitude
+        
+        # Optional: Decay the unobserved transitions slightly to keep counts stable?
+        # For this simple model, we just add counts, effectively changing the ratio.
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Only update Stage 2 values with MF learning (Stage 1 is computed MB)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

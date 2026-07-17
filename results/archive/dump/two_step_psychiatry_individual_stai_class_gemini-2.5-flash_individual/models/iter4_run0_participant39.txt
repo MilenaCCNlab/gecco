@@ -1,0 +1,179 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how the participant makes decisions, particularly considering their high anxiety (STAI score = 0.6625).
+
+---
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases the learning rate specifically for outcomes observed after rare transitions.
+    This model assumes separate base learning rates for common and rare transitions, and the rare learning rate
+    is further boosted by the participant's STAI score, reflecting increased attention or sensitivity to unexpected events.
+    This could lead anxious individuals to over-update their expectations following surprising outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha_common: [0, 1] - Learning rate for value updates following common transitions.
+    alpha_rare_base: [0, 1] - Base learning rate for value updates following rare transitions.
+    beta: [0, 10] - Softmax inverse temperature.
+    stai_rare_learning_boost: [0, 5] - Factor by which STAI amplifies the rare transition learning rate.
+                                       A higher value means more anxious individuals learn more from rare events.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_common, self.alpha_rare_base, self.beta, self.stai_rare_learning_boost = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Determine if the transition was rare.
+        # The transition matrix T is structured such that T[0,0] and T[1,1] are common (0.7),
+        # while T[0,1] and T[1,0] are rare (0.3).
+        is_rare_transition = (self.T[action_1, state] < 0.5)
+
+        if is_rare_transition:
+            # Anxiety boosts the rare learning rate.
+            # (1 + stai_rare_learning_boost * self.stai) ensures the boost is proportional to anxiety.
+            effective_alpha = self.alpha_rare_base * (1 + self.stai_rare_learning_boost * self.stai)
+            # Cap effective_alpha at 1.0 to prevent it from exceeding the theoretical maximum.
+            effective_alpha = min(effective_alpha, 1.0)
+        else:
+            effective_alpha = self.alpha_common
+
+        # Stage 2 value update using the effective alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += effective_alpha * delta_2
+        
+        # Stage 1 value update also uses the same effective alpha,
+        # as it learns from the updated Q2 value which was influenced by the transition type.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += effective_alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to a distorted perception of rewards, making negative rewards feel
+    more impactful (more negative utility), and simultaneously reduces exploration by increasing the
+    softmax inverse temperature (beta). This model captures a shift towards risk-aversion (stronger avoidance
+    of losses) and more deterministic decision-making under anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate.
+    beta_base: [0, 10] - Base softmax inverse temperature.
+    stai_beta_boost: [0, 5] - Factor by which STAI increases the beta parameter.
+                             Higher STAI leads to higher beta and less exploration.
+    neg_reward_utility_factor_base: [1, 5] - Base factor to amplify negative rewards (e.g., -1 becomes -1 * factor).
+                                            Must be >= 1, so negative rewards are never made less negative.
+    stai_neg_reward_utility_multiplier: [0, 5] - How much STAI multiplies the negative reward utility factor.
+                                                 Higher STAI means negative rewards feel even worse.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stai_beta_boost, \
+        self.neg_reward_utility_factor_base, self.stai_neg_reward_utility_multiplier = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective beta at initialization, modulated by STAI
+        self.effective_beta = self.beta_base + self.stai_beta_boost * self.stai
+        # Ensure beta is not too low for numerical stability in softmax.
+        self.effective_beta = max(self.effective_beta, 0.1)
+
+        # Calculate effective negative reward utility factor, modulated by STAI
+        self.effective_neg_reward_utility_factor = self.neg_reward_utility_factor_base * \
+                                                   (1 + self.stai_neg_reward_utility_multiplier * self.stai)
+        # Ensure factor is at least 1.0 to only amplify or keep negative rewards as is.
+        self.effective_neg_reward_utility_factor = max(self.effective_neg_reward_utility_factor, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Apply anxiety-modulated utility transformation to the observed reward.
+        # Only negative rewards are affected.
+        transformed_reward = reward
+        if reward < 0:
+            transformed_reward = reward * self.effective_neg_reward_utility_factor
+
+        # Stage 2 value update using the transformed reward
+        delta_2 = transformed_reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 value update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def policy_stage1(self) -> np.ndarray:
+        # Use the anxiety-modulated effective beta for stage 1 action selection
+        return self.softmax(self.q_stage1, self.effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Use the anxiety-modulated effective beta for stage 2 action selection
+        return self.softmax(self.q_stage2[state], self.effective_beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to increased aversion towards first-stage actions that are
+    associated with rare (unexpected) transitions, and also reduces the learning rate for
+    second-stage decisions. This suggests anxious participants actively try to avoid unexpected
+    paths and might simplify or automatize their second-stage choices by learning less from them.
+
+    Parameter Bounds:
+    -----------------
+    alpha_stage1: [0, 1] - Learning rate for stage 1 value updates.
+    alpha_stage2_base: [0, 1] - Base learning rate for stage 2 value updates.
+    beta: [0, 10] - Softmax inverse temperature.
+    rare_transition_aversion_base: [0, 5] - Base penalty applied to Q-values of first-stage actions
+                                            that commonly lead to a rare state.
+    stai_rare_transition_aversion_boost: [0, 5] - How much STAI amplifies this rare transition aversion.
+                                                  Higher STAI means a stronger penalty for potentially rare transitions.
+    stai_stage2_alpha_reduction: [0, 1] - How much STAI reduces the stage 2 learning rate (e.g., 0.5 means
+                                          alpha_stage2 becomes alpha_stage2_base * (1 - 0.5 * stai)).
+                                          Higher STAI leads to less learning at stage 2.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_stage1, self.alpha_stage2_base, self.beta, \
+        self.rare_transition_aversion_base, self.stai_rare_transition_aversion_boost, \
+        self.stai_stage2_alpha_reduction = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate effective rare transition aversion, modulated by STAI
+        self.effective_rare_aversion = self.rare_transition_aversion_base + \
+                                       self.stai_rare_transition_aversion_boost * self.stai
+
+        # Calculate effective stage 2 learning rate, reduced by STAI
+        self.effective_alpha_stage2 = self.alpha_stage2_base * (1 - self.stai_stage2_alpha_reduction * self.stai)
+        # Ensure a minimum learning rate to avoid complete cessation of learning.
+        self.effective_alpha_stage2 = max(self.effective_alpha_stage2, 0.01)
+
+        # Pre-calculate the probability of a rare transition for each first-stage action.
+        # Action 0 (spaceship A) commonly goes to state 0 (planet X), rarely to state 1 (planet Y).
+        # Action 1 (spaceship U) commonly goes to state 1 (planet Y), rarely to state 0 (planet X).
+        # So, P(state 1 | action 0) is rare for action 0. P(state 0 | action 1) is rare for action 1.
+        self.p_rare_transition_from_action = np.array([self.T[0,1], self.T[1,0]]) # [P(Y|A), P(X|U)]
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 value update using the anxiety-modulated (reduced) alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.effective_alpha_stage2 * delta_2
+        
+        # Stage 1 value update using its dedicated alpha
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha_stage1 * delta_1
+
+    def policy_stage1(self) -> np.ndarray:
+        # Apply an aversion penalty to Q-values of first-stage actions based on their
+        # probability of leading to a rare transition.
+        q_biased_stage1 = np.copy(self.q_stage1)
+        
+        # Penalty for each action is proportional to its rare transition probability and the effective aversion.
+        # This biases choices away from spaceships that are more likely to lead to an unexpected planet.
+        q_biased_stage1[0] -= self.effective_rare_aversion * self.p_rare_transition_from_action[0]
+        q_biased_stage1[1] -= self.effective_rare_aversion * self.p_rare_transition_from_action[1]
+        
+        return self.softmax(q_biased_stage1, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

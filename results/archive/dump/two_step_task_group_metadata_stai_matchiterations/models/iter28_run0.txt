@@ -1,0 +1,233 @@
+Here are 3 new cognitive models implemented as Python functions.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Transition Blurring (Cognitive Interference).
+
+    Hypothesis: High anxiety consumes working memory resources, interfering with the 
+    accurate representation of the task structure (the transition matrix). 
+    While low-anxiety individuals use the precise 70/30 transition probabilities for 
+    Model-Based planning, high-anxiety individuals perceive a "blurred" or noisier 
+    transition matrix (closer to 50/50), reducing the effectiveness of their MB system.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - blur_factor: [0, 1] How strongly STAI degrades the transition matrix precision.
+    """
+    learning_rate, beta, w, blur_factor = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Standard objective transition matrix
+    transition_matrix_true = np.array([[0.7, 0.3], [0.3, 0.7]])
+    
+    # Calculate subjective transition matrix based on anxiety
+    # As anxiety increases, the matrix shifts towards uniform (0.5, 0.5)
+    # blur_magnitude is bounded between 0 and 1
+    blur_magnitude = min(1.0, blur_factor * stai_score)
+    transition_matrix_uniform = np.array([[0.5, 0.5], [0.5, 0.5]])
+    
+    # The effective matrix used for MB planning
+    transition_matrix_subj = (1 - blur_magnitude) * transition_matrix_true + blur_magnitude * transition_matrix_uniform
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        # Model-Based Value: Uses the ANXIETY-BLURRED transition matrix
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix_subj @ max_q_stage2
+        
+        # Hybrid Value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Heuristic Regression (WSLS Mixture).
+
+    Hypothesis: Under high anxiety, complex reinforcement learning computations 
+    (both MB and MF) become cognitively expensive. Anxious participants regress 
+    to a simpler "Win-Stay, Lose-Shift" (WSLS) heuristic. The final choice probability 
+    is a mixture of the Hybrid RL model and a pure WSLS heuristic, weighted by STAI.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature for the RL component.
+    - w: [0, 1] Weight for model-based control in the RL component.
+    - heuristic_influence: [0, 1] Weight of the WSLS heuristic, scaled by STAI.
+    """
+    learning_rate, beta, w, heuristic_influence = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Calculate the mixture weight for the heuristic
+    # If wsls_weight is 1, behavior is purely heuristic. If 0, purely RL.
+    wsls_weight = min(1.0, heuristic_influence * stai_score)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+
+        # --- RL Component Calculation ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_rl = exp_q1 / np.sum(exp_q1)
+        
+        # --- WSLS Heuristic Component ---
+        probs_wsls = np.array([0.5, 0.5]) # Default for first trial
+        if last_action_1 != -1:
+            probs_wsls = np.zeros(2)
+            if last_reward == 1:
+                # Win-Stay: 100% prob to repeat last action
+                probs_wsls[last_action_1] = 1.0
+            else:
+                # Lose-Shift: 100% prob to switch
+                probs_wsls[1 - last_action_1] = 1.0
+        
+        # --- Mixture ---
+        final_probs_1 = (1 - wsls_weight) * probs_rl + wsls_weight * probs_wsls
+        
+        # Safety clip to prevent log(0) if heuristic is too strong
+        final_probs_1 = np.clip(final_probs_1, 1e-5, 1.0 - 1e-5)
+        final_probs_1 /= np.sum(final_probs_1)
+        
+        p_choice_1[trial] = final_probs_1[action_1[trial]]
+        
+        # Store for next trial's heuristic
+        last_action_1 = action_1[trial]
+        last_reward = reward[trial]
+
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy (Standard Softmax) ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Counterfactual Rumination.
+
+    Hypothesis: Anxious individuals engage in "rumination" or counterfactual thinking.
+    They do not just update the value of the chosen spaceship; they also update the 
+    value of the *unchosen* spaceship based on the outcome of the *other* planet 
+    (the one they didn't visit). This model assumes the unchosen ship would have 
+    led to the unvisited planet. The strength of this counterfactual update is 
+    driven by STAI.
+
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate for chosen actions.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - rumination_scale: [0, 1] Learning rate for the unchosen option, scaled by STAI.
+    """
+    learning_rate, beta, w, rumination_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+    
+    # Calculate the counterfactual learning rate
+    lr_counterfactual = min(1.0, rumination_scale * stai_score)
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # --- Stage 1 Policy ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # --- Stage 2 Policy ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # --- Standard Updates ---
+        # Update chosen Stage 1 action
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Update Stage 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # --- Counterfactual (Rumination) Update ---
+        # Identify unchosen action and unvisited state
+        unchosen_action = 1 - action_1[trial]
+        unvisited_state = 1 - state_idx
+        
+        # Estimate value of unvisited state (max Q of that state)
+        value_unvisited = np.max(q_stage2_mf[unvisited_state])
+        
+        # Update unchosen action towards the value of the unvisited state
+        # This assumes a simplified counterfactual: "If I picked the other ship, I would have gone to the other planet"
+        delta_cf = value_unvisited - q_stage1_mf[unchosen_action]
+        q_stage1_mf[unchosen_action] += lr_counterfactual * delta_cf
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

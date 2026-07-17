@@ -1,0 +1,148 @@
+Here are three new cognitive models exploring different mechanisms for how anxiety (STAI) might influence decision-making in this task, specifically addressing the participant's strong tendency to repeat choices.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model tests the hypothesis that anxiety shifts the balance between goal-directed (Model-Based) and habitual (Model-Free) control. Specifically, it posits that higher anxiety impairs model-based reasoning, leading to a reliance on simpler model-free reinforcement learning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the trade-off between Model-Based (MB) and Model-Free (MF) control.
+    Higher anxiety (STAI) reduces the weight (w) of the Model-Based system, leading to more 
+    habitual behavior.
+    
+    Q_net = w * Q_MB + (1 - w) * Q_MF
+    w = w_max * (1 - stai)  <-- Anxiety reduces MB weight
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    w_max: [0, 1]      # Maximum model-based weight (at 0 anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize Model-Free Q-values (Stage 1)
+        self.q_mf = np.zeros(self.n_choices)
+        # Transition matrix is fixed/known in this variant (or could be learned)
+        # Using the provided prior counts as the internal model
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Compute Model-Based values
+        # Q_MB(a1) = sum(P(s|a1) * max(Q_stage2(s, :)))
+        # We use the max of stage 2 values as the estimate of state value
+        v_stage2 = np.max(self.q_stage2, axis=1)
+        q_mb = self.T @ v_stage2  # Matrix multiplication: (2x2) @ (2,) -> (2,)
+
+        # 2. Calculate mixing weight w based on anxiety
+        # Higher STAI -> Lower w (less Model-Based)
+        w = self.w_max * (1.0 - self.stai)
+        
+        # 3. Combine values
+        q_net = w * q_mb + (1 - w) * self.q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Model-Free update (TD-learning)
+        # Using the value of the chosen stage 2 action as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_mf[action_1]
+        self.q_mf[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Learning Rate Asymmetry
+This model hypothesizes that anxiety affects how participants learn from positive versus negative prediction errors. Specifically, it proposes that anxiety amplifies learning from negative outcomes (punishment sensitivity) while dampening learning from positive outcomes (anhedonia or caution), leading to rapid avoidance of perceived bad options.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety creates an asymmetry in learning rates.
+    The learning rate for negative prediction errors (alpha_neg) is amplified by anxiety,
+    while the learning rate for positive prediction errors (alpha_pos) is dampened.
+    
+    alpha_pos = base_alpha * (1 - stai * asymmetry)
+    alpha_neg = base_alpha * (1 + stai * asymmetry)
+    
+    Parameter Bounds:
+    -----------------
+    base_alpha: [0, 1]   # Base learning rate
+    beta: [0, 10]        # Inverse temperature
+    asymmetry: [0, 1]    # Strength of anxiety-driven asymmetry
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.base_alpha, self.beta, self.asymmetry = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective learning rates based on STAI
+        # We clip to [0, 1] to ensure stability
+        alpha_pos = np.clip(self.base_alpha * (1.0 - self.stai * self.asymmetry), 0, 1)
+        alpha_neg = np.clip(self.base_alpha * (1.0 + self.stai * self.asymmetry), 0, 1)
+
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        lr_2 = alpha_pos if delta_2 > 0 else alpha_neg
+        self.q_stage2[state, action_2] += lr_2 * delta_2
+        
+        # Stage 1 Update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        lr_1 = alpha_pos if delta_1 > 0 else alpha_neg
+        self.q_stage1[action_1] += lr_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven "Win-Stay, Lose-Shift" Heuristic
+This model suggests that instead of pure reinforcement learning, the participant relies on a heuristic strategy modulated by anxiety. Specifically, anxiety increases the probability of a "Win-Stay" strategy (sticking with a choice that worked) as a safety behavior, overriding value-based exploration.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety promotes a rigid 'Win-Stay' heuristic strategy.
+    If the previous trial was rewarded, the participant receives a 'stay bias' 
+    added to the Q-value of the previously chosen action.
+    The magnitude of this bias is proportional to anxiety (STAI).
+    
+    If LastReward == 1:
+       Q(last_action) += stay_bonus * stai
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    stay_bonus: [0, 5]  # Magnitude of the win-stay bias
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.stay_bonus = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_vals = self.q_stage1.copy()
+        
+        # Apply Win-Stay bias
+        if self.last_action1 is not None and self.last_reward == 1.0:
+            # Anxiety increases the urge to repeat a winning action (safety signal)
+            bias = self.stay_bonus * self.stai
+            q_vals[int(self.last_action1)] += bias
+            
+        return self.softmax(q_vals, self.beta)
+
+    # Standard value update
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,161 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in the two-step task.
+
+### Model 1: Contextual Representation (State Splitting)
+This model tests the hypothesis that high anxiety impairs the ability to generalize across contexts. While a standard learner treats "Planet X" as the same state regardless of how they arrived there, an anxious learner might treat "Planet X reached via Spaceship A" and "Planet X reached via Spaceship U" as distinct states. This "state splitting" leads to fragmented learning.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates Contextual Representation (State Splitting).
+    
+    Standard RL assumes the state 'Planet X' is the same regardless of which spaceship (A or U) 
+    was used to reach it. This model hypothesizes that anxious individuals fail to generalize 
+    and instead treat 'Planet X reached via A' and 'Planet X reached via U' as distinct states.
+    
+    The model maintains both 'merged' Q-values (standard) and 'split' Q-values (context-dependent).
+    The final Q-value used for Stage 2 decision is a weighted average:
+    Q_eff = (1 - w) * Q_merged + w * Q_split
+    
+    The weight 'w' is modulated by STAI:
+    w = split_weight * STAI
+    
+    High anxiety -> Higher weight on split states (context-dependent learning).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    split_weight: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.split_weight = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize split Q-values: 
+        # Dimensions: [Previous Action (2), Current State (2), Stage 2 Action (2)]
+        self.q_split = 0.5 * np.ones((2, 2, 2)) 
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Calculate weight based on anxiety
+        w = np.clip(self.split_weight * self.stai, 0, 1)
+        
+        # Get merged Q-values (standard)
+        q_merged = self.q_stage2[state]
+        
+        # Get split Q-values (dependent on previous action)
+        # If last_action1 is None (first trial), default to merged behavior
+        if self.last_action1 is not None:
+            prev_a = int(self.last_action1)
+            q_split_vals = self.q_split[prev_a, state]
+            
+            # Combine
+            q_combined = (1 - w) * q_merged + w * q_split_vals
+        else:
+            q_combined = q_merged
+            
+        return self.softmax(q_combined, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard update for merged values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update for split values
+        delta_2_split = reward - self.q_split[action_1, state, action_2]
+        self.q_split[action_1, state, action_2] += self.alpha * delta_2_split
+        
+        # Stage 1 update uses the merged value for simplicity
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Lapses (Epsilon-Greedy Mixture)
+This model tests the hypothesis that anxiety consumes cognitive resources, leading to attentional lapses. Instead of purely value-based choices (Softmax), the participant occasionally makes random errors. The frequency of these random choices (lapse rate, $\epsilon$) scales with anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces Attentional Lapses (Epsilon-Greedy Mixture).
+    
+    Anxiety is hypothesized to cause momentary lapses in attention or executive control,
+    resulting in random choices regardless of learned value.
+    
+    The policy is a mixture of the softmax distribution (goal-directed) and a uniform distribution (random).
+    P(choice) = (1 - epsilon) * Softmax + epsilon * (1/n_choices)
+    
+    The lapse rate 'epsilon' is modulated by STAI:
+    epsilon = lapse_param * STAI
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    lapse_param: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lapse_param = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        softmax_probs = self.softmax(self.q_stage1, self.beta)
+        
+        # Calculate lapse rate
+        epsilon = np.clip(self.lapse_param * self.stai, 0, 1)
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        
+        return (1 - epsilon) * softmax_probs + epsilon * random_probs
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        softmax_probs = self.softmax(self.q_stage2[state], self.beta)
+        
+        # Calculate lapse rate
+        epsilon = np.clip(self.lapse_param * self.stai, 0, 1)
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        
+        return (1 - epsilon) * softmax_probs + epsilon * random_probs
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Loss Chasing (Conditional Perseveration)
+This model tests the hypothesis that anxious individuals are prone to "loss chasing." Unlike general stickiness (repeating any choice), this model posits that anxiety specifically increases the tendency to repeat a choice *after a negative outcome* (0 coins), reflecting a compulsion to "correct" the failure.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety drives Loss Chasing (Conditional Perseveration).
+    
+    Anxious individuals may be more prone to "chasing losses" — repeating a choice 
+    immediately after a failure (0 reward) in an attempt to correct the outcome.
+    
+    This is modeled as a stickiness bonus added to the Q-value of the previously chosen action,
+    but ONLY if the previous trial resulted in 0 reward.
+    
+    Bonus = loss_stickiness * STAI
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    loss_stickiness: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.loss_stickiness = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_vals = self.q_stage1.copy()
+        
+        # Apply bonus if last trial was a loss (reward == 0)
+        # We check last_action1 is not None to skip the very first trial
+        if self.last_reward == 0.0 and self.last_action1 is not None:
+            bonus = self.loss_stickiness * self.stai
+            q_vals[int(self.last_action1)] += bonus
+            
+        return self.softmax(q_vals, self.beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

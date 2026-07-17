@@ -1,0 +1,185 @@
+Here are three cognitive models proposing different mechanisms by which the participant, with a high anxiety score of 0.7625, might make decisions in the two-step task. Each model incorporates the STAI score to modulate a distinct aspect of behavior, reflecting diverse hypotheses about anxiety's impact on decision-making.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Asymmetric Reinforcement Learning with Anxiety-Modulated Negative Learning Rate.
+    This model proposes that participants learn differently from positive and negative prediction errors.
+    Specifically, high anxiety increases sensitivity to negative outcomes, leading to a higher
+    learning rate for negative prediction errors (when reward is worse than expected).
+    This means negative feedback has a stronger impact on value updates for individuals with higher STAI scores.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors (delta > 0).
+    alpha_neg_base: [0, 1] - Base learning rate for negative prediction errors (delta <= 0).
+    stai_weight: [0, 1] - How much the STAI score linearly increases the negative learning rate,
+                          reflecting increased sensitivity to losses.
+    beta: [0, 10] - Inverse temperature for softmax action selection, controlling exploration vs. exploitation.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.stai_weight, self.beta = model_parameters
+        
+        # Calculate the current negative learning rate, modulated by STAI.
+        # Ensure it does not exceed 1.0.
+        self.current_alpha_neg = min(1.0, self.alpha_neg_base + self.stai_weight * self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using separate learning rates for positive and negative prediction errors.
+        The negative learning rate is modulated by the participant's STAI score.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 > 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.current_alpha_neg * delta_2
+        
+        # Stage 1 update (SARSA-like, using the updated Q-value from Stage 2 as the target)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 > 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += self.current_alpha_neg * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Hybrid Reinforcement Learning with Anxiety-Modulated Model-Based Weight.
+    This model posits that decisions are made by combining model-free (habitual) and
+    model-based (planning) values. High anxiety is hypothesized to impair cognitive
+    resources or increase aversion to uncertainty, leading to a reduced reliance
+    on model-based planning. Thus, the weight given to model-based
+    values decreases with higher anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (both stages).
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w_base: [0, 1] - Base weight for model-based control (when STAI is 0).
+    stai_sensitivity: [0, 1] - How much the STAI score linearly decreases the model-based weight,
+                               reflecting anxiety's impact on planning.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_sensitivity = model_parameters
+        
+        # Calculate the current model-based weight, modulated by STAI.
+        # Ensure 'w' stays within [0, 1].
+        self.current_w = max(0.0, min(1.0, self.w_base - self.stai_sensitivity * self.stai))
+        
+        # Initialize an additional Q-value array for combined values for stage 1 decision.
+        self.q_stage1_combined = np.zeros(self.n_choices)
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, calculate model-based values and combine them with model-free values
+        for stage 1 action selection.
+        """
+        # Calculate model-based values for stage 1 actions (spaceships):
+        # V(planet) = max_a (Q_stage2[planet, a])  -- Max expected value from each planet.
+        # Q_mb(spaceship) = sum_over_planets (P(planet|spaceship) * V(planet))
+        
+        # V_stage2_max represents the maximum expected value reachable from each planet
+        V_stage2_max = np.max(self.q_stage2, axis=1)
+
+        # Q_mb for stage 1 actions (spaceships)
+        q_mb = np.zeros(self.n_choices)
+        for s1_action in range(self.n_choices):
+            # self.T[s1_action, planet] gives P(planet | s1_action)
+            q_mb[s1_action] = np.sum(self.T[s1_action, :] * V_stage2_max)
+
+        # Combine model-free (self.q_stage1) and model-based (q_mb) Q-values for stage 1
+        self.q_stage1_combined = (1 - self.current_w) * self.q_stage1 + self.current_w * q_mb
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Use the combined Q-values (model-free and model-based) for stage 1 action selection.
+        """
+        return self.softmax(self.q_stage1_combined, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD learning for both stages, updating only the model-free Q-values.
+        Model-based values are re-calculated based on these updated Q-values in pre_trial.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (model-free component)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Reinforcement Learning with Anxiety-Modulated Reward-Driven Perseveration.
+    This model suggests that participants, especially those with high anxiety, exhibit
+    an increased tendency to repeat a first-stage action if it led to a reward on the
+    immediately preceding trial. This perseveration acts as a bonus added to the Q-value
+    of the previously rewarded action, making it more likely to be chosen again.
+    The magnitude of this perseveration bonus is amplified by higher anxiety, potentially
+    due to a desire to stick with "safe" or "known good" options to reduce uncertainty.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values (both stages).
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    pers_base: [0, 1] - Base perseveration bonus for repeating a rewarded action.
+    stai_factor: [0, 1] - How much the STAI score linearly increases the perseveration bonus,
+                           reflecting anxiety's impact on habitual responding.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pers_base, self.stai_factor = model_parameters
+        
+        # Calculate the current perseveration bonus, modulated by STAI.
+        # Ensure the bonus does not exceed 1.0.
+        self.current_pers_bonus = min(1.0, self.pers_base + self.stai_factor * self.stai)
+
+    def pre_trial(self) -> None:
+        """
+        Before each trial, apply a temporary perseveration bonus to the Q-value of the last
+        chosen first-stage action if it was rewarded. This bonus influences the current
+        choice but does not permanently alter the learned Q-values.
+        """
+        # Create a temporary copy of q_stage1 to apply the bias for the current trial
+        self.q_stage1_biased = np.copy(self.q_stage1)
+
+        # Apply perseveration bonus if a previous action was taken and resulted in a reward
+        if self.trial > 0 and self.last_action1 is not None and self.last_reward == 1:
+            # Add the bonus to the Q-value of the action that was chosen on the previous trial
+            # and led to a reward.
+            self.q_stage1_biased[self.last_action1] += self.current_pers_bonus
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using the potentially biased Q-values
+        (including the perseveration bonus).
+        """
+        return self.softmax(self.q_stage1_biased, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Standard TD learning for both stages, updating the true underlying Q-values.
+        The perseveration bonus is only applied during action selection, not learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

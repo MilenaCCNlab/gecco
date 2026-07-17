@@ -1,0 +1,135 @@
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    
+    High anxiety may reduce Model-Based control due to cognitive load, or increase it due to a desire for control.
+    This model calculates a mixing weight 'w' based on STAI.
+    
+    w = sigmoid(w_slope * (stai - 0.5))
+    
+    Q_net = w * Q_MB + (1 - w) * Q_MF
+    
+    If w_slope > 0: Anxiety increases MB usage.
+    If w_slope < 0: Anxiety decreases MB usage (increases MF).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    w_slope: [-10, 10]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_slope = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values
+        # V(State) = max(Q_stage2(State, :))
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Q_MB(Action) = Sum(P(State|Action) * V(State))
+        # self.T is shape (2, 2) -> [Action, State] transition probs
+        q_mb = self.T @ v_stage2
+        
+        # 2. Calculate Mixing Weight w based on STAI
+        # Sigmoid centered at 0.5 STAI
+        # If stai=0.5, w=0.5. w_slope determines sensitivity and direction.
+        w = 1.0 / (1.0 + np.exp(-self.w_slope * (self.stai - 0.5)))
+        
+        # 3. Combine MB and MF (self.q_stage1 is the MF value updated by TD)
+        q_net = w * q_mb + (1.0 - w) * self.q_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces a 'Subjective Punishment' for omitted rewards.
+    
+    Instead of treating 0 coins as a neutral outcome (value 0), anxious participants 
+    may perceive it as a loss. The magnitude of this negative utility is scaled by STAI.
+    
+    Effective Reward = Reward (if 1)
+    Effective Reward = -1 * theta * stai (if 0)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    theta: [0, 5]  # Magnitude of loss perception
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.theta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective reward
+        if reward == 0:
+            r_eff = -1.0 * self.theta * self.stai
+        else:
+            r_eff = reward
+            
+        # Standard TD update with effective reward
+        delta_2 = r_eff - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates Intolerance of Uncertainty (IU).
+    
+    This model adds an exploration/avoidance bonus to Stage 1 actions based on 
+    how long it has been since they were last chosen.
+    
+    Bonus = kappa * stai * log(trials_since_last_choice + 1)
+    
+    If kappa < 0: Ambiguity Aversion (Anxious people avoid unsampled options).
+    If kappa > 0: Information Seeking (Anxious people check unsampled options).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    kappa: [-2, 2]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa = model_parameters
+
+    def init_model(self) -> None:
+        # Track the trial number when each action was last chosen
+        # Initialize to -1 so the first trial has a defined 'time since'
+        self.last_chosen_trial = np.full(self.n_choices, -1.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate time since last choice
+        # Current trial is self.trial
+        time_since = self.trial - self.last_chosen_trial
+        
+        # Calculate bonus
+        # Using log to dampen the effect of very long unchosen times
+        uncertainty_bonus = self.kappa * self.stai * np.log(time_since + 1.0)
+        
+        q_net = self.q_stage1 + uncertainty_bonus
+        
+        return self.softmax(q_net, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update the last chosen trial for the action taken
+        self.last_chosen_trial[action_1] = self.trial
+        
+        # Call base method to update standard tracking variables
+        super().post_trial(action_1, state, action_2, reward)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

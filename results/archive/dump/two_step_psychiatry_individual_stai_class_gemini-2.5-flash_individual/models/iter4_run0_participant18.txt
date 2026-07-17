@@ -1,0 +1,222 @@
+Here are 3 cognitive models proposed to explain the participant's decision-making, each with a distinct hypothesis and modulation by the participant's low anxiety (STAI score of 0.2875).
+
+### ParticipantModel1: Model-Based with STAI-Modulated Learning of Transitions
+
+This model posits that the participant uses a model-based control strategy where they learn the transition probabilities between spaceships and planets. These learned transition probabilities are then used to compute the expected value of each spaceship by looking ahead to the second stage. Low anxiety (low STAI score) is hypothesized to enhance the learning rate for these transition probabilities, suggesting that low-anxiety individuals are more efficient at forming and utilizing a cognitive map of the task structure.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that the participant uses a model-based control strategy
+    where they learn the transition probabilities between spaceships and planets.
+    These learned transition probabilities are then used to compute the expected
+    value of each spaceship by looking ahead to the second stage.
+    Low anxiety (low STAI score) is hypothesized to enhance the learning rate
+    for these transition probabilities, suggesting that low-anxiety individuals
+    are more efficient at forming and utilizing a cognitive map of the task structure.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values at stage 2.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    alpha_trans_base: [0, 1] - Baseline learning rate for updating transition probabilities.
+    trans_stai_effect: [0, 1] - Strength of STAI modulation on transition learning rate.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.alpha_trans_base, self.trans_stai_effect = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize learned transition probabilities. Start with prior belief.
+        # self.T_learned[action_1, state] = prob(state | action_1)
+        # Base class `self.T` is already `np.array([[0.7, 0.3], [0.3, 0.7]])`
+        self.T_learned = np.copy(self.T) 
+        
+        # Calculate the effective alpha_trans based on STAI
+        # Lower STAI (0.2875) means (1 - stai) is higher, increasing alpha_trans.
+        self.alpha_trans = self.alpha_trans_base * (1 + (1 - self.stai) * self.trans_stai_effect)
+        
+        # Ensure alpha_trans is within [0, 1]
+        self.alpha_trans = np.clip(self.alpha_trans, 0.0, 1.0)
+
+    def _compute_stage1_mb_values(self) -> np.ndarray:
+        """Helper to compute model-based Q-values for stage 1."""
+        # Calculate expected future rewards for each planet (max Q-value for aliens)
+        expected_future_reward_per_planet = np.max(self.q_stage2, axis=1) # max over aliens for each planet
+
+        # Calculate model-based Q-values for stage 1
+        # Q(a1) = sum_s T_learned(s|a1) * max_a2 Q2(s, a2)
+        q_stage1_mb = np.dot(self.T_learned, expected_future_reward_per_planet)
+        return q_stage1_mb
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using model-based values.
+        It updates self.q_stage1 to store these values for NLL computation.
+        """
+        # Update self.q_stage1 to reflect the current model-based values
+        self.q_stage1 = self._compute_stage1_mb_values() 
+        return self.softmax(self.q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update stage 2 Q-values and transition probabilities after observing outcome.
+        Stage 1 values (self.q_stage1) are recomputed in policy_stage1, not updated here by TD error.
+        """
+        # Update stage 2 Q-values (model-free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Update learned transition probabilities (T_learned)
+        target_trans = np.zeros(self.n_states)
+        target_trans[state] = 1.0
+        
+        delta_trans = target_trans - self.T_learned[action_1, :]
+        self.T_learned[action_1, :] += self.alpha_trans * delta_trans
+        
+        # Ensure probabilities remain valid (sum to 1, between 0 and 1)
+        self.T_learned[action_1, :] = np.clip(self.T_learned[action_1, :], 0.0, 1.0)
+        row_sum = np.sum(self.T_learned[action_1, :])
+        if row_sum > 0:
+            self.T_learned[action_1, :] /= row_sum
+        else: # If all probabilities are zero after clip, reinitialize to uniform
+            self.T_learned[action_1, :] = 1.0 / self.n_states
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### ParticipantModel2: Asymmetric Learning Rates with STAI-Modulated Punishment Sensitivity
+
+This model proposes that participants learn differently from positive rewards and the absence of rewards (punishment). Specifically, it uses two distinct learning rates: one for positive outcomes (reward=1) and one for negative outcomes (reward=0). Low anxiety (low STAI score) is hypothesized to increase the learning rate for negative outcomes (`alpha_noreward`). This suggests that low-anxiety individuals are more sensitive to punishments, leading them to more quickly disengage from options that do not yield rewards.
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants learn differently from positive rewards
+    and the absence of rewards (punishment). Specifically, it uses two distinct
+    learning rates: one for positive outcomes (reward=1) and one for negative outcomes (reward=0).
+    Low anxiety (low STAI score) is hypothesized to increase the learning rate for negative
+    outcomes (`alpha_noreward`). This suggests that low-anxiety individuals are more
+    sensitive to punishments, leading them to more quickly disengage from options
+    that do not yield rewards.
+
+    Parameter Bounds:
+    -----------------
+    alpha_reward: [0, 1] - Learning rate for positive rewards.
+    alpha_noreward_base: [0, 1] - Baseline learning rate for no reward outcomes.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    noreward_stai_effect: [0, 1] - Strength of STAI modulation on `alpha_noreward`.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_reward, self.alpha_noreward_base, self.beta, self.noreward_stai_effect = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective alpha_noreward based on STAI
+        # Lower STAI (0.2875) means (1 - stai) is higher, increasing alpha_noreward.
+        self.alpha_noreward = self.alpha_noreward_base * (1 + (1 - self.stai) * self.noreward_stai_effect)
+        
+        # Ensure alpha_noreward is within [0, 1]
+        self.alpha_noreward = np.clip(self.alpha_noreward, 0.0, 1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using asymmetric learning rates.
+        """
+        current_alpha = self.alpha_reward if reward == 1 else self.alpha_noreward
+
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        # Stage 1 update
+        # For stage 1, the value is an expectation of future rewards from stage 2.
+        # Applying the same current_alpha for consistency.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### ParticipantModel3: Uncertainty-Based Exploration with STAI-Modulated Exploration Bonus
+
+This model proposes that participants engage in "directed exploration" by adding an exploration bonus to options that have been visited less frequently, thus having higher uncertainty. This encourages sampling of less-known options. Low anxiety (low STAI score) is hypothesized to increase the strength of this exploration bonus (`kappa`), suggesting that low-anxiety individuals are more willing or able to explore uncertain options, potentially leading to more thorough learning of the environment.
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants engage in "directed exploration"
+    by adding an exploration bonus to options that have been visited less frequently,
+    thus having higher uncertainty. This encourages sampling of less-known options.
+    Low anxiety (low STAI score) is hypothesized to increase the strength of this
+    exploration bonus (`kappa`), suggesting that low-anxiety individuals are more
+    willing or able to explore uncertain options, potentially leading to more
+    thorough learning of the environment.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    kappa_base: [0, 5] - Baseline strength of the exploration bonus.
+    kappa_stai_effect: [0, 1] - Strength of STAI modulation on `kappa`.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.kappa_base, self.kappa_stai_effect = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize visit counts for stage 1 and stage 2 actions
+        self.visit_counts_stage1 = np.ones(self.n_choices) # Start with 1 to avoid division by zero
+        self.visit_counts_stage2 = np.ones((self.n_states, self.n_choices))
+
+        # Calculate the effective kappa based on STAI
+        # Lower STAI (0.2875) means (1 - stai) is higher, increasing kappa.
+        self.kappa = self.kappa_base + (1 - self.stai) * self.kappa_stai_effect
+        
+        # Ensure kappa is non-negative
+        self.kappa = np.clip(self.kappa, 0.0, None)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities with an exploration bonus.
+        """
+        # Exploration bonus for stage 1: inversely proportional to sqrt of visit counts
+        # Add a small value to avoid division by zero if count is 0
+        exploration_bonus_1 = self.kappa / np.sqrt(self.visit_counts_stage1 + 1e-6)
+        
+        q_biased_stage1 = self.q_stage1 + exploration_bonus_1
+        return self.softmax(q_biased_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Compute stage-2 action probabilities with an exploration bonus.
+        """
+        # Exploration bonus for stage 2
+        exploration_bonus_2 = self.kappa / np.sqrt(self.visit_counts_stage2[state] + 1e-6)
+        
+        q_biased_stage2 = self.q_stage2[state] + exploration_bonus_2
+        return self.softmax(q_biased_stage2, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values and visit counts after observing outcome.
+        """
+        # Update visit counts
+        self.visit_counts_stage1[action_1] += 1
+        self.visit_counts_stage2[state, action_2] += 1
+
+        # Standard TD learning for Q-values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

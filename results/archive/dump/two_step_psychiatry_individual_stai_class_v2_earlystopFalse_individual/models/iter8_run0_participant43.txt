@@ -1,0 +1,133 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Pessimism Bias
+    
+    This model hypothesizes that anxiety creates a "pessimism bias" in the valuation 
+    of outcomes. Rather than perceiving rewards objectively (0 or 1), the participant 
+    perceives the effective value of a reward as reduced by their anxiety level.
+    This shifts the asymptotic value of options downwards, potentially affecting 
+    exploration and the trade-off between safe and risky options.
+    
+    R_effective = Reward - (stai * pessimism_weight)
+    
+    If pessimism_weight is high, even a 'win' might be perceived as neutral or 
+    slightly negative, and a 'loss' becomes very negative.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    pessimism_weight: [0, 2]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pessimism_weight = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate subjective reward based on anxiety
+        # STAI is ~0.3-0.6. If weight is 1, R=1 becomes ~0.6, R=0 becomes -0.4.
+        r_effective = reward - (self.stai * self.pessimism_weight)
+        
+        # Stage 2 Update
+        delta_2 = r_effective - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update (TD-learning using Stage 2 Q-value)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Degraded Model-Based Control (Blurred Map)
+    
+    This model hypothesizes that the participant uses a hybrid Model-Based / Model-Free 
+    strategy, but their internal model of the environment (the transition matrix) 
+    is degraded ("blurred") by anxiety. 
+    
+    High anxiety introduces entropy into the transition matrix used for planning, 
+    making the Model-Based component less informative. We fix the mixing weight 
+    (w=0.5) to isolate the effect of map quality.
+    
+    T_used = (1 - blur) * T_true + blur * T_uniform
+    blur = blur_sensitivity * stai
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    blur_sensitivity: [0, 3] (Controls how strongly STAI blurs the map)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.blur_sensitivity = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate Model-Based Values
+        # Determine blur factor based on anxiety (capped at 1.0)
+        blur = min(max(self.blur_sensitivity * self.stai, 0.0), 1.0)
+        
+        # Create the effective transition matrix
+        # T_true is roughly [[0.7, 0.3], [0.3, 0.7]]
+        # T_uniform is [[0.5, 0.5], [0.5, 0.5]]
+        T_uniform = 0.5 * np.ones_like(self.T)
+        T_eff = (1.0 - blur) * self.T + blur * T_uniform
+        
+        # Q_MB = T_eff * max(Q_stage2)
+        # We use the max value of the next stage states as the proxy for state value
+        max_q2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        q_mb = T_eff @ max_q2 # Matrix multiplication: (2,2) @ (2,) -> (2,)
+        
+        # 2. Calculate Model-Free Values (self.q_stage1)
+        q_mf = self.q_stage1
+        
+        # 3. Combine (Fixed 50/50 split)
+        q_net = 0.5 * q_mb + 0.5 * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Induced Distal Learning Impairment
+    
+    This model hypothesizes that anxiety specifically impairs the learning of 
+    distal associations (Stage 1 choices leading to outcomes) while sparing 
+    proximal learning (Stage 2 choices leading to outcomes). This reflects 
+    a "cognitive load" or "shortened time horizon" theory of anxiety.
+    
+    The learning rate for Stage 1 is suppressed by STAI, while Stage 2 
+    learning remains at the baseline alpha.
+    
+    alpha_stage1 = alpha_base / (1 + suppression * stai)
+    alpha_stage2 = alpha_base
+    
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]
+    beta: [0, 10]
+    suppression: [0, 10]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.suppression = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 Update (Proximal - unaffected by suppression)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_base * delta_2
+        
+        # Stage 1 Update (Distal - suppressed by anxiety)
+        # Calculate effective alpha for stage 1
+        alpha_1 = self.alpha_base / (1.0 + self.suppression * self.stai)
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

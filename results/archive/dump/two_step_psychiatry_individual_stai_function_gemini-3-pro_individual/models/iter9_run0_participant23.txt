@@ -1,0 +1,229 @@
+Here are three new cognitive models that introduce different mechanisms for how anxiety (STAI) affects decision-making in the two-step task. These models focus on transition learning, reward sensitivity modulation, and exploration noise.
+
+### Model 1: STAI-Modulated Transition Learning Rate
+This model hypothesizes that anxiety affects how quickly participants update their internal model of the environment (the transition probabilities between spaceships and planets). High anxiety might lead to "over-updating" or volatility in the transition matrix, making the participant react too strongly to rare transitions as if the structure has changed.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Model-Based/Model-Free Hybrid with STAI-modulated Transition Learning.
+
+    Hypothesis: High anxiety (STAI) leads to instability in the internal model of 
+    the task structure. Specifically, anxiety increases the learning rate for 
+    updating the transition matrix (learning_rate_trans), causing the participant 
+    to over-interpret rare transitions as structural changes rather than noise.
+
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for Q-values (reward learning).
+    beta: [0, 10] - Inverse temperature for softmax choice rule.
+    w: [0, 1] - Weight for model-based control (0=MF, 1=MB).
+    lr_trans_base: [0, 1] - Baseline learning rate for transition probabilities.
+    stai_trans_slope: [0, 2] - How much STAI increases the transition learning rate.
+    """
+    learning_rate, beta, w, lr_trans_base, stai_trans_slope = model_parameters
+    n_trials = len(action_1)
+    current_stai = stai[0]
+
+    # Calculate effective transition learning rate (bounded at 1.0)
+    lr_trans = min(1.0, lr_trans_base + (stai_trans_slope * current_stai))
+
+    # Initialize transition matrix (rows: actions, cols: states)
+    # Initially unbiased or set to standard prior (0.5/0.5)
+    trans_probs = np.ones((2, 2)) * 0.5 
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        act1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        act2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Policy Choice 1 ---
+        # Model-Based Value: V(s') = max(Q(s', a'))
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        # MB Q-value = T(s'|s,a) * V(s')
+        q_stage1_mb = trans_probs @ max_q_stage2
+        
+        # Hybrid Q-value
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[act1]
+
+        # --- Policy Choice 2 ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[act2]
+
+        # --- Updates ---
+        
+        # 1. Update Transition Matrix (State Prediction Error)
+        # Increase prob of observed transition, decrease others
+        # One-hot vector for current state
+        state_onehot = np.zeros(2)
+        state_onehot[state_idx] = 1.0
+        
+        # Delta rule for transitions: T_new = T_old + lr * (Outcome - T_old)
+        trans_probs[act1] += lr_trans * (state_onehot - trans_probs[act1])
+        # Normalize to ensure valid probabilities
+        trans_probs[act1] /= np.sum(trans_probs[act1])
+
+        # 2. Update Q-Values (Reward Prediction Errors)
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        delta_stage2 = r - q_stage2_mf[state_idx, act2]
+
+        q_stage1_mf[act1] += learning_rate * delta_stage1 + learning_rate * delta_stage2 # TD(1) style
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: STAI-Induced Reward Devaluation
+This model posits that anxiety dampens the subjective value of rewards. Instead of affecting the balance between model-based and model-free (w) or the learning rate, anxiety scales the reward input itself. This reflects anhedonia or a blunted response to positive outcomes often associated with high anxiety/depression comorbidity.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Standard Hybrid Model with STAI-modulated Reward Sensitivity.
+
+    Hypothesis: Anxiety reduces the subjective utility of rewards. 
+    A high STAI score acts as a dampener on the reward signal 'r' before it 
+    enters the prediction error calculation. This results in weaker reinforcement 
+    for successful trials, leading to slower accumulation of Q-values.
+
+    Parameters:
+    learning_rate: [0, 1] - Rate at which Q-values are updated.
+    beta: [0, 10] - Inverse temperature for softmax choice rule.
+    w: [0, 1] - Weight for model-based control (0=MF, 1=MB).
+    reward_sens_base: [0, 1] - Baseline sensitivity to reward (scaling factor).
+    stai_sens_decay: [0, 2] - How much STAI reduces reward sensitivity.
+    """
+    learning_rate, beta, w, reward_sens_base, stai_sens_decay = model_parameters
+    n_trials = len(action_1)
+    current_stai = stai[0]
+
+    # Effective reward sensitivity: Base - (Slope * STAI), bounded at 0
+    eff_sensitivity = max(0.0, reward_sens_base - (stai_sens_decay * current_stai))
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        act1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        act2 = int(action_2[trial])
+        
+        # Scale the observed reward by the anxiety-modulated sensitivity
+        r = reward[trial] * eff_sensitivity
+
+        # --- Policy Choice 1 ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[act1]
+
+        # --- Policy Choice 2 ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[act2]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        delta_stage2 = r - q_stage2_mf[state_idx, act2]
+
+        # Using TD(1) update logic for stage 1
+        q_stage1_mf[act1] += learning_rate * delta_stage1 + learning_rate * delta_stage2
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: STAI-Driven Random Exploration (Lapse Rate)
+This model suggests that anxiety introduces noise or "lapses" in decision-making. Instead of altering the core learning parameters (alpha, w), anxiety increases the probability of making a random choice (epsilon-greedy exploration), overriding the calculated value-based choice. This captures the "scattered" or distracted decision-making often seen in anxious states.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Hybrid Model with STAI-modulated Epsilon (Random Exploration/Lapse).
+
+    Hypothesis: High anxiety acts as a distractor, increasing the probability 
+    of 'lapsing' into random choice behavior regardless of learned values. 
+    The model creates a mixture distribution between the softmax policy and 
+    a uniform random guess, where the weight of the random guess increases with STAI.
+
+    Parameters:
+    learning_rate: [0, 1] - Rate at which Q-values are updated.
+    beta: [0, 10] - Inverse temperature for softmax choice rule.
+    w: [0, 1] - Weight for model-based control (0=MF, 1=MB).
+    epsilon_base: [0, 0.5] - Baseline probability of random choice.
+    stai_epsilon_slope: [0, 1] - How much STAI increases random noise (epsilon).
+    """
+    learning_rate, beta, w, epsilon_base, stai_epsilon_slope = model_parameters
+    n_trials = len(action_1)
+    current_stai = stai[0]
+
+    # Calculate effective epsilon, bounded [0, 1]
+    epsilon = min(1.0, epsilon_base + (stai_epsilon_slope * current_stai))
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        act1 = int(action_1[trial])
+        state_idx = int(state[trial])
+        act2 = int(action_2[trial])
+        r = reward[trial]
+
+        # --- Policy Choice 1 ---
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Softmax probabilities
+        exp_q1 = np.exp(beta * q_net)
+        softmax_probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        # Mixture: (1-eps)*Softmax + eps*Uniform
+        # Uniform probability is 0.5 for 2 choices
+        probs_1 = (1 - epsilon) * softmax_probs_1 + (epsilon * 0.5)
+        p_choice_1[trial] = probs_1[act1]
+
+        # --- Policy Choice 2 ---
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        softmax_probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        # Mixture for second stage as well
+        probs_2 = (1 - epsilon) * softmax_probs_2 + (epsilon * 0.5)
+        p_choice_2[trial] = probs_2[act2]
+
+        # --- Updates ---
+        delta_stage1 = q_stage2_mf[state_idx, act2] - q_stage1_mf[act1]
+        delta_stage2 = r - q_stage2_mf[state_idx, act2]
+
+        q_stage1_mf[act1] += learning_rate * delta_stage1 + learning_rate * delta_stage2
+        q_stage2_mf[state_idx, act2] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

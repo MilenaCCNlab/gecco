@@ -1,0 +1,189 @@
+Here are three new cognitive models, each proposing a distinct hypothesis about how this participant, with a high STAI score of 0.6625, makes decisions in the two-step task. Each model incorporates the STAI score to modulate a different aspect of the decision-making process, ensuring diversity in cognitive mechanisms and parameter combinations.
+
+---
+
+### Model 1: ParticipantModel1 - Initial Reward Expectation modulated by Anxiety
+
+This model hypothesizes that high anxiety influences the participant's initial expectations about the reward probabilities. Specifically, higher anxiety might lead to more pessimistic (lower) initial estimates of the rewards available from aliens. This could make them more hesitant to explore or more sensitive to early negative feedback. The model modifies the initial `q_stage2` and `q_stage1` values based on the STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Initial Reward Expectation modulated by Anxiety.
+    This model proposes that high anxiety influences the participant's initial expectations
+    about the reward probabilities from aliens. Specifically, higher anxiety might lead
+    to more pessimistic (lower) initial estimates of the rewards available from aliens.
+    This could make them more hesitant to explore or more sensitive to early negative feedback.
+    The initial Q-values for stage 2 (and consequently stage 1) are set based on a base
+    value adjusted by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    q_init_base: [0, 1] - Base initial Q-value for stage 2 options.
+    q_init_stai_mod: [0, 1] - Modulatory parameter for STAI on initial Q-values.
+                               A positive value means higher anxiety reduces initial Q-values.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.q_init_base, self.q_init_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective initial Q-value, modulated by STAI.
+        # Ensure it stays within [0, 1] bounds for probabilities.
+        # Clip to ensure it's not exactly 0 or 1 to avoid issues with log-likelihood or extreme initial values.
+        effective_q_init = np.clip(self.q_init_base - self.q_init_stai_mod * self.stai, 0.01, 0.99)
+        self.q_stage2 = effective_q_init * np.ones((self.n_states, self.n_choices))
+        
+        # Initialize stage 1 Q-values based on the initial expected value from stage 2
+        # considering the transition probabilities.
+        # This ensures the initial state of the model is consistent with the pessimistic outlook.
+        for a1 in range(self.n_choices):
+            expected_next_value = 0
+            for s in range(self.n_states):
+                # In the absence of further learning, the max Q-value at stage 2 for any action
+                # from a given state is simply the initial effective_q_init.
+                expected_next_value += self.T[a1, s] * effective_q_init
+            self.q_stage1[a1] = expected_next_value
+
+    # The default value_update and policy methods are used, with the learning rate self.alpha
+    # and the inverse temperature self.beta.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### Model 2: ParticipantModel2 - Anxiety-Modulated Temporal Discounting of Action Precision
+
+This model proposes that high anxiety influences the precision of choices (beta), and this precision itself changes over the course of the experiment. For instance, high anxiety might lead to more erratic choices (lower beta) which could further decrease over time due to fatigue, or increase over time due to learning. The effective beta is calculated as: `beta_base + beta_stai_mod * STAI + beta_temporal_mod * trial_number`. This provides a dynamic exploration/exploitation trade-off.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Temporal Discounting of Action Precision.
+    This model proposes that high anxiety influences the precision of choices (beta),
+    and this precision itself changes over the course of the experiment. For instance,
+    high anxiety might lead to more erratic choices (lower beta) which could further
+    decrease over time due to fatigue, or increase over time due to learning.
+    The effective beta is calculated as: beta_base + beta_stai_mod * STAI + beta_temporal_mod * trial_number.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_base: [0, 10] - Base inverse temperature.
+    beta_stai_mod: [0, 10] - Modulatory parameter for STAI on beta. A positive value means higher anxiety increases beta.
+    beta_temporal_mod: [-0.1, 0.1] - How beta changes per trial (can be positive for increase, negative for decrease).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.beta_stai_mod, self.beta_temporal_mod = model_parameters
+        # self.beta is not directly used from here, but effective_beta is calculated in pre_trial
+
+    def pre_trial(self) -> None:
+        # Calculate the effective beta for the current trial
+        # Ensure beta stays positive and within a reasonable range to prevent numerical issues
+        self.effective_beta = np.clip(
+            self.beta_base + self.beta_stai_mod * self.stai + self.beta_temporal_mod * self.trial,
+            0.1,   # Minimum beta to allow for some exploration and avoid division by zero
+            50.0   # Upper bound to prevent excessively deterministic choices
+        )
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities using the effective beta."""
+        return self.softmax(self.q_stage1, self.effective_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities using the effective beta."""
+        return self.softmax(self.q_stage2[state], self.effective_beta)
+
+    # The default value_update method is used, with self.alpha as the learning rate.
+    # self.beta (from the base class) is not used, but self.effective_beta is used in policy methods.
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Model 3: ParticipantModel3 - Anxiety-Modulated Value Sensitivity to Rare Transitions (Model-Based)
+
+This model proposes that participants engage in model-based planning for their first-stage choices. However, high anxiety specifically influences how they value the outcomes associated with *rare* transitions. This could lead them to either over-emphasize (bias > 1) or under-emphasize (bias < 1) the expected rewards from planets reached via rare transitions, affecting their decision to take a common vs. rare path. The stage-1 Q-values are computed model-based, and only stage-2 Q-values are updated via TD learning.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Value Sensitivity to Rare Transitions (Model-Based).
+    This model proposes that participants engage in model-based planning for their
+    first-stage choices. However, high anxiety specifically influences how they
+    value the outcomes associated with *rare* transitions. This could lead them
+    to either over-emphasize (bias > 1) or under-emphasize (bias < 1) the expected
+    rewards from planets reached via rare transitions, affecting their decision
+    to take a common vs. rare path. Stage 1 Q-values are purely model-based.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values for stage 2.
+    beta: [0, 10] - Softmax inverse temperature.
+    rare_bias_base: [0.5, 1.5] - Base multiplier for the value of outcomes following rare transitions.
+    rare_bias_stai_mod: [-0.5, 0.5] - How STAI modulates this rare transition value bias.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_bias_base, self.rare_bias_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective rare transition bias, modulated by STAI.
+        # Ensure it stays within a reasonable range (e.g., not zero or excessively large).
+        self.effective_rare_bias = np.clip(self.rare_bias_base + self.rare_bias_stai_mod * self.stai, 0.01, 5.0)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a model-based approach
+        with anxiety-modulated sensitivity to rare transitions.
+        """
+        # Calculate model-based Q-values for stage 1
+        q_stage1_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices): # For each spaceship (action_1)
+            expected_value_s1 = 0
+            for s in range(self.n_states): # For each planet (state)
+                # Max Q-value for stage 2 from this state (what's the best alien to pick?)
+                max_q_stage2_s = np.max(self.q_stage2[s])
+                
+                # Determine if this specific transition (spaceship -> planet) is rare
+                # Spaceship 0 (A) commonly travels to Planet 0 (X) -> T[0,0] is common
+                # Spaceship 1 (U) commonly travels to Planet 1 (Y) -> T[1,1] is common
+                # Other transitions (T[0,1] and T[1,0]) are rare
+                is_rare_transition = (a1 == 0 and s == 1) or \
+                                     (a1 == 1 and s == 0)
+
+                if is_rare_transition:
+                    # Apply the anxiety-modulated bias to the value if it's a rare transition
+                    expected_value_s1 += self.T[a1, s] * max_q_stage2_s * self.effective_rare_bias
+                else:
+                    expected_value_s1 += self.T[a1, s] * max_q_stage2_s
+            q_stage1_mb[a1] = expected_value_s1
+        
+        # Use softmax with the calculated model-based Q-values
+        return self.softmax(q_stage1_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, but only for stage 2 here.
+        Stage 1 values are re-calculated model-based in policy_stage1() and are not updated
+        via TD learning in this model to maintain a pure model-based first stage.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        # self.q_stage1 is NOT updated here; it is computed afresh in policy_stage1()
+        # for each trial based on the learned q_stage2 values and transition probabilities.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

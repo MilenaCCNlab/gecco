@@ -1,0 +1,163 @@
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Modulated Heuristic Switching.
+    The participant uses a simplified "Win-Stay, Lose-Switch" heuristic for the first-stage choice 
+    instead of value-based reinforcement learning. However, high anxiety (STAI) inhibits the 
+    adaptive "Switch" response after a loss, leading to perseveration even when outcomes are negative.
+    
+    Stage 1 Policy:
+    - After a Win: Stay with probability `p_win_stay`.
+    - After a Loss: Switch with probability `p_loss_switch_base * (1 - stai)`.
+      (Higher anxiety -> lower probability of switching after loss -> higher perseveration).
+    
+    Stage 2 follows standard Q-learning (bandit task).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]             # Learning rate for Stage 2
+    beta: [0, 10]             # Inverse temperature for Stage 2
+    p_win_stay: [0, 1]        # Probability of staying after a win
+    p_loss_switch_base: [0, 1]# Base probability of switching after a loss (modulated by STAI)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.p_win_stay, self.p_loss_switch_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # If first trial, random choice
+        if self.trial == 0 or self.last_action1 is None:
+            return np.array([0.5, 0.5])
+        
+        # Determine stay probability based on last outcome
+        if self.last_reward == 1.0:
+            p_stay = self.p_win_stay
+        else:
+            # Anxiety dampens the switch probability (increases stay probability)
+            # If STAI is 1.0, switch prob becomes 0 -> pure freezing
+            p_switch = self.p_loss_switch_base * (1.0 - self.stai)
+            p_stay = 1.0 - p_switch
+            
+        # Construct probabilities
+        probs = np.zeros(2)
+        probs[int(self.last_action1)] = p_stay
+        probs[1 - int(self.last_action1)] = 1.0 - p_stay
+        
+        # Clip for numerical stability
+        probs = np.clip(probs, 1e-6, 1.0 - 1e-6)
+        return probs / probs.sum()
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Standard softmax for stage 2 (finding the best alien)
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Only update Stage 2 values (Stage 1 is heuristic-driven)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Blurred Model-Based Control.
+    The participant uses a hybrid Model-Based (MB) and Model-Free (MF) strategy.
+    However, anxiety degrades the precision of the internal model used for planning.
+    
+    The transition matrix `T` used for MB planning is a mixture of the learned transitions 
+    and a uniform distribution (uncertainty), weighted by STAI.
+    High anxiety -> `T` becomes uniform (0.5/0.5) -> MB planning becomes ineffective/random.
+    
+    Q_net = w * Q_MB + (1-w) * Q_MF
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta: [0, 10]   # Inverse temperature
+    w: [0, 1]       # Weight of Model-Based component
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition counts with prior (from base class)
+        self.counts = self.trans_counts.copy().astype(float)
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Model-Free Values (from Q-learning)
+        q_mf = self.q_stage1
+        
+        # 2. Model-Based Values
+        # Calculate current transition probabilities from counts
+        row_sums = self.counts.sum(axis=1, keepdims=True)
+        T_learned = self.counts / row_sums
+        
+        # "Blur" the transition matrix based on anxiety
+        # T_used = (1 - stai) * T_learned + stai * T_uniform
+        T_uniform = np.array([[0.5, 0.5], [0.5, 0.5]])
+        T_used = (1.0 - self.stai) * T_learned + self.stai * T_uniform
+        
+        # Q_MB(a1) = sum(T(a1, s2) * max(Q2(s2)))
+        v_stage2 = np.max(self.q_stage2, axis=1) # Max value of each state (X, Y)
+        q_mb = T_used @ v_stage2
+        
+        # 3. Combined Values
+        q_net = self.w * q_mb + (1.0 - self.w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        # Update transition counts (learning the environment)
+        self.counts[action_1, state] += 1.0
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety-Induced Cumulative Freezing.
+    Anxiety causes a pathological "freezing" response to repeated failure.
+    The participant's tendency to repeat the previous action (stickiness) increases 
+    linearly with the number of consecutive losses experienced, scaled by STAI.
+    
+    This explains "blocky" behavior where the participant gets stuck on a suboptimal 
+    choice for a long time before finally switching.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    freeze_rate: [0, 5] # Rate at which stickiness grows with consecutive losses
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.freeze_rate = model_parameters
+
+    def init_model(self) -> None:
+        self.consecutive_losses = 0
+
+    def policy_stage1(self) -> np.ndarray:
+        q_vals = self.q_stage1.copy()
+        
+        # Apply dynamic stickiness if there is a previous action
+        if self.last_action1 is not None:
+            # Stickiness grows with consecutive losses and anxiety
+            stickiness_bonus = self.freeze_rate * self.stai * self.consecutive_losses
+            q_vals[self.last_action1] += stickiness_bonus
+            
+        return self.softmax(q_vals, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update consecutive loss counter
+        if reward == 0.0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

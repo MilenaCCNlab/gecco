@@ -1,0 +1,214 @@
+Here are three cognitive models, each proposing a distinct hypothesis for how the participant makes decisions in the two-step task, with anxiety (STAI score) modulating a specific aspect of their behavior.
+
+### Model 1: Anxiety-Modulated State Uncertainty Aversion
+
+This model proposes that participants with high anxiety are more averse to uncertainty regarding the outcome of their first-stage choices (which planet they will land on). This aversion manifests as a penalty applied to the Q-values of stage-1 actions that lead to more uncertain outcomes. The magnitude of this uncertainty aversion is amplified by the participant's STAI score. Uncertainty for a stage-1 action is quantified by how far its transition probabilities are from being deterministic. The model also assumes the participant learns the empirical transition probabilities over time.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated State Uncertainty Aversion.
+    This model proposes that participants with high anxiety are more averse to
+    uncertainty regarding the outcome of their first-stage choices (which planet
+    they will land on). This aversion manifests as a penalty applied to the
+    Q-values of stage-1 actions that lead to more uncertain outcomes. The
+    magnitude of this uncertainty aversion is amplified by the participant's STAI score.
+    Uncertainty for a stage-1 action is quantified by how far its transition
+    probabilities are from being deterministic (i.e., 1 - max(P(state|action))).
+    The model assumes participants learn empirical transition probabilities.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    uncertainty_aversion_base: [0, 5] - Baseline strength of the uncertainty aversion penalty.
+    anxiety_uncertainty_amplification: [0, 5] - Factor by which STAI score amplifies
+                                                 the uncertainty aversion.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.uncertainty_aversion_base, self.anxiety_uncertainty_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize empirical transition counts with small pseudo-counts
+        self.trans_counts_empirical = np.array([[1, 1], [1, 1]], dtype=float) 
+        # Calculate initial empirical transition probabilities
+        self.T_empirical = self.trans_counts_empirical / self.trans_counts_empirical.sum(axis=1, keepdims=True)
+
+        # Calculate the effective uncertainty aversion based on STAI
+        self.effective_uncertainty_aversion = self.uncertainty_aversion_base * \
+                                              (1 + self.stai * self.anxiety_uncertainty_amplification)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values and empirical transition counts."""
+        # Update Stage 2 Q-values (standard TD learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Update empirical transition counts for the chosen action_1 and observed state
+        self.trans_counts_empirical[action_1, state] += 1
+        # Re-normalize to get current empirical transition probabilities
+        self.T_empirical = self.trans_counts_empirical / self.trans_counts_empirical.sum(axis=1, keepdims=True)
+
+        # Update Stage 1 Q-values using a model-based approach (expected value from Stage 2)
+        expected_q_stage2_for_action1 = np.sum(self.T_empirical[action_1, :] * np.max(self.q_stage2, axis=1))
+        delta_1 = expected_q_stage2_for_action1 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, applying an anxiety-modulated
+        uncertainty penalty to the Q-values before softmax selection.
+        """
+        biased_q_stage1 = np.copy(self.q_stage1)
+
+        for a in range(self.n_choices):
+            # Calculate uncertainty for action 'a' based on empirical transitions
+            # Uncertainty = 1 - P(most common state | action)
+            uncertainty = 1 - np.max(self.T_empirical[a, :])
+            
+            # Apply penalty to the Q-value
+            biased_q_stage1[a] -= uncertainty * self.effective_uncertainty_aversion
+            
+        return self.softmax(biased_q_stage1, self.beta)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Q-Value Decay
+
+This model proposes that high anxiety leads to a faster decay of learned Q-values over time. This means that past experiences, especially those further back in time, exert less influence on current decisions for anxious individuals. This could reflect impaired memory for reward contingencies or an increased focus on immediate, recent outcomes. The decay rate is amplified by the participant's STAI score.
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Q-Value Decay.
+    This model proposes that high anxiety leads to a faster decay of learned
+    Q-values over time. This means that past experiences, especially those
+    further back in time, exert less influence on current decisions for anxious
+    individuals. This could reflect impaired memory for reward contingencies or
+    an increased focus on immediate, recent outcomes. The decay rate is
+    amplified by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    gamma_decay_base: [0, 1] - Baseline rate at which Q-values decay towards their initial state.
+    anxiety_decay_amplification: [0, 1] - Factor by which STAI score amplifies the decay rate.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.gamma_decay_base, self.anxiety_decay_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective decay rate based on STAI
+        # Ensure decay rate stays within a reasonable range [0, 0.99]
+        self.effective_gamma_decay = np.clip(self.gamma_decay_base + self.stai * self.anxiety_decay_amplification, 0.0, 0.99)
+        
+        # Store the initial Q-values to decay towards them
+        self.initial_q_stage1 = np.copy(self.q_stage1)
+        self.initial_q_stage2 = np.copy(self.q_stage2)
+
+    def pre_trial(self) -> None:
+        """
+        Apply Q-value decay at the beginning of each trial, before decisions are made.
+        Q-values decay towards their initial (unlearned) state.
+        """
+        # Decay stage 1 Q-values
+        self.q_stage1 = self.q_stage1 * (1 - self.effective_gamma_decay) + self.initial_q_stage1 * self.effective_gamma_decay
+        
+        # Decay stage 2 Q-values
+        self.q_stage2 = self.q_stage2 * (1 - self.effective_gamma_decay) + self.initial_q_stage2 * self.effective_gamma_decay
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values after observing outcome using standard TD learning.
+        The decay is handled in pre_trial, so this method remains as in the base class.
+        """
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Biased Model-Based Control (Common Transition Preference)
+
+This model proposes that high anxiety leads to a bias in goal-directed (model-based) planning, causing participants to discount the expected value derived from rare transitions when evaluating first-stage actions. This reflects a preference for "safe" or predictable common paths, even if rare paths might occasionally offer better rewards. The degree of this rare transition value discounting is amplified by the participant's STAI score. This affects how Stage 1 Q-values are learned.
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Biased Model-Based Control (Common Transition Preference).
+    This model proposes that high anxiety leads to a bias in goal-directed
+    (model-based) planning, causing participants to discount the expected value
+    derived from rare transitions when evaluating first-stage actions. This
+    reflects a preference for "safe" or predictable common paths, even if rare
+    paths might occasionally offer better rewards. The degree of this rare
+    transition value discounting is amplified by the participant's STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature.
+    rare_discount_base: [0, 1] - Baseline factor by which expected value from rare transitions is discounted.
+    anxiety_rare_amplification: [0, 1] - Factor by which STAI score amplifies the rare transition discount.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_discount_base, self.anxiety_rare_amplification = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective rare transition discount based on STAI
+        # Ensure discount stays within [0, 1] (0 means no discount, 1 means full discount)
+        self.effective_rare_discount = np.clip(self.rare_discount_base + self.stai * self.anxiety_rare_amplification, 0.0, 1.0)
+        
+        # Define common/rare state mappings for convenience based on task description
+        # Spaceship 0 (A) commonly to Planet 0 (X), rarely to Planet 1 (Y)
+        # Spaceship 1 (U) commonly to Planet 1 (Y), rarely to Planet 0 (X)
+        self.common_state_map = {0: 0, 1: 1} 
+        self.rare_state_map = {0: 1, 1: 0}   
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, with Stage 1 update incorporating anxiety-biased
+        model-based planning.
+        """
+        # Stage 2 learning (standard TD)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 learning using a Model-Based update with rare transition discount
+        
+        # Get the common and rare states for the chosen action_1
+        common_s = self.common_state_map[action_1]
+        rare_s = self.rare_state_map[action_1]
+        
+        # Get the maximum Q-value for each state at Stage 2 (max over aliens in that planet)
+        max_q_s2_common = np.max(self.q_stage2[common_s, :])
+        max_q_s2_rare = np.max(self.q_stage2[rare_s, :])
+
+        # Get the transition probabilities for common and rare states (using fixed T from base class)
+        p_common = self.T[action_1, common_s]
+        p_rare = self.T[action_1, rare_s]
+
+        # Calculate the biased expected future value for Stage 1
+        # The value from rare transitions is discounted by (1 - effective_rare_discount)
+        biased_expected_q_stage2 = (p_common * max_q_s2_common) + \
+                                   (p_rare * max_q_s2_rare * (1 - self.effective_rare_discount))
+        
+        # Update Stage 1 Q-value using this biased expectation
+        delta_1 = biased_expected_q_stage2 - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

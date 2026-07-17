@@ -1,0 +1,164 @@
+Here are 3 new cognitive models exploring different mechanisms for how high anxiety (STAI = 0.6875) might influence decision-making in this task, specifically focusing on the observed behavior of long streaks of repeating the same choice.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model hypothesizes that high anxiety impairs the complex "model-based" planning (which uses the transition matrix) and biases the participant towards simpler "model-free" learning (which just reinforces what worked). Specifically, higher STAI reduces the mixing weight `w` for the model-based system, making the agent rely more on simple habit-like caching of values.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    High anxiety (STAI) reduces cognitive resources for planning, leading to a lower 
+    weighting of the Model-Based system (w).
+    
+    The mixing weight 'w' determines the contribution of MB vs MF values to the final choice.
+    w_effective = w_base * (1 - stai)
+    
+    If w is high, the agent uses the transition matrix T to plan.
+    If w is low, the agent relies on direct reinforcement (TD learning).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]     # Learning rate
+    beta: [0, 10]     # Inverse temperature
+    w_base: [0, 1]    # Base mixing weight (before anxiety modulation)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Based Value Calculation: Q_MB(s1, a) = sum(T(s1, a, s2) * max(Q(s2)))
+        # We use the max of stage 2 values as the estimated value of the next state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Max value for each state (X, Y)
+        
+        # T is shape (2, 2) -> (action, next_state)
+        # q_mb = T * v_stage2
+        q_mb = self.T @ v_stage2
+        
+        # Effective mixing weight reduced by anxiety
+        # If STAI is high (~0.7), w_effective becomes small, favoring MF
+        w_effective = self.w_base * (1.0 - self.stai)
+        w_effective = np.clip(w_effective, 0.0, 1.0)
+        
+        # Integrated Q-value
+        q_integrated = w_effective * q_mb + (1 - w_effective) * self.q_stage1
+        
+        return self.softmax(q_integrated, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning for Model-Free values
+        
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Model-Free)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Note: Transition matrix T is fixed in this simplified model, 
+        # but a full MB agent might update T here. We assume fixed knowledge of transitions.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced "Safe" Option Bias
+This model hypothesizes that anxiety creates a bias against uncertainty or "switching" costs, manifesting as a specific preference for the option that has been chosen most frequently recently (a "safety" bias), rather than just general stickiness. It tracks a "familiarity" trace for each option. High anxiety amplifies the value of the more familiar option, making the participant resistant to exploring the other option even if rewards drop.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces a 'Safety Bias' where the participant overvalues 
+    familiar options.
+    
+    We track a 'familiarity' trace for each stage-1 option. 
+    The decision value is Q_stage1 + safety_bonus * familiarity * stai.
+    This explains the long streaks: once an option becomes familiar, high anxiety 
+    makes it very hard to switch away.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate
+    beta: [0, 10]        # Inverse temperature
+    safety_bonus: [0, 5] # Magnitude of the safety bias
+    decay: [0, 1]        # Decay rate of the familiarity trace
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.safety_bonus, self.decay = model_parameters
+
+    def init_model(self) -> None:
+        self.familiarity = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate safety value
+        # High STAI amplifies the preference for the familiar option
+        safety_val = self.safety_bonus * self.familiarity * self.stai
+        
+        combined_value = self.q_stage1 + safety_val
+        return self.softmax(combined_value, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Update familiarity trace
+        # The chosen action increases in familiarity, others decay
+        self.familiarity *= (1 - self.decay)
+        self.familiarity[action_1] += 1.0
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Learning Asymmetry (Pessimism)
+This model hypothesizes that high anxiety leads to "pessimistic learning." The participant learns more from negative prediction errors (disappointments) than positive ones, or vice versa, depending on the parameterization. Specifically, we test if anxiety scales the learning rate for negative outcomes (`alpha_neg`) differently than positive ones. Given the data shows long streaks, perhaps they ignore negative outcomes (low `alpha_neg`) until a threshold is reached, or they are extremely sensitive to rewards (high `alpha_pos`) which locks them in.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety modulates learning asymmetry (Pessimism/Optimism bias).
+    The participant has different learning rates for positive and negative prediction errors.
+    
+    We define a base learning rate 'alpha'.
+    Anxiety (STAI) introduces a bias 'rho' that shifts the balance between 
+    learning from positive vs negative errors.
+    
+    alpha_pos = alpha * (1 - rho * stai)
+    alpha_neg = alpha * (1 + rho * stai)
+    
+    If rho is positive, anxiety increases sensitivity to negative outcomes (pessimism).
+    If rho is negative, anxiety increases sensitivity to positive outcomes (optimism/maintenance).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Base learning rate
+    beta: [0, 10]      # Inverse temperature
+    rho: [-1, 1]       # Asymmetry modulation factor
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rho = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate modulated learning rates
+        # We clip to ensure they stay in [0, 1]
+        alpha_pos = np.clip(self.alpha * (1.0 - self.rho * self.stai), 0.0, 1.0)
+        alpha_neg = np.clip(self.alpha * (1.0 + self.rho * self.stai), 0.0, 1.0)
+
+        # Stage 2 Update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        eff_alpha_2 = alpha_pos if delta_2 > 0 else alpha_neg
+        self.q_stage2[state, action_2] += eff_alpha_2 * delta_2
+        
+        # Stage 1 Update
+        # Note: We use the updated Q2 value for the TD target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        eff_alpha_1 = alpha_pos if delta_1 > 0 else alpha_neg
+        self.q_stage1[action_1] += eff_alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

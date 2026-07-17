@@ -1,0 +1,218 @@
+Here are three new cognitive models based on the two-step task structure and the provided STAI metadata.
+
+### Model 1: Anxiety-Induced Transition Uncertainty
+**Hypothesis:** High anxiety interferes with the ability to maintain a precise "cognitive map" of the environment. While the Model-Based (MB) system usually relies on the known transition probabilities (0.7/0.3), anxious participants may doubt this structure, effectively "flattening" their internal transition matrix toward uniformity (0.5/0.5) as anxiety increases. This reduces the effectiveness of the MB planning without disabling it entirely.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Induced Transition Uncertainty Model.
+    
+    Hypothesis: Anxiety degrades the precision of the Model-Based transition matrix.
+    Higher STAI scores mix the true transition matrix (0.7/0.3) with a uniform 
+    matrix (0.5/0.5), representing uncertainty about the spaceship structures.
+    
+    Parameters:
+    - learning_rate: [0, 1] Update rate for Q-values.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight between MB and MF control (0=MF, 1=MB).
+    - uncertainty_scale: [0, 1] How strongly STAI flattens the transition matrix.
+    """
+    learning_rate, beta, w, uncertainty_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    # Define the true matrix and a uniform 'uncertain' matrix
+    true_transition = np.array([[0.7, 0.3], [0.3, 0.7]])
+    flat_transition = np.array([[0.5, 0.5], [0.5, 0.5]])
+    
+    # Calculate the subjective transition matrix based on anxiety
+    # If uncertainty_scale is high and STAI is high, matrix becomes flatter.
+    mixing_factor = uncertainty_scale * stai_score
+    # Ensure mixing factor stays within [0, 1]
+    if mixing_factor > 1.0: mixing_factor = 1.0
+        
+    subjective_transition = (1 - mixing_factor) * true_transition + mixing_factor * flat_transition
+
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        
+        # Use the subjective (anxiety-flattened) matrix for MB calculation
+        q_stage1_mb = subjective_transition @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Driven Win-Stay Lose-Shift (WSLS) Override
+**Hypothesis:** Under high anxiety, cognitive resources (working memory) are depleted. Instead of relying purely on value-based RL (which requires integrating history), anxious participants fall back on a primitive "Win-Stay, Lose-Shift" heuristic. This model adds a bias to the Q-values based on the *immediate previous outcome*, overriding the integrated value history specifically for high-anxiety individuals.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Driven Win-Stay Lose-Shift (WSLS) Override.
+    
+    Hypothesis: Anxiety triggers a reactive heuristic. High STAI scores add a 
+    bias to repeat the previous Stage 1 choice if rewarded, and switch if unrewarded,
+    independent of the accumulated Q-values.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - heuristic_weight: [0, 5] Strength of the WSLS bias, scaled by STAI.
+    """
+    learning_rate, beta, w, heuristic_weight = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply Anxiety-Driven WSLS Bias
+        if last_action_1 != -1:
+            bias = heuristic_weight * stai_score
+            if last_reward == 1:
+                # Win-Stay: Boost the previous action
+                q_net[last_action_1] += bias
+            else:
+                # Lose-Shift: Penalize the previous action (effectively boosting the other)
+                q_net[last_action_1] -= bias
+
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # Store history for next trial
+        last_action_1 = action_1[trial]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Store reward for next trial's heuristic
+        last_reward = reward[trial]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Subjective Loss Valuation
+**Hypothesis:** Standard RL models treat a reward of 0 as a neutral event. However, anxious individuals often exhibit "negativity bias," perceiving the absence of a reward (0 coins) as an active punishment. This model modifies the reward signal itself: while 1 coin is valued at 1.0, 0 coins is valued as a negative number proportional to the STAI score, causing active avoidance of "empty" states rather than just extinction.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Subjective Loss Valuation Model.
+    
+    Hypothesis: Anxiety causes the absence of reward (0 coins) to be perceived 
+    as a punishment (negative value) rather than neutral.
+    
+    Parameters:
+    - learning_rate: [0, 1] Standard Q-learning rate.
+    - beta: [0, 10] Inverse temperature.
+    - w: [0, 1] Weight for model-based control.
+    - loss_scale: [0, 5] Magnitude of negative valuation for 0 outcomes, scaled by STAI.
+    """
+    learning_rate, beta, w, loss_scale = model_parameters
+    n_trials = len(action_1)
+    stai_score = stai[0]
+
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Calculate Subjective Reward
+        # If reward is 1, use 1. If reward is 0, use negative value based on anxiety.
+        r_subjective = reward[trial]
+        if r_subjective == 0:
+            r_subjective = -1.0 * (loss_scale * stai_score)
+            
+        delta_stage2 = r_subjective - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

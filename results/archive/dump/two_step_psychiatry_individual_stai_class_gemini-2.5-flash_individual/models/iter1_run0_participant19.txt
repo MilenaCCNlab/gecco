@@ -1,0 +1,173 @@
+Here are three new cognitive models, each proposing a distinct hypothesis for how the participant makes decisions, modulated by their anxiety (STAI) score.
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants learn differently from positive and negative
+    prediction errors. Specifically, it uses separate learning rates for positive (alpha_pos)
+    and negative (alpha_neg) outcomes. Furthermore, the participant's anxiety level (STAI score)
+    is hypothesized to increase the learning rate for negative outcomes, making them more
+    sensitive to and faster to update values based on negative experiences. This could reflect
+    anxious individuals' heightened vigilance to potential threats or losses.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1] (Learning rate for positive prediction errors)
+    alpha_neg_base: [0, 1] (Base learning rate for negative prediction errors)
+    k_stai_alpha_neg: [0, 1] (Sensitivity of negative learning rate to STAI score; adds to base)
+    beta: [0, 10] (Softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.k_stai_alpha_neg, self.beta = model_parameters
+        # Modulate alpha_neg based on STAI, ensuring it doesn't exceed 1
+        self.alpha_neg_stai = min(1.0, self.alpha_neg_base + self.stai * self.k_stai_alpha_neg)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using separate learning rates for positive and negative prediction errors,
+        with the negative learning rate modulated by STAI.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else: # delta_2 < 0
+            self.q_stage2[state, action_2] += self.alpha_neg_stai * delta_2
+        
+        # Stage 1 update
+        # The prediction error for stage 1 is based on the updated Q_stage2 value
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else: # delta_1 < 0
+            self.q_stage1[action_1] += self.alpha_neg_stai * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants use a blend of model-free and model-based
+    control, but with a specific bias in their model-based planning: an aversion to rare transitions.
+    Anxious individuals (higher STAI) are hypothesized to be particularly sensitive to these
+    rare transitions, applying a stronger penalty to the expected value of options that lead
+    to an outcome via a rare transition. This reflects a preference for predictable, common paths
+    and an avoidance of uncertainty associated with rare events, especially under anxiety.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    lambda_mb: [0, 1] (Weight of the model-based component)
+    rare_trans_penalty_base: [0, 5] (Base penalty for rare transitions in model-based evaluation)
+    k_stai_rare_penalty: [0, 5] (Sensitivity of rare transition penalty to STAI score; adds to base)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_mb, self.rare_trans_penalty_base, self.k_stai_rare_penalty = model_parameters
+        # Calculate the effective rare transition penalty, modulated by STAI
+        self.effective_rare_penalty = self.rare_trans_penalty_base + self.stai * self.k_stai_rare_penalty
+        self.common_trans_threshold = 0.5 # A probability below this is considered "rare"
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update Q-values using standard TD learning and update empirical transition probabilities.
+        """
+        # Standard Q-learning updates (model-free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Update transition counts for the model-based component
+        self.trans_counts[action_1, state] += 1
+        # Re-calculate transition probabilities
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, blending model-free Q-values
+        with model-based re-evaluated Q-values, applying a STAI-modulated
+        penalty for rare transitions.
+        """
+        # Model-free Q-values are self.q_stage1
+        
+        # Model-based Q-values for stage 1
+        q_model_based = np.zeros(self.n_choices)
+        for a1_idx in range(self.n_choices):
+            expected_future_value = 0
+            for s_idx in range(self.n_states):
+                max_q2_val = np.max(self.q_stage2[s_idx, :])
+                
+                # Apply penalty if the transition is considered "rare"
+                if self.T[a1_idx, s_idx] < self.common_trans_threshold:
+                    # Subtract the penalty; ensure value doesn't drop excessively
+                    penalized_q2_val = max(max_q2_val - self.effective_rare_penalty, -5.0) # Clip at -5 to prevent extreme values
+                else:
+                    penalized_q2_val = max_q2_val
+                
+                expected_future_value += self.T[a1_idx, s_idx] * penalized_q2_val
+            q_model_based[a1_idx] = expected_future_value
+
+        # Blend model-free and model-based Q-values
+        q_blended_stage1 = (1 - self.lambda_mb) * self.q_stage1 + self.lambda_mb * q_model_based
+        
+        return self.softmax(q_blended_stage1, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants exhibit a "recency bias" or "forgetting"
+    mechanism, where older value estimates decay over time, making recent experiences more influential.
+    This decay is applied to both first and second-stage Q-values before each trial's update.
+    The participant's anxiety level (STAI score) is hypothesized to increase this forgetting rate,
+    meaning higher anxiety leads to a stronger emphasis on recent outcomes and a faster decay
+    of past experiences, potentially due to reduced attentional resources or increased focus on
+    immediate, salient events, or simply a reduced ability to maintain long-term value representations.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    forget_rate_base: [0, 1] (Base rate at which Q-values decay per trial; 0=no decay, 1=complete decay)
+    k_stai_forget: [0, 1] (Sensitivity of forgetting rate to STAI score; adds to base)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.forget_rate_base, self.k_stai_forget = model_parameters
+        # Calculate the effective forgetting rate, modulated by STAI, ensuring it's within [0, 1)
+        # We cap at 0.99 to prevent total forgetting in a single step, which would make learning impossible.
+        self.forget_rate_effective = min(0.99, self.forget_rate_base + self.stai * self.k_stai_forget)
+
+    def pre_trial(self) -> None:
+        """
+        Apply forgetting to Q-values before the current trial's update.
+        """
+        decay_factor = 1.0 - self.forget_rate_effective
+        self.q_stage1 *= decay_factor
+        self.q_stage2 *= decay_factor
+        
+        # Ensure Q-values don't decay below a reasonable minimum (e.g., min possible reward -1)
+        # This prevents values from becoming excessively negative solely due to forgetting.
+        self.q_stage1 = np.maximum(self.q_stage1, -1.0)
+        self.q_stage2 = np.maximum(self.q_stage2, -1.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning after the forgetting step.
+        """
+        # Standard Q-learning updates
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

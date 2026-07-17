@@ -1,0 +1,178 @@
+Here are three cognitive models proposed to explain the participant's decision-making, incorporating their high anxiety (STAI score = 0.6625). Each model presents a distinct hypothesis about how anxiety modulates behavior in the two-step task.
+
+---
+
+### ParticipantModel1: Anxiety-Modulated Predictability Preference
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Predictability Preference.
+    This model proposes that participants develop a preference for predictable transitions
+    in the first stage. Specifically, choosing a spaceship that commonly leads to its
+    associated planet (A to X, U to Y) receives an additional bonus in its Q-value.
+    This "predictability bias" is hypothesized to be amplified by higher anxiety (STAI score),
+    making anxious individuals more likely to stick to the more reliable first-stage options.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    predict_bias_base: [0, 5] - Base bonus for choosing a predictable first-stage action.
+    predict_bias_stai_mod: [0, 5] - Modulatory parameter for STAI on predictability bias.
+                                     A positive value means higher anxiety increases this bias.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.predict_bias_base, self.predict_bias_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective predictability bias, modulated by STAI score.
+        # Clip to ensure it's within a reasonable non-negative range.
+        self.eff_predict_bias = np.clip(self.predict_bias_base + self.predict_bias_stai_mod * self.stai, 0, 5)
+
+        # The transition matrix T already defines common (diagonal) and rare (off-diagonal) transitions.
+        # T[0,0] is common for spaceship 0, T[1,1] is common for spaceship 1.
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, including predictability bias.
+        """
+        # Create a biased Q-value array for stage 1
+        q_stage1_biased = np.copy(self.q_stage1)
+
+        # Add the predictability bias to the Q-value of actions that lead to their common state
+        # Spaceship 0 commonly leads to Planet 0 (X)
+        # Spaceship 1 commonly leads to Planet 1 (Y)
+        # The T matrix already reflects this: T[0,0] is P(Planet 0 | Spaceship 0), T[1,1] is P(Planet 1 | Spaceship 1)
+        # We apply the bonus proportional to the common transition probability, modulated by the effective bias.
+        q_stage1_biased[0] += self.eff_predict_bias * self.T[0,0]
+        q_stage1_biased[1] += self.eff_predict_bias * self.T[1,1]
+
+        return self.softmax(q_stage1_biased, self.beta)
+
+    # The default value_update method from CognitiveModelBase is used.
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### ParticipantModel2: Anxiety-Modulated Rare Transition Penalty
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Rare Transition Penalty.
+    This model proposes that encountering a rare transition (e.g., choosing spaceship A but landing on planet Y)
+    is inherently punishing for the participant. This "rare transition penalty" is directly applied to the
+    Q-value of the chosen first-stage action, making that action less appealing in the future.
+    Higher anxiety (STAI score) is hypothesized to amplify the magnitude of this negative penalty,
+    reflecting an increased aversion to unpredictable or surprising outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    rare_penalty_base: [-5, 0] - Base penalty applied to Stage 1 Q-value upon a rare transition.
+                                  Must be non-positive.
+    rare_penalty_stai_mod: [-5, 0] - Modulatory parameter for STAI on the rare transition penalty.
+                                      A negative value means higher anxiety makes the penalty more negative (stronger).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_penalty_base, self.rare_penalty_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective rare transition penalty, modulated by STAI score.
+        # Ensure it's non-positive (a penalty).
+        self.eff_rare_penalty = np.clip(self.rare_penalty_base + self.rare_penalty_stai_mod * self.stai, -5, 0)
+        
+        # Define common transition states for each spaceship
+        # Spaceship 0 (A) commonly goes to Planet 0 (X)
+        # Spaceship 1 (U) commonly goes to Planet 1 (Y)
+        self.common_state_for_spaceship = {0: 0, 1: 1}
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values, applying an additional penalty for rare transitions to stage-1 Q-values.
+        """
+        # Standard Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Standard Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Apply rare transition penalty if the observed state was not the common one for the chosen action
+        if state != self.common_state_for_spaceship[action_1]:
+            self.q_stage1[action_1] += self.eff_rare_penalty
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### ParticipantModel3: Anxiety-Modulated Counterfactual Exploration
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Modulated Counterfactual Exploration.
+    This model suggests that participants, especially those with high anxiety,
+    tend to explore alternative options. After making a choice at Stage 1,
+    the Q-value of the *unchosen* first-stage action receives a temporary
+    "exploration bonus" for the *next* trial. This makes the unchosen option
+    more appealing, promoting a switch. Higher anxiety (STAI score) is hypothesized
+    to amplify this exploration bonus, leading to more frequent switching or
+    exploration of alternative first-stage paths.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Softmax inverse temperature for action selection.
+    explor_bonus_base: [0, 5] - Base bonus temporarily added to the unchosen Stage 1 action's Q-value.
+    explor_bonus_stai_mod: [0, 5] - Modulatory parameter for STAI on the exploration bonus.
+                                     A positive value means higher anxiety increases this bonus.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.explor_bonus_base, self.explor_bonus_stai_mod = model_parameters
+
+    def init_model(self) -> None:
+        # Calculate the effective exploration bonus, modulated by STAI score.
+        self.eff_explor_bonus = np.clip(self.explor_bonus_base + self.explor_bonus_stai_mod * self.stai, 0, 5)
+        # Initialize a temporary bonus array for the next trial's stage 1 choices
+        self.temp_explor_bonus = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities, including the temporary exploration bonus.
+        """
+        # Add the temporary exploration bonus to the current Q-values before softmax
+        q_stage1_biased = self.q_stage1 + self.temp_explor_bonus
+        return self.softmax(q_stage1_biased, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update the temporary exploration bonus for the *next* trial.
+        """
+        # Call base class post_trial to update last_action1 etc.
+        super().post_trial(action_1, state, action_2, reward)
+
+        # Reset bonus for the next trial, then apply to the unchosen action
+        self.temp_explor_bonus = np.zeros(self.n_choices)
+        unchosen_action = 1 - action_1 # If action_1 is 0, unchosen is 1; if action_1 is 1, unchosen is 0.
+        self.temp_explor_bonus[unchosen_action] = self.eff_explor_bonus
+
+    # The default value_update method from CognitiveModelBase is used.
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,289 @@
+Here are three cognitive models proposing different hypotheses for how the participant makes decisions, with each model incorporating the participant's STAI score (0.35, indicating medium anxiety) to modulate behavior.
+
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+# Base Class (Provided - DO NOT MODIFY)
+class CognitiveModelBase(ABC):
+    """
+    Base class for cognitive models in a two-step task.
+    
+    Override methods to implement participant-specific cognitive strategies.
+    """
+
+    def __init__(self, n_trials: int, stai: float, model_parameters: tuple):
+        # Task structure
+        self.n_trials = n_trials
+        self.n_choices = 2
+        self.n_states = 2
+        self.stai = stai
+        
+        # Transition probabilities
+        # Initial priors for transitions. Spaceship 0 commonly to Planet 0, Spaceship 1 commonly to Planet 1
+        self.trans_counts = np.array([[35, 15], [15, 35]]) 
+        self.T = self.trans_counts / self.trans_counts.sum(axis=1, keepdims=True) 
+        
+        # Choice probability sequences
+        self.p_choice_1 = np.zeros(n_trials)
+        self.p_choice_2 = np.zeros(n_trials)
+        
+        # Value representations
+        self.q_stage1 = np.zeros(self.n_choices)
+        self.q_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Trial tracking
+        self.trial = 0
+        self.last_action1 = None
+        self.last_action2 = None
+        self.last_state = None
+        self.last_reward = None
+        
+        # Initialize
+        self.unpack_parameters(model_parameters)
+        self.init_model()
+
+    @abstractmethod
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        """Unpack model_parameters into named attributes."""
+        pass
+
+    def init_model(self) -> None:
+        """Initialize model state. Override to set up additional variables."""
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        """Compute stage-1 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage1, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """Compute stage-2 action probabilities. Override to customize."""
+        return self.softmax(self.q_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Update values after observing outcome. Override to customize."""
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+    def pre_trial(self) -> None:
+        """Called before each trial. Override to add computations."""
+        pass
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """Called after each trial. Override to add computations."""
+        self.last_action1 = action_1
+        self.last_action2 = action_2
+        self.last_state = state
+        self.last_reward = reward
+
+    def run_model(self, action_1, state, action_2, reward) -> float:
+        """Run model over all trials. Usually don't override."""
+        for self.trial in range(self.n_trials):
+            a1, s = int(action_1[self.trial]), int(state[self.trial])
+            a2, r = int(action_2[self.trial]), float(reward[self.trial])
+            
+            self.pre_trial()
+            self.p_choice_1[self.trial] = self.policy_stage1()[a1]
+            self.p_choice_2[self.trial] = self.policy_stage2(s)[a2]
+            self.value_update(a1, s, a2, r)
+            self.post_trial(a1, s, a2, r)
+        
+        return self.compute_nll()
+    
+    def compute_nll(self) -> float:
+        """Compute negative log-likelihood."""
+        eps = 1e-12
+        return -(np.sum(np.log(self.p_choice_1 + eps)) + np.sum(np.log(self.p_choice_2 + eps)))
+    
+    def softmax(self, values: np.ndarray, beta: float) -> np.ndarray:
+        """Softmax action selection."""
+        centered = values - np.max(values)
+        exp_vals = np.exp(beta * centered)
+        return exp_vals / np.sum(exp_vals)
+
+def make_cognitive_model(ModelClass):
+    """Create function interface from model class."""
+    def cognitive_model(action_1, state, action_2, reward, stai, model_parameters):
+        n_trials = len(action_1)
+        stai_val = float(stai[0]) if hasattr(stai, '__len__') else float(stai)
+        model = ModelClass(n_trials, stai_val, model_parameters)
+        return model.run_model(action_1, state, action_2, reward)
+    return cognitive_model
+
+```
+
+### Proposed Cognitive Models
+
+---
+
+#### Model 1: STAI-modulated Uncertainty-Driven Exploration
+
+This model proposes that participants' choices are influenced by the perceived uncertainty of the transitions associated with each spaceship. Options that have led to less frequently observed transitions (i.e., less certain paths) might receive an 'uncertainty bonus' or penalty, influencing exploration. This sensitivity to uncertainty, and thus the impact of the bonus, is modulated by the participant's anxiety level (STAI score). For medium anxiety, this could manifest as a cautious tendency to explore less certain paths or to stick to well-known ones.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that participants' choices are influenced by
+    the perceived uncertainty of the transitions associated with each spaceship.
+    Specifically, options that have led to less frequently observed transitions
+    (i.e., less certain paths) might receive a 'novelty' or 'uncertainty' bonus,
+    or penalty, influencing exploration. This sensitivity to uncertainty, and
+    thus the impact of the bonus, is modulated by the participant's anxiety
+    level (STAI score). For medium anxiety, this could manifest as a cautious
+    tendency to explore less certain paths or to stick to well-known ones.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    uncertainty_bonus_base: [0, 2] - Base bonus added to Q-values for options with
+                                    higher transition uncertainty (less observed paths).
+    stai_uncertainty_factor: [-1, 1] - Factor by which STAI score modulates the uncertainty bonus.
+                                     Positive values mean higher anxiety increases the bonus (more exploration of uncertain).
+                                     Negative values mean higher anxiety decreases the bonus (more avoidance of uncertain).
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.uncertainty_bonus_base, self.stai_uncertainty_factor = model_parameters
+        # Calculate the effective uncertainty bonus, clipped to be within a reasonable range
+        # The 1.0 ensures a base level of sensitivity to uncertainty before modulation.
+        self.uncertainty_bonus_strength = np.clip(self.uncertainty_bonus_base + self.stai_uncertainty_factor * self.stai, -2.0, 2.0)
+
+        # Initialize observed_trans_counts to track actual transitions during the task
+        # Using a copy of trans_counts (priors) as a starting point.
+        self.observed_trans_counts = np.copy(self.trans_counts) 
+
+    def policy_stage1(self) -> np.ndarray:
+        q_values_with_uncertainty = np.copy(self.q_stage1)
+
+        for a1 in range(self.n_choices):
+            # Calculate a measure of uncertainty for the transitions from this spaceship (a1)
+            # We use the inverse of the log of total visits for a given spaceship.
+            # A low number of visits indicates high uncertainty.
+            total_visits_for_a1 = np.sum(self.observed_trans_counts[a1])
+            if total_visits_for_a1 == 0:
+                uncertainty_measure = 1.0 # Max uncertainty if never chosen
+            else:
+                # Less visits means higher uncertainty. Log helps to scale.
+                # Adding 1 to total_visits_for_a1 to avoid log(0) and provide a smoother curve.
+                uncertainty_measure = 1.0 / np.log(total_visits_for_a1 + 1)
+
+            q_values_with_uncertainty[a1] += self.uncertainty_bonus_strength * uncertainty_measure
+
+        return self.softmax(q_values_with_uncertainty, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Default TD learning for Q-values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Update transition counts based on the observed outcome
+        self.observed_trans_counts[action_1, state] += 1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+#### Model 2: Value Decay with STAI-modulated Decay Rate
+
+This model incorporates a value decay mechanism, where the Q-values of all options (both stage 1 and stage 2) gradually decay over time, simulating forgetting or a tendency to explore. This decay rate is modulated by the participant's anxiety level (STAI score). For medium anxiety, this could mean a faster or slower devaluation of options, influencing how long a participant sticks with a particular strategy even if it's not being immediately reinforced.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model incorporates a value decay mechanism, where the Q-values
+    of all options (specifically, stage 1 and stage 2 options) gradually decay
+    over time, simulating forgetting or a tendency to explore. This decay rate
+    is modulated by the participant's anxiety level (STAI score). For medium
+    anxiety, this could mean a faster or slower devaluation of options,
+    influencing how long a participant sticks with a particular strategy even
+    if it's not being immediately reinforced.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    decay_rate_base: [0, 0.5] - Base rate at which Q-values decay towards 0.5 (initial value).
+    stai_decay_factor: [-0.5, 0.5] - Factor by which STAI score modulates the decay rate.
+                                     Positive values mean higher anxiety increases decay.
+                                     Negative values mean higher anxiety decreases decay.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_rate_base, self.stai_decay_factor = model_parameters
+        # Calculate the effective decay rate, ensuring it's within a reasonable range
+        self.decay_rate = np.clip(self.decay_rate_base + self.stai_decay_factor * self.stai, 0.0, 0.5)
+
+    def init_model(self) -> None:
+        # Q-values are initialized to 0.5 by default in CognitiveModelBase for q_stage2.
+        # q_stage1 is initialized to 0. We'll make it decay towards 0.5 as well,
+        # so initialize it to 0.5 for consistency with the decay target.
+        self.q_stage1 = 0.5 * np.ones(self.n_choices)
+
+    def pre_trial(self) -> None:
+        """Apply decay to Q-values before choices are made."""
+        # Decay stage 1 Q-values towards their initial value (0.5)
+        self.q_stage1 = self.q_stage1 * (1 - self.decay_rate) + 0.5 * self.decay_rate
+        # Decay stage 2 Q-values towards their initial value (0.5)
+        self.q_stage2 = self.q_stage2 * (1 - self.decay_rate) + 0.5 * self.decay_rate
+
+    # The default value_update is suitable after decay has been applied.
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+#### Model 3: STAI-modulated Stage 1 Reward Prediction Error (RPE) Gain
+
+This model proposes that participants' learning about stage 1 choices is influenced by the magnitude of the reward prediction error (RPE) at stage 1 (i.e., the difference between the value of the reached planet and the current Q-value of the chosen spaceship). The sensitivity or 'gain' applied to this RPE is modulated by the participant's anxiety level (STAI score). For medium anxiety, this could mean an amplified or dampened response to unexpected outcomes at the first stage, impacting how quickly they adjust their spaceship choices based on the value of the subsequent planet.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that participants' learning about stage 1
+    choices is influenced by the magnitude of the reward prediction error (RPE)
+    at stage 1 (i.e., the difference between the value of the reached planet and
+    the current Q-value of the chosen spaceship). The sensitivity or 'gain'
+    applied to this RPE is modulated by the participant's anxiety level (STAI score).
+    For medium anxiety, this could mean an amplified or dampened response to
+    unexpected outcomes at the first stage, impacting how quickly they adjust
+    their spaceship choices based on the value of the subsequent planet.
+
+    Parameter Bounds:
+    -----------------
+    alpha2: [0, 1] - Learning rate for stage 2 Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    alpha1_base: [0, 1] - Base learning rate for stage 1 Q-values.
+    stai_rpe_gain_factor: [-2, 2] - Factor by which STAI score modulates the RPE gain for stage 1.
+                                    Positive values mean higher anxiety amplifies stage 1 RPE.
+                                    Negative values mean higher anxiety dampens stage 1 RPE.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha2, self.beta, self.alpha1_base, self.stai_rpe_gain_factor = model_parameters
+        # Calculate the effective RPE gain for stage 1.
+        # A base gain of 1.0 means no amplification/dampening from STAI.
+        # The gain is clipped to be non-negative, as a negative gain would reverse learning.
+        self.rpe_gain = np.clip(1.0 + self.stai_rpe_gain_factor * self.stai, 0.0, 5.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update stage 2 Q-values using alpha2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha2 * delta_2
+
+        # Update stage 1 Q-values with a RPE gain modulated by STAI
+        # delta_1 is the prediction error for stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        # The RPE (delta_1) is scaled by the calculated gain before being applied with alpha1_base
+        self.q_stage1[action_1] += self.alpha1_base * (delta_1 * self.rpe_gain)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

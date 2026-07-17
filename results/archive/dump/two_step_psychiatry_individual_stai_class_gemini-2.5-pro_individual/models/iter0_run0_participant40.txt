@@ -1,0 +1,164 @@
+As a cognitive scientist and Python programmer, I will propose three distinct cognitive models to explain this participant's decision-making process. Given their low score on the anxiety questionnaire (stai = 0.2625), my hypotheses will center on cognitive traits often associated with low anxiety, such as enhanced cognitive flexibility, reduced sensitivity to negative feedback, and a greater propensity for exploration.
+
+Each model formalizes a different hypothesis about how these traits manifest in the context of the two-step task.
+
+### Model 1: Anxiety-Modulated Hybrid Control
+This model proposes that the participant uses a sophisticated combination of goal-directed ("model-based") and habitual ("model-free") learning. The model-based system plans by considering the learned transition structure of the task, while the model-free system learns simple action-reward associations. I hypothesize that the participant's low anxiety allows for greater cognitive resources to be allocated to the more demanding model-based system. Furthermore, low anxiety is linked to more consistent, less noisy decision-making. This is implemented by having the `stai` score modulate the choice temperature (`beta`), where lower anxiety leads to more deterministic choices.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant employs a hybrid of model-based and model-free control.
+    Their low anxiety (stai) enhances choice consistency, making them more deterministic
+    in their decisions (higher effective beta). The model fits a parameter 'w' that
+    captures the balance between model-based (w=1) and model-free (w=0) control. We predict
+    a high 'w' for this participant, reflecting flexible, goal-directed behavior.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]  (Inverse temperature for softmax)
+    w: [0, 1]       (Model-based weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Computes stage-1 choice probabilities based on a weighted average of
+        model-free and model-based Q-values.
+        """
+        # Model-free values are stored in self.q_stage1
+        q_model_free = self.q_stage1
+        
+        # Model-based values are computed on the fly
+        q_stage2_max = np.max(self.q_stage2, axis=1)
+        q_model_based = self.T @ q_stage2_max
+        
+        # Combine the two systems
+        q_hybrid = self.w * q_model_based + (1 - self.w) * q_model_free
+        
+        # Low anxiety increases choice consistency (higher effective beta)
+        # As stai -> 0, beta_eff -> beta. As stai -> 1, beta_eff -> infinity (very random).
+        # Let's rephrase: low anxiety -> less noise -> higher beta.
+        # As stai -> 0, beta_eff -> large. As stai -> 1, beta_eff -> small.
+        beta_eff = self.beta * (1.5 - self.stai) # Scales beta from ~1.5x (low stai) to ~0.5x (high stai)
+        
+        return self.softmax(q_hybrid, beta_eff)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        """
+        Stage-2 policy is also affected by anxiety-modulated choice consistency.
+        """
+        beta_eff = self.beta * (1.5 - self.stai)
+        return self.softmax(self.q_stage2[state], beta_eff)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Asymmetric Learning and Perseverance
+This model explores the idea that the participant's strategy is less about complex planning and more about simple, biased learning heuristics. It proposes two such biases. First, a perseverance bias, where the participant is more likely to repeat the previous action. Second, an asymmetric learning rate, where they learn differently from positive versus negative or neutral outcomes. Crucially, I hypothesize that the participant's low anxiety makes them less sensitive to negative feedback, which is modeled by `stai` reducing the learning rate for non-positive outcomes.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant uses a model-free strategy with two key biases:
+    a tendency to repeat recent choices (perseverance) and different learning rates
+    for positive vs. non-positive outcomes. Their low anxiety (stai) dampens their
+    reaction to negative feedback, resulting in a lower learning rate for trials
+    with no reward or a loss.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   (Learning rate for positive rewards)
+    alpha_neg: [0, 1]   (Base learning rate for non-positive rewards)
+    beta: [0, 10]      (Inverse temperature)
+    p: [0, 5]          (Perseverance strength)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg, self.beta, self.p = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Stage-1 policy includes a perseverance bonus for the last-chosen action.
+        """
+        q_policy = np.copy(self.q_stage1)
+        if self.last_action1 is not None:
+            q_policy[self.last_action1] += self.p
+        return self.softmax(q_policy, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Value update uses different learning rates for positive and non-positive
+        outcomes. The negative learning rate is modulated by anxiety.
+        """
+        # Low anxiety reduces the learning rate for non-positive outcomes
+        alpha_neg_effective = self.alpha_neg * (1 - self.stai)
+        
+        # Select the learning rate based on the reward
+        current_alpha = self.alpha_pos if reward > 0 else alpha_neg_effective
+        
+        # Standard TD updates, but with the selected alpha
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += current_alpha * delta_2
+        
+        delta_1 = np.max(self.q_stage2[state]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += current_alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Exploration Bonus
+This model proposes that the participant's behavior is guided by a trade-off between exploiting known rewarding options and exploring lesser-known ones. I hypothesize that low anxiety is associated with greater curiosity and a higher tolerance for uncertainty, leading to more exploratory behavior. This is formalized using an "upper confidence bound" (UCB) approach, where an exploration bonus is added to the value of actions that have been chosen less frequently. The magnitude of this bonus is directly increased by the participant's low `stai` score.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: The participant actively balances exploitation and exploration.
+    Their choice is not just based on learned value, but also on an exploration
+    bonus awarded to less-chosen options. Their low anxiety (stai) promotes this
+    exploratory drive, increasing their willingness to try options they are
+    more uncertain about.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   (Learning rate)
+    beta: [0, 10]  (Inverse temperature)
+    c: [0, 5]       (Base exploration weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.c = model_parameters
+
+    def init_model(self) -> None:
+        """Initialize a counter for stage-1 choices."""
+        self.choice_counts = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Stage-1 policy is based on Q-values plus an anxiety-modulated
+        exploration bonus.
+        """
+        # Low anxiety increases the exploration bonus
+        c_effective = self.c * (1 - self.stai)
+        
+        # Add a small epsilon to prevent division by zero on early trials
+        # Add 2 to trial to avoid log(1)=0 on trial 0.
+        exploration_bonus = c_effective * np.sqrt(
+            np.log(self.trial + 2) / (self.choice_counts + 1e-6)
+        )
+        
+        q_explore = self.q_stage1 + exploration_bonus
+        return self.softmax(q_explore, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        After the trial, update the count for the chosen action.
+        """
+        super().post_trial(action_1, state, action_2, reward)
+        self.choice_counts[action_1] += 1
+        
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

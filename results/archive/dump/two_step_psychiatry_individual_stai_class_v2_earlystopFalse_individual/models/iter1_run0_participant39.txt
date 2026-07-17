@@ -1,0 +1,180 @@
+Here are three new cognitive models that explore different mechanisms for how high anxiety (STAI = 0.6625) might influence decision-making in this task, specifically focusing on model-based vs. model-free control, learning rates for negative outcomes, and uncertainty-driven exploration.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model tests the hypothesis that high anxiety impairs model-based planning (using the transition structure) and promotes reliance on simpler model-free reinforcement learning. The mixing weight `w` determines the balance, and anxiety shifts this balance towards model-free control.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety impairs model-based control, leading to a reliance on 
+    model-free strategies.
+    
+    This is a hybrid reinforcement learning model.
+    - Model-Free (MF): Updates values based on direct reward experience (TD learning).
+    - Model-Based (MB): Computes values using the transition matrix T and stage-2 values.
+    
+    The final Q-value is a weighted mix: Q_net = w * Q_MB + (1 - w) * Q_MF.
+    The mixing weight 'w' is modulated by STAI: w_net = w_base * (1 - STAI).
+    Higher anxiety reduces the contribution of the model-based system.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    w_base: [0, 1]     # Base model-based weight (for STAI=0)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Separate Q-tables for Model-Free (MF) system
+        self.q_mf_stage1 = np.zeros(self.n_choices)
+        self.q_mf_stage2 = 0.5 * np.ones((self.n_states, self.n_choices))
+        
+        # Transition matrix is fixed as per instructions (70/30 split)
+        self.T = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Compute Model-Based values for Stage 1
+        # Q_MB(a1) = sum(P(s2|a1) * max(Q_stage2(s2, :)))
+        # We use the MF stage 2 values as the best estimate of state value
+        v_stage2 = np.max(self.q_mf_stage2, axis=1) 
+        q_mb_stage1 = self.T @ v_stage2
+        
+        # 2. Compute Net Weight
+        # High anxiety reduces w_base. If STAI=1, w becomes 0 (pure MF).
+        w_net = self.w_base * (1.0 - self.stai)
+        
+        # 3. Combine
+        q_net = w_net * q_mb_stage1 + (1 - w_net) * self.q_mf_stage1
+        
+        return self.softmax(q_net, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Stage 2 is purely model-free in standard 2-step models
+        return self.softmax(self.q_mf_stage2[state], self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning for the Model-Free system
+        
+        # Stage 2 update
+        delta_2 = reward - self.q_mf_stage2[state, action_2]
+        self.q_mf_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (TD(1) - direct reinforcement from outcome)
+        # Note: Standard hybrid models often use SARSA or Q-learning for stage 1 MF
+        delta_1 = self.q_mf_stage2[state, action_2] - self.q_mf_stage1[action_1]
+        self.q_mf_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Punishment Sensitivity
+This model hypothesizes that high anxiety leads to a "negativity bias," where participants learn more aggressively from punishments (or lack of rewards) than from positive rewards. This is implemented by having separate learning rates for positive and negative prediction errors, with the negative learning rate scaled by STAI.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases sensitivity to negative outcomes (punishment).
+    
+    The model uses dual learning rates:
+    - alpha_pos: For positive prediction errors (better than expected).
+    - alpha_neg: For negative prediction errors (worse than expected).
+    
+    The negative learning rate is amplified by anxiety:
+    alpha_neg_effective = alpha_neg_base * (1 + STAI).
+    
+    This means anxious individuals update their beliefs more drastically when 
+    disappointed, potentially leading to "win-stay, lose-shift" behavior driven by fear.
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]      # Learning rate for positive PE
+    alpha_neg_base: [0, 1] # Base learning rate for negative PE
+    beta: [0, 10]          # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective negative learning rate
+        # We clamp it at 1.0 to prevent instability
+        alpha_neg_eff = min(1.0, self.alpha_neg_base * (1.0 + self.stai))
+        
+        # --- Stage 2 Update ---
+        pe_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if pe_2 >= 0 else alpha_neg_eff
+        self.q_stage2[state, action_2] += alpha_2 * pe_2
+        
+        # --- Stage 1 Update ---
+        # We use the updated stage 2 value to drive stage 1 (TD-learning)
+        pe_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if pe_1 >= 0 else alpha_neg_eff
+        self.q_stage1[action_1] += alpha_1 * pe_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Uncertainty Aversion
+This model suggests that anxious individuals are averse to uncertainty. Instead of exploring uncertain options (as in an uncertainty bonus), they actively avoid them. We track the variance (uncertainty) of the Q-values and subtract a penalty proportional to that uncertainty, scaled by STAI.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to uncertainty aversion.
+    
+    The model tracks not just the mean Q-value, but an uncertainty metric (inverse count/decay).
+    Options that haven't been chosen recently have higher uncertainty.
+    
+    Decision Value = Q(a) - (penalty_weight * STAI * Uncertainty(a))
+    
+    Anxious participants will prefer "safe" (recently visited, low uncertainty) options 
+    over "risky" (unknown, high uncertainty) ones.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]      # Learning rate
+    beta: [0, 10]      # Inverse temperature
+    penalty: [0, 5]    # Weight of uncertainty penalty
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.penalty = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize uncertainty counters (0 = high uncertainty, 1 = low uncertainty)
+        # We'll use a simple counter that decays for unchosen options and resets for chosen ones
+        self.uncertainty_s1 = np.ones(self.n_choices) # Start with high uncertainty
+        self.uncertainty_s2 = np.ones((self.n_states, self.n_choices))
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate net values: Q - (Penalty * STAI * Uncertainty)
+        penalty_term = self.penalty * self.stai * self.uncertainty_s1
+        net_values = self.q_stage1 - penalty_term
+        return self.softmax(net_values, self.beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        penalty_term = self.penalty * self.stai * self.uncertainty_s2[state]
+        net_values = self.q_stage2[state] - penalty_term
+        return self.softmax(net_values, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update uncertainty
+        # Chosen options become certain (0). Unchosen options become more uncertain (+0.1).
+        
+        # Stage 1
+        self.uncertainty_s1 += 0.1 # Increase uncertainty for all
+        self.uncertainty_s1[action_1] = 0.0 # Reset for chosen
+        self.uncertainty_s1 = np.clip(self.uncertainty_s1, 0, 1) # Cap at 1
+        
+        # Stage 2
+        self.uncertainty_s2[state] += 0.1
+        self.uncertainty_s2[state, action_2] = 0.0
+        self.uncertainty_s2 = np.clip(self.uncertainty_s2, 0, 1)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

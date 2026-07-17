@@ -1,0 +1,170 @@
+Here are three new cognitive models that hypothesize different mechanisms for the observed behavior, particularly focusing on the interaction between anxiety (STAI) and decision-making.
+
+### Model 1: Anxiety-Modulated Model-Based/Model-Free Hybrid
+This model tests the hypothesis that anxiety shifts the balance between goal-directed (Model-Based) and habitual (Model-Free) control. High anxiety is often associated with a reliance on habits (Model-Free) over flexible planning (Model-Based). The mixing weight `w` is modulated by the STAI score.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates the balance between Model-Based (MB) and Model-Free (MF) control.
+    Higher anxiety (STAI) leads to a reduction in Model-Based planning (lower w), 
+    causing the participant to rely more on simple temporal difference learning (MF).
+    
+    The mixing weight w is calculated as: w = w_max * (1 - stai)^k
+    where k determines how sharply anxiety degrades MB control.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_max: [0, 1]       # Maximum model-based weight (at 0 anxiety)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_max = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition model (fixed for simplicity as per task description, 
+        # though a full MB agent might learn this)
+        # 0->0 (common), 0->1 (rare); 1->1 (common), 1->0 (rare)
+        # Using the counts provided in base class: [[35, 15], [15, 35]] -> approx 0.7/0.3
+        self.T = np.array([[0.7, 0.3], [0.3, 0.7]])
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Free values
+        q_mf = self.q_stage1
+        
+        # Model-Based values: V_MB(s1) = sum(P(s2|s1) * max(Q_stage2(s2, a2)))
+        # We compute the max value of the next stage states
+        v_stage2_max = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Bellman equation for MB values
+        q_mb = np.dot(self.T, v_stage2_max)
+        
+        # Calculate mixing weight modulated by anxiety
+        # If stai is high, w becomes small (more MF). 
+        # We use a simple linear scaling clipped at 0.
+        # w = w_max * (1 - stai)
+        w = self.w_max * max(0, (1.0 - self.stai))
+        
+        # Combined Q-values
+        q_net = w * q_mb + (1 - w) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD learning for MF values
+        # Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 (TD(1) / SARSA-like update for MF)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced "Stickiness" (Choice Autocorrelation)
+This model hypothesizes that anxiety increases "stickiness" or choice autocorrelation directly, independent of value learning. Unlike the previous perseveration model which added a value bonus, this model implements stickiness as a direct modification of the choice probabilities (or a separate 'habit' trace) that decays slowly. The decay rate or the weight of this trace is modulated by anxiety.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases choice 'stickiness' via a decaying choice trace.
+    Instead of a simple 1-back repetition bonus, the participant maintains a 
+    'choice trace' that accumulates when an action is taken and decays otherwise.
+    The influence of this trace on the current decision is scaled by anxiety.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    decay: [0, 1]       # Decay rate of the choice trace
+    stick_scale: [0, 5] # Scaling factor for anxiety's effect on stickiness
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay, self.stick_scale = model_parameters
+
+    def init_model(self) -> None:
+        # Trace for stage 1 actions (initialized to 0)
+        self.choice_trace = np.zeros(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Base value-based logits
+        logits = self.q_stage1.copy()
+        
+        # Add stickiness contribution
+        # Contribution = trace * (stick_scale * stai)
+        stickiness_bonus = self.choice_trace * (self.stick_scale * self.stai)
+        
+        return self.softmax(logits + stickiness_bonus, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Update choice trace
+        # The chosen action increases by 1, then everything decays
+        # trace(t+1) = trace(t) * decay + indicator(action)
+        self.choice_trace *= self.decay
+        self.choice_trace[action_1] += 1.0
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Negative Reinforcement Sensitivity
+This model hypothesizes that anxious individuals are hypersensitive to negative outcomes (or lack of reward). In this task, receiving 0 coins is a negative outcome. The model proposes that the learning rate for negative prediction errors (disappointment) is amplified by the STAI score, causing the participant to abandon options more quickly after failure, or conversely, if they are avoiding the *other* option because of a perceived risk, this asymmetry might explain the behavior.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety modulates learning asymmetry. Anxious individuals learn 
+    differently from positive (reward) vs negative (no reward) prediction errors.
+    Specifically, the learning rate for negative PEs is scaled by STAI.
+    
+    alpha_neg = alpha_base * (1 + phi * stai)
+    alpha_pos = alpha_base
+    
+    This allows the model to capture if the participant is 'hyper-reactive' to 
+    missing out on rewards.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]  # Base learning rate
+    beta: [0, 10]       # Inverse temperature
+    phi: [0, 10]        # Multiplier for anxiety's effect on negative learning
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.phi = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate prediction errors
+        delta_2 = reward - self.q_stage2[state, action_2]
+        
+        # Determine learning rate based on sign of PE
+        if delta_2 >= 0:
+            eff_alpha = self.alpha_base
+        else:
+            # Negative PE: learning rate modulated by anxiety
+            # We clip at 1.0 to maintain stability
+            eff_alpha = min(1.0, self.alpha_base * (1.0 + self.phi * self.stai))
+            
+        self.q_stage2[state, action_2] += eff_alpha * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        # Apply same logic to Stage 1 PE? 
+        # Usually asymmetry is applied to the outcome PE. 
+        # Here we apply it to the transfer of value as well for consistency.
+        if delta_1 >= 0:
+            eff_alpha_1 = self.alpha_base
+        else:
+            eff_alpha_1 = min(1.0, self.alpha_base * (1.0 + self.phi * self.stai))
+
+        self.q_stage1[action_1] += eff_alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

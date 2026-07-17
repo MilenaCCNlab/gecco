@@ -1,0 +1,167 @@
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: Uncertainty-Avoidance / Novelty-Seeking Model.
+    The participant tracks how long it has been since they last chose each spaceship (uncertainty).
+    Anxiety (STAI) modulates the 'intolerance of uncertainty'.
+    
+    - High anxiety participants are hypothesized to be uncertainty-averse (negative bonus).
+    - Low anxiety participants (like this one) might be uncertainty-neutral or even novelty-seeking.
+    
+    The model adds an uncertainty bonus/penalty to the Stage 1 Q-values.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        # Learning rate for value updates
+    beta: [0, 10]        # Inverse temperature
+    uncert_param: [0, 5] # Magnitude of the uncertainty modulation
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.uncert_param = model_parameters
+
+    def init_model(self) -> None:
+        # Track trials since each action was last chosen. 
+        # Initialize with 1 to avoid log(0) and represent some initial uncertainty.
+        self.days_since_choice = np.ones(self.n_choices)
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate uncertainty metric (log of days since last choice is a common form)
+        uncertainty = np.log(self.days_since_choice + 1)
+        
+        # Modulation: Anxiety determines the sign and magnitude of the effect.
+        # We hypothesize that anxiety leads to avoidance (negative weight).
+        # However, since uncert_param is positive [0,5], we define the weight as:
+        # weight = -1 * uncert_param * stai
+        # Low anxiety -> small penalty. High anxiety -> large penalty.
+        
+        w_uncert = -1.0 * self.uncert_param * self.stai
+        
+        # Combine Value + Uncertainty Bias
+        logits = self.q_stage1 + (w_uncert * uncertainty)
+        
+        return self.softmax(logits, self.beta)
+
+    def post_trial(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        super().post_trial(action_1, state, action_2, reward)
+        
+        # Increment counter for all actions
+        self.days_since_choice += 1
+        # Reset counter for the chosen action
+        self.days_since_choice[action_1] = 0
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Dynamic Transition Learning (Hyper-vigilance).
+    The participant uses a Model-Based strategy but does not trust the transition probabilities to be fixed.
+    They continuously update their internal model of the spaceship-planet transitions.
+    
+    Anxiety (STAI) modulates the 'transition learning rate' (alpha_trans).
+    - High anxiety -> Hyper-vigilance -> High alpha_trans (rapidly changing beliefs about transitions).
+    - Low anxiety -> Stability -> Low alpha_trans (stable beliefs).
+    
+    Parameter Bounds:
+    -----------------
+    alpha_val: [0, 1]    # Learning rate for reward values (Stage 2)
+    beta: [0, 10]        # Inverse temperature
+    alpha_trans_base: [0, 1] # Base learning rate for transitions
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_val, self.beta, self.alpha_trans_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize internal belief about transitions.
+        # Start with a uniform prior or the base rates. Let's assume a weak prior of 0.5
+        # to allow the participant's experience to shape it quickly.
+        self.learned_T = 0.5 * np.ones((self.n_choices, self.n_states))
+
+    def policy_stage1(self) -> np.ndarray:
+        # Pure Model-Based calculation using the *learned* transition matrix.
+        # Q_MB(a1) = Sum_s2 [ P(s2|a1) * max_a2 Q_stage2(s2, a2) ]
+        
+        q_mb = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            expected_val = 0
+            for s2 in range(self.n_states):
+                # Value of best action at stage 2
+                max_q2 = np.max(self.q_stage2[s2])
+                expected_val += self.learned_T[a1, s2] * max_q2
+            q_mb[a1] = expected_val
+            
+        return self.softmax(q_mb, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # 1. Update Stage 2 Values (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha_val * delta_2
+        
+        # 2. Update Transition Beliefs
+        # Anxiety modulates how fast we update this belief.
+        alpha_trans = self.alpha_trans_base * (1.0 + self.stai)
+        
+        # Update the row for the chosen action
+        # The observed transition is 1 for the state we reached, 0 for others.
+        for s in range(self.n_states):
+            outcome = 1.0 if s == state else 0.0
+            self.learned_T[action_1, s] += alpha_trans * (outcome - self.learned_T[action_1, s])
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Attentional Lapse / Epsilon-Greedy Mixture.
+    The participant generally follows a value-based strategy (Softmax), but occasionally 'lapses' 
+    due to anxiety-induced distraction, resulting in a random choice.
+    
+    Anxiety (STAI) modulates the lapse rate (epsilon).
+    - High anxiety -> Higher probability of random lapses.
+    - Low anxiety -> More consistent value-based choices.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature for the non-lapse component
+    lapse_scale: [0, 1] # Scaling factor for anxiety-induced lapses
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lapse_scale = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Calculate standard softmax probabilities based on MF values
+        softmax_probs = self.softmax(self.q_stage1, self.beta)
+        
+        # Calculate lapse rate epsilon based on anxiety
+        # epsilon = lapse_scale * stai
+        # If stai is ~0.26 and lapse_scale is 1.0, epsilon is 0.26 (26% random choice).
+        epsilon = self.lapse_scale * self.stai
+        
+        # Ensure epsilon is within [0, 1]
+        epsilon = np.clip(epsilon, 0.0, 1.0)
+        
+        # Mixture model: (1 - eps) * Softmax + eps * Uniform
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        final_probs = (1 - epsilon) * softmax_probs + epsilon * random_probs
+        
+        return final_probs
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Apply the same lapse logic to stage 2
+        softmax_probs = self.softmax(self.q_stage2[state], self.beta)
+        epsilon = self.lapse_scale * self.stai
+        epsilon = np.clip(epsilon, 0.0, 1.0)
+        
+        random_probs = np.ones(self.n_choices) / self.n_choices
+        final_probs = (1 - epsilon) * softmax_probs + epsilon * random_probs
+        
+        return final_probs
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

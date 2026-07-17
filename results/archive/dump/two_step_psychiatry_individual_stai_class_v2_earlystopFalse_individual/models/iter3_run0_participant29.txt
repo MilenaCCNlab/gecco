@@ -1,0 +1,137 @@
+Here are three new cognitive models that test different hypotheses about how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Driven Myopia (Eligibility Trace Modulation)
+This model tests the hypothesis that high anxiety reduces the "cognitive horizon" or eligibility trace. Anxious participants may struggle to assign credit from the final reward back to the initial spaceship choice, relying instead on the immediate value of the state (planet) they arrived at. This is modeled by modulating the mixing parameter $\lambda$ (lambda) between TD(0) and Monte Carlo targets.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Myopia (Eligibility Trace Modulation)
+    
+    This model hypothesizes that high anxiety reduces the "eligibility trace" (lambda), 
+    making the participant more "myopic". They update Stage 1 values primarily based 
+    on the estimated value of the Stage 2 state (TD-0), rather than the final reward 
+    outcome (TD-1/Monte Carlo). Low anxiety allows for stronger credit assignment 
+    from the final reward back to the Stage 1 choice.
+    
+    lambda = 1.0 - (myopia_factor * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    myopia_factor: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.myopia_factor = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 (Standard Q-learning)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Calculate effective lambda (eligibility trace)
+        # High anxiety -> High myopia -> Low lambda
+        lam = 1.0 - (self.myopia_factor * self.stai)
+        lam = np.clip(lam, 0.0, 1.0)
+        
+        # Update Stage 1
+        # We mix the TD(0) target (Q_stage2) and the TD(1) target (reward)
+        # Target = (1 - lambda) * Q_stage2 + lambda * Reward
+        target = (1.0 - lam) * self.q_stage2[state, action_2] + lam * reward
+        
+        delta_1 = target - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Conditional Win-Stay
+This model tests the hypothesis that anxiety specifically amplifies "safety-seeking" behavior after a success. Unlike general perseveration (which applies after any trial), this model posits that anxious individuals perceive a reward as a strong safety signal and are disproportionately driven to repeat that specific successful action ("Win-Stay"), while their reaction to loss is handled by standard reinforcement learning.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Conditional Win-Stay
+    
+    This model hypothesizes that anxiety amplifies the heuristic to repeat a 
+    successful action ("Win-Stay"). Unlike general stickiness, this bias is 
+    only active after a rewarded trial. High anxiety individuals perceive the 
+    reward as a "safety signal" and cling to it more strongly than low 
+    anxiety individuals.
+    
+    Win-Stay Bonus = ws_amp * stai (Applied only if last_reward == 1)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    ws_amp: [0, 5]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.ws_amp = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        bonus = np.zeros(self.n_choices)
+        
+        # Apply bonus only if the previous trial was rewarded
+        if self.last_reward == 1.0 and self.last_action1 is not None:
+            bonus[int(self.last_action1)] = self.ws_amp * self.stai
+            
+        # Add bonus to Q-values before softmax
+        return self.softmax(self.q_stage1 + bonus, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven Rare-Event Filtering
+This model tests the hypothesis that high anxiety leads to a rigid structural prior where "rare" transitions (e.g., Spaceship A going to Planet Y) are treated as errors or noise rather than informative signals. Consequently, anxious participants suppress learning about the spaceship (Stage 1) from these misleading transitions, effectively approximating a Model-Based exclusion of rare paths but via a modulated Model-Free update.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety-Driven Rare-Event Filtering
+    
+    This model hypothesizes that high anxiety leads to a rigid structural prior 
+    where "rare" transitions (unexpected outcomes) are treated as noise. 
+    Consequently, learning about the Stage 1 choice is suppressed during these 
+    trials to prevent "correct" decisions from being punished by bad luck (or vice versa).
+    
+    If transition was rare (A->Y or U->X):
+        alpha_stage1 = alpha * (1 - filter_strength * stai)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]
+    beta: [0, 10]
+    filter_strength: [0, 1]
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.filter_strength = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Update Stage 2 (Standard - Alien values are learned regardless of transition)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Determine if transition was rare
+        # Common transitions: 0->0 (A->X) and 1->1 (U->Y)
+        # Rare transitions: 0->1 (A->Y) and 1->0 (U->X)
+        is_rare = (action_1 != state)
+        
+        # Modulate alpha for Stage 1 only
+        alpha_1 = self.alpha
+        if is_rare:
+            suppression = self.filter_strength * self.stai
+            suppression = np.clip(suppression, 0.0, 1.0)
+            alpha_1 = self.alpha * (1.0 - suppression)
+            
+        # Update Stage 1 using the potentially suppressed learning rate
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

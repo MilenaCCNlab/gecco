@@ -1,0 +1,148 @@
+Here are three new cognitive models based on the participant's high anxiety (STAI = 0.725) and the provided data.
+
+### Model 1: Anxiety-Modulated Value Leakage (Generalization)
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases stimulus generalization (value leakage).
+    
+    High anxiety individuals often struggle to discriminate between safe and 
+    unsafe cues, generalizing learning from one context to another. 
+    In this model, when the participant updates the value of a chosen option 
+    (spaceship or alien), a fraction of that update 'leaks' to the unchosen option.
+    This blurring of values is modulated by STAI.
+    
+    update_unchosen = alpha * prediction_error * (stai * leakage_param)
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]          # Learning rate
+    beta: [0, 10]          # Inverse temperature
+    leakage_param: [0, 1]  # Scaling factor for anxiety-driven generalization
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.leakage_param = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate leakage factor based on anxiety
+        leakage = self.stai * self.leakage_param
+        
+        # --- Stage 2 Update (Aliens) ---
+        # Standard update for chosen alien
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Leaky update for unchosen alien in the same state
+        unchosen_a2 = 1 - action_2
+        self.q_stage2[state, unchosen_a2] += self.alpha * delta_2 * leakage
+        
+        # --- Stage 1 Update (Spaceships) ---
+        # Standard update for chosen spaceship (Model-Free)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Leaky update for unchosen spaceship
+        unchosen_a1 = 1 - action_1
+        self.q_stage1[unchosen_a1] += self.alpha * delta_1 * leakage
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Map Corruption (Distorted Planning)
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety degrades the internal model of the environment.
+    
+    This model assumes the participant uses a Model-Based strategy (planning), 
+    but their internal map of transition probabilities (which spaceship goes where) 
+    is corrupted by anxiety. High anxiety increases entropy, blending the 
+    learned transition matrix with a uniform (random) distribution.
+    This results in "fuzzy" planning where the distinction between the 
+    'common' and 'rare' paths is diminished.
+    
+    T_used = (1 - distortion) * T_learned + distortion * T_uniform
+    distortion = stai * distortion_factor
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]             # Learning rate for Stage 2 values
+    beta: [0, 10]             # Inverse temperature
+    distortion_factor: [0, 1] # Sensitivity of map corruption to anxiety
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.distortion_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # 1. Calculate the distortion level
+        distortion = self.stai * self.distortion_factor
+        
+        # 2. Create the distorted transition matrix
+        # self.T is the "true" or learned matrix (approx [0.7, 0.3; 0.3, 0.7])
+        # T_uniform is [[0.5, 0.5], [0.5, 0.5]]
+        t_uniform = 0.5 * np.ones_like(self.T)
+        t_planning = (1 - distortion) * self.T + distortion * t_uniform
+        
+        # 3. Compute Model-Based values using the distorted map
+        # Q_MB(a) = sum(P(s|a) * max(Q_stage2(s)))
+        q_mb = np.zeros(self.n_choices)
+        
+        # Estimate value of each state as the max Q-value available there
+        state_values = np.max(self.q_stage2, axis=1)
+        
+        for a in range(self.n_choices):
+            q_mb[a] = np.sum(t_planning[a] * state_values)
+            
+        return self.softmax(q_mb, self.beta)
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Reactive Volatility (Panic Exploration)
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety causes reactive volatility ("panic") after failure.
+    
+    This model posits that while the participant has a baseline level of 
+    decision noise (beta), the absence of reward (0 coins) triggers an 
+    anxiety-driven "panic" response. This temporarily increases exploration 
+    (lowers beta) on the subsequent trial, making behavior more random 
+    immediately after a loss.
+    
+    If last_reward == 0: beta_effective = beta * (1 - stai * panic_factor)
+    Else:                beta_effective = beta
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]         # Learning rate
+    beta: [0, 10]         # Baseline inverse temperature
+    panic_factor: [0, 1]  # How much anxiety reduces beta after a loss
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.panic_factor = model_parameters
+        self.current_beta = self.beta # Initialize
+
+    def pre_trial(self) -> None:
+        # Determine beta for this trial based on previous outcome
+        if self.last_reward is not None and self.last_reward == 0.0:
+            # Panic response: reduce beta (increase noise)
+            reduction = self.stai * self.panic_factor
+            self.current_beta = self.beta * (1.0 - reduction)
+        else:
+            # Baseline behavior (after win or first trial)
+            self.current_beta = self.beta
+
+    def policy_stage1(self) -> np.ndarray:
+        # Use the dynamic current_beta
+        return self.softmax(self.q_stage1, self.current_beta)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Use the dynamic current_beta
+        return self.softmax(self.q_stage2[state], self.current_beta)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

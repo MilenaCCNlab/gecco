@@ -1,0 +1,214 @@
+Here are 3 new cognitive models that incorporate STAI scores to explain individual variability in the two-step task.
+
+### Model 1: Anxiety-Modulated Value Decay
+This model hypothesizes that anxiety acts as a cognitive load that accelerates the "forgetting" of value estimates. While chosen actions are reinforced, unchosen actions decay in value, and this decay rate is modulated by the participant's anxiety level.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Value Decay (Forgetting).
+
+    Hypothesis: Anxiety consumes working memory resources, leading to faster decay 
+    (forgetting) of Q-values for unchosen options. While the chosen option is updated 
+    via reinforcement, the unchosen option's value decays toward zero.
+
+    Parameters:
+    - learning_rate: Rate of updating value from reward [0, 1]
+    - beta: Inverse temperature for softmax choice [0, 10]
+    - w: Weighting between model-based and model-free control [0, 1]
+    - decay_base: Baseline decay rate for unchosen options [0, 1]
+    - decay_slope: Effect of STAI on decay rate [0, 1]
+    """
+    learning_rate, beta, w, decay_base, decay_slope = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+    
+    # Calculate anxiety-modulated decay
+    decay = decay_base + (decay_slope * stai_val)
+    # Clip to valid range [0, 1]
+    decay = np.clip(decay, 0.0, 1.0)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2)) # State x Action
+
+    for trial in range(n_trials):
+        # -- Stage 1 Choice --
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # -- Stage 2 Choice --
+        state_idx = int(state[trial])
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # -- Updates --
+        # Stage 2 Update
+        chosen_s2 = action_2[trial]
+        unchosen_s2 = 1 - chosen_s2
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, chosen_s2]
+        q_stage2_mf[state_idx, chosen_s2] += learning_rate * delta_stage2
+        # Decay unchosen Stage 2 action value
+        q_stage2_mf[state_idx, unchosen_s2] *= (1.0 - decay)
+
+        # Stage 1 Update
+        chosen_s1 = action_1[trial]
+        unchosen_s1 = 1 - chosen_s1
+        
+        delta_stage1 = q_stage2_mf[state_idx, chosen_s2] - q_stage1_mf[chosen_s1]
+        q_stage1_mf[chosen_s1] += learning_rate * delta_stage1
+        # Decay unchosen Stage 1 action value
+        q_stage1_mf[unchosen_s1] *= (1.0 - decay)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Anxiety-Modulated Subjective Transition Belief
+This model suggests that anxiety distorts the Model-Based system's internal model of the world. Specifically, anxious individuals may perceive the "common" transitions as less reliable than they objectively are (underestimating the 70% probability), leading to a "flatter" or more uncertain transition matrix.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Subjective Transition Belief.
+
+    Hypothesis: Anxious individuals may underestimate the reliability of the environment.
+    Instead of using the objective transition probability (0.7), they utilize a subjective
+    probability that shifts towards 0.5 (maximum uncertainty) as anxiety increases.
+
+    Parameters:
+    - learning_rate: Rate of updating value from reward [0, 1]
+    - beta: Inverse temperature for softmax choice [0, 10]
+    - w: Weighting between model-based and model-free control [0, 1]
+    - trans_belief_base: Baseline belief in the common transition prob [0.5, 1.0]
+    - trans_belief_slope: Effect of STAI on transition belief [-1, 1]
+    """
+    learning_rate, beta, w, trans_belief_base, trans_belief_slope = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+    
+    # Calculate subjective transition probability
+    # We assume base is around 0.7. Slope modulates this based on anxiety.
+    subj_p = trans_belief_base + (trans_belief_slope * stai_val)
+    # Clip to valid probability range [0, 1]
+    subj_p = np.clip(subj_p, 0.0, 1.0)
+    
+    # Construct subjective transition matrix used for MB planning
+    # If subj_p is the prob of Common, then A->X is p, A->Y is 1-p.
+    transition_matrix = np.array([[subj_p, 1-subj_p], [1-subj_p, subj_p]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # -- Stage 1 Choice --
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        # Use subjective matrix for MB calculation
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # -- Stage 2 Choice --
+        state_idx = int(state[trial])
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # -- Updates --
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Anxiety-Modulated Stage-Specific Learning Rates
+This model proposes that anxiety differentially affects learning at different levels of the task hierarchy. It separates the learning rate for Stage 1 (action-value) from Stage 2 (stimulus-reward), hypothesizing that anxiety specifically modulates the higher-level Stage 1 update, while the simpler Stage 2 update remains fixed.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, stai, model_parameters):
+    """
+    Anxiety-Modulated Stage-Specific Learning Rates.
+
+    Hypothesis: Anxiety differentially affects learning at different levels of abstraction.
+    This model proposes that Stage 1 learning (action-value association) is modulated by 
+    anxiety, while Stage 2 learning (stimulus-reward association) remains a separate, fixed parameter.
+    
+    Parameters:
+    - lr_s1_base: Baseline learning rate for Stage 1 [0, 1]
+    - lr_s1_slope: Effect of STAI on Stage 1 learning rate [-1, 1]
+    - lr_s2: Fixed learning rate for Stage 2 [0, 1]
+    - beta: Inverse temperature for softmax choice [0, 10]
+    - w: Weighting between model-based and model-free control [0, 1]
+    """
+    lr_s1_base, lr_s1_slope, lr_s2, beta, w = model_parameters
+    n_trials = len(action_1)
+    stai_val = stai[0]
+    
+    # Calculate Stage 1 specific learning rate
+    lr_s1 = lr_s1_base + (lr_s1_slope * stai_val)
+    lr_s1 = np.clip(lr_s1, 0.0, 1.0)
+    
+    # Stage 2 learning rate is a direct parameter
+    lr_s2 = np.clip(lr_s2, 0.0, 1.0)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # -- Stage 1 Choice --
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta * q_net)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # -- Stage 2 Choice --
+        state_idx = int(state[trial])
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # -- Updates --
+        # Update Stage 2 using fixed lr_s2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += lr_s2 * delta_stage2
+
+        # Update Stage 1 using anxiety-modulated lr_s1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += lr_s1 * delta_stage1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

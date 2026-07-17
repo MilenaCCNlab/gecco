@@ -1,0 +1,192 @@
+Here are three cognitive models proposing different hypotheses for how this participant makes decisions, incorporating their anxiety level (STAI score).
+
+### Participant Data Summary
+The participant has a STAI score of 0.35, placing them in the **medium anxiety** category.
+Their behavior shows an initial strong preference for spaceship 0.0, even with some rare transitions. Later, they switch to spaceship 1.0 and also show some flexibility in alien choices. This suggests learning at both stages and potentially some biases or sensitivity to outcomes.
+
+---
+
+### Model 1: Goal-Directed Weighting of Stage 2 Values (STAI-modulated)
+
+```python
+import numpy as np
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant's first-stage decisions are
+    influenced by how strongly they weigh the immediate expected value of the
+    second stage. Anxiety (STAI score) modulates this weighting. Specifically,
+    medium anxiety might lead to a stronger or weaker influence of the second-stage
+    outcome on the first-stage value update, reflecting a heightened focus on
+    or a distraction from future rewards. A higher STAI might increase this weighting,
+    making them more sensitive to perceived opportunities at the second stage.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    w_stage2_base: [0, 2] - Base weight for how much the stage-2 value influences the stage-1 update.
+                            A value of 1 would mean q_stage1 learns to predict q_stage2 directly.
+    stai_mod_factor: [-2, 2] - Factor by which STAI score modulates w_stage2_influence.
+                                A positive value means higher anxiety increases stage-2 influence.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_stage2_base, self.stai_mod_factor = model_parameters
+        # Calculate the effective stage-2 influence weight
+        # Clip to ensure reasonable bounds, e.g., between 0 and 3, to prevent extreme scaling
+        self.w_stage2_influence = np.clip(self.w_stage2_base + self.stai_mod_factor * self.stai, 0.0, 3.0)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for stage 2 Q-values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Modified TD update for stage 1:
+        # The target for the stage-1 Q-value update is a *scaled* version of the
+        # stage-2 Q-value. This means q_stage1 learns to predict a weighted
+        # version of the immediate subsequent value at stage 2.
+        delta_1 = (self.w_stage2_influence * self.q_stage2[state, action_2]) - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+# Create the cognitive_model1 function
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+---
+
+### Model 2: State-Dependent Exploration (STAI-modulated)
+
+```python
+import numpy as np
+
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant's exploration tendency
+    in the second stage is not fixed but dynamically adjusts based on the
+    perceived uncertainty or ambiguity of the options in that specific planet state.
+    Anxiety (STAI score) amplifies this state-dependent exploration. When the
+    Q-values for aliens on a planet are very similar (high ambiguity), the
+    participant explores more (lower beta), and this tendency is stronger with higher anxiety.
+    Stage 1 choices maintain a fixed exploration level.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_stage1: [0, 10] - Inverse temperature for softmax choice in Stage 1.
+    beta_base_stage2: [0, 10] - Base inverse temperature for softmax choice in Stage 2.
+    stai_exploration_factor: [0, 5] - Factor by which STAI score increases exploration
+                                       (reduces beta) in Stage 2 when Q-values are similar.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_stage1, self.beta_base_stage2, self.stai_exploration_factor = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        # Stage 1 uses a fixed inverse temperature (beta_stage1)
+        return self.softmax(self.q_stage1, self.beta_stage1)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        # Calculate the difference between the max and min Q-values for the current state
+        # A smaller difference indicates higher uncertainty/ambiguity
+        q_diff = np.max(self.q_stage2[state]) - np.min(self.q_stage2[state])
+        
+        # Adjust beta for stage 2:
+        # Smaller q_diff (more uncertainty) leads to a lower effective beta (more exploration).
+        # STAI score amplifies this reduction.
+        # Ensure beta remains positive and within reasonable bounds (e.g., at least 0.1 to avoid division by zero)
+        adjusted_beta_stage2 = np.clip(
+            self.beta_base_stage2 - self.stai_exploration_factor * self.stai * (1 - q_diff),
+            0.1, # Minimum beta to allow some exploitation
+            10.0 # Maximum beta
+        )
+        
+        return self.softmax(self.q_stage2[state], adjusted_beta_stage2)
+
+    # The default value_update and post_trial methods are suitable.
+
+# Create the cognitive_model2 function
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+---
+
+### Model 3: Goal-Directed with Rare Transition Avoidance (STAI-modulated)
+
+```python
+import numpy as np
+
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that the participant uses a blend of model-free
+    and model-based control for first-stage decisions. Crucially, they develop an
+    aversion to first-stage actions that lead to *rare transitions*. This aversion
+    is amplified by anxiety (STAI score), making them more likely to avoid paths
+    that have recently resulted in an unexpected planet transition. The penalty is
+    applied to the model-free component of the first-stage Q-value after a rare transition.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for softmax choice.
+    w_mb: [0, 1] - Weight for the model-based component (0=pure MF, 1=pure MB).
+    rare_trans_penalty_base: [0, 2] - Base penalty applied to Q1_MF after a rare transition.
+    stai_penalty_factor: [0, 5] - Factor by which STAI score modulates the rare transition penalty.
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_mb, self.rare_trans_penalty_base, self.stai_penalty_factor = model_parameters
+        # Calculate the effective rare transition penalty, clipped to prevent negative or excessively large values
+        self.effective_rare_trans_penalty = np.clip(self.rare_trans_penalty_base + self.stai_penalty_factor * self.stai, 0.0, 5.0)
+
+    def init_model(self) -> None:
+        # Initialize separate Q-values for Model-Free (MF) and Model-Based (MB) for stage 1
+        self.q_stage1_mf = np.zeros(self.n_choices)
+        self.q_stage1_mb = np.zeros(self.n_choices)
+        
+        # Define common transitions: spaceship 0 (A) -> planet 0 (X), spaceship 1 (U) -> planet 1 (Y)
+        self.common_transitions = {0: 0, 1: 1}
+
+    def policy_stage1(self) -> np.ndarray:
+        # Combine MF and MB Q-values for choice using the w_mb weight
+        combined_q_stage1 = (1 - self.w_mb) * self.q_stage1_mf + self.w_mb * self.q_stage1_mb
+        return self.softmax(combined_q_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for stage 2 Q-values
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+
+        # Update stage 1 Model-Free Q-value
+        # The target for MF learning is the Q-value of the chosen action in stage 2
+        delta_1_mf = self.q_stage2[state, action_2] - self.q_stage1_mf[action_1]
+        self.q_stage1_mf[action_1] += self.alpha * delta_1_mf
+
+        # Update stage 1 Model-Based Q-value
+        # The target for MB learning is the expected maximum Q-value from stage 2,
+        # considering all possible next states and their probabilities.
+        for a1_idx in range(self.n_choices):
+            expected_max_q_s2 = 0
+            # Use the fixed transition probabilities (self.T) for model-based calculation
+            for s_idx in range(self.n_states):
+                expected_max_q_s2 += self.T[a1_idx, s_idx] * np.max(self.q_stage2[s_idx])
+            
+            delta_1_mb = expected_max_q_s2 - self.q_stage1_mb[a1_idx]
+            self.q_stage1_mb[a1_idx] += self.alpha * delta_1_mb # Use same alpha for MB learning
+
+        # Apply rare transition penalty *after* learning for the current trial,
+        # based on the *previous* trial's outcome.
+        if self.last_action1 is not None: # Ensure it's not the very first trial
+            # Check if the last transition was rare
+            if self.last_state != self.common_transitions[self.last_action1]:
+                # Apply penalty to the model-free Q-value of the first-stage action that led to the rare transition
+                self.q_stage1_mf[self.last_action1] -= self.effective_rare_trans_penalty
+                # Clip Q-values to prevent them from becoming too extreme, ensuring numerical stability
+                self.q_stage1_mf[self.last_action1] = np.clip(self.q_stage1_mf[self.last_action1], -10.0, 10.0)
+
+    # The default post_trial method (which stores last_action1, last_state, etc.) is suitable,
+    # as the penalty for rare transition depends on the *previous* trial's outcome.
+
+# Create the cognitive_model3 function
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

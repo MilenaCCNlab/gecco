@@ -1,0 +1,179 @@
+Here are three new cognitive models, each proposing a distinct cognitive mechanism influenced by the participant's high anxiety (STAI score of 0.9625).
+
+### Model 1: Anxious Reduced Learning from Positive Outcomes
+
+This model hypothesizes that high anxiety impairs the ability to effectively learn from or be motivated by positive rewards. Specifically, the learning rate for positive prediction errors is reduced as anxiety increases, while the learning rate for negative prediction errors remains constant. This reflects a potential "blunting" of positive reinforcement signals under high anxiety.
+
+```python
+import numpy as np # This line is for local development and will be removed in the final output.
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Reduced Learning from Positive Outcomes.
+    High anxiety leads to a reduced capacity to learn from or be influenced by
+    positive outcomes (rewards). This is modeled by a learning rate for positive
+    prediction errors that decreases as the participant's STAI score increases,
+    while the learning rate for negative prediction errors remains constant.
+    This captures a potential "blunting" of positive reinforcement under stress.
+
+    Parameter Bounds:
+    -----------------
+    alpha_neg: [0, 1] (Learning rate for negative prediction errors)
+    alpha_pos_base: [0, 1] (Base learning rate for positive prediction errors)
+    stai_pos_reduction: [0, 1] (Factor by which STAI reduces the positive learning rate)
+    beta: [0, 10] (Softmax inverse temperature)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_neg, self.alpha_pos_base, self.stai_pos_reduction, self.beta = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # Calculate the actual alpha_pos, clamped between 0 and 1
+        # Higher STAI leads to a lower effective alpha_pos
+        self.alpha_pos = np.clip(self.alpha_pos_base - self.stai * self.stai_pos_reduction, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using asymmetric learning rates, with alpha_pos modulated
+        by STAI and alpha_neg constant.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += self.alpha_neg * delta_2
+        
+        # Stage 1 update
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += self.alpha_neg * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxious Model-Based / Model-Free Arbitration
+
+This model proposes that high anxiety impairs the cognitive resources necessary for deliberate planning (model-based control), leading participants to rely more heavily on simpler, habitual strategies (model-free control). The STAI score directly reduces the weighting given to model-based value computations for first-stage decisions.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Model-Based / Model-Free Arbitration.
+    High anxiety diminishes the influence of model-based (planning) control
+    over first-stage choices, favoring simpler model-free (habitual) control.
+    The participant's STAI score directly reduces the weight given to model-based
+    value computations.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    w_base: [0, 1] (Base weight for model-based control, 0=pure MF, 1=pure MB)
+    stai_w_reduction: [0, 1] (Factor by which STAI reduces the model-based weight)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base, self.stai_w_reduction = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # Calculate the effective model-based weight, clamped between 0 and 1
+        # Higher STAI leads to a lower effective w_mb
+        self.w_mb = np.clip(self.w_base - self.stai * self.stai_w_reduction, 0, 1)
+        
+        # self.T is already initialized in base class and represents P(state | action1)
+        # T[0,0] = P(X | A) = 0.7 (common)
+        # T[0,1] = P(Y | A) = 0.3 (rare)
+        # T[1,0] = P(X | U) = 0.3 (rare)
+        # T[1,1] = P(Y | U) = 0.7 (common)
+
+    def policy_stage1(self) -> np.ndarray:
+        """
+        Compute stage-1 action probabilities using a weighted combination of
+        model-free and model-based Q-values, with the model-based weight
+        modulated by anxiety.
+        """
+        # Model-Based Q-values for stage 1
+        q_mb_stage1 = np.zeros(self.n_choices)
+        for a1 in range(self.n_choices):
+            # Q_MB(a1) = sum_s P(s | a1) * max_a2 Q_MF(s, a2)
+            # where max_a2 Q_MF(s, a2) is the expected value of the best action at stage 2 for state s
+            q_mb_stage1[a1] = np.sum([self.T[a1, s] * np.max(self.q_stage2[s, :]) for s in range(self.n_states)])
+
+        # Combined Q-values for stage 1
+        q_combined_stage1 = self.w_mb * q_mb_stage1 + (1 - self.w_mb) * self.q_stage1
+        
+        return self.softmax(q_combined_stage1, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update model-free Q-values using standard TD learning.
+        """
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (model-free)
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxious Rare Transition Penalty
+
+This model posits that individuals with high anxiety are particularly sensitive to unexpected or "rare" environmental transitions. When a chosen first-stage action leads to a rare transition (e.g., choosing spaceship U but landing on planet X), a penalty is applied to the value of that initial choice. This penalty is amplified by the participant's STAI score, encouraging them to avoid actions that lead to unpredictable outcomes.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxious Rare Transition Penalty.
+    Participants with high anxiety are more sensitive to unexpected (rare)
+    transitions between the first and second stage. When a rare transition occurs,
+    a penalty is applied to the Q-value of the chosen first-stage action,
+    and the magnitude of this penalty is amplified by the participant's STAI score.
+    This encourages avoiding choices that lead to unpredictable outcomes.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1] (Learning rate for Q-values)
+    beta: [0, 10] (Softmax inverse temperature)
+    rare_penalty_base: [0, 1] (Base penalty applied to Q1 after a rare transition)
+    stai_rare_penalty_boost: [0, 1] (Factor by which STAI amplifies the rare transition penalty)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rare_penalty_base, self.stai_rare_penalty_boost = model_parameters
+
+    def init_model(self) -> None:
+        super().init_model()
+        # Define the probability threshold for what constitutes a "rare" transition.
+        # Based on self.T = [[0.7, 0.3], [0.3, 0.7]], 0.3 is the rare probability.
+        # We set the threshold slightly above 0.3 to definitively catch rare transitions.
+        self.rare_threshold = 0.35 
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Update values using standard TD learning, and apply an anxiety-modulated
+        penalty to stage 1 Q-values if a rare transition occurred.
+        """
+        # Standard TD learning for both stages
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Check if the transition was rare based on the known probabilities (self.T)
+        if self.T[action_1, state] < self.rare_threshold:
+            # Calculate the anxiety-amplified penalty
+            penalty_magnitude = self.rare_penalty_base + (self.stai * self.stai_rare_penalty_boost)
+            # Apply the penalty to the Q-value of the chosen first-stage action
+            self.q_stage1[action_1] -= penalty_magnitude
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

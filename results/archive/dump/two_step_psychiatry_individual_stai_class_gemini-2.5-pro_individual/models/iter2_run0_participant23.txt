@@ -1,0 +1,141 @@
+As a cognitive scientist and programmer, I will propose three distinct models to explain this participant's behavior. The participant exhibits medium anxiety (STAI = 0.325) and displays long streaks of choosing the same first-stage option, followed by abrupt switches. My proposed models will explore different cognitive mechanisms through which anxiety might influence learning and decision-making to produce this pattern.
+
+### Model 1: Anxiety-Modulated Credit Assignment
+This model hypothesizes that anxiety impairs the complex cognitive process of credit assignment. In the two-step task, this means linking the final reward (or lack thereof) all the way back to the initial first-stage choice. A reduced ability to do this, especially after a rare (surprising) transition, would make the agent's learning more "model-free." We can capture this using an eligibility trace parameter (`lambda`), where `lambda=1` represents full credit assignment and `lambda=0` represents none. This model proposes that anxiety systematically reduces the agent's effective `lambda`.
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model posits that anxiety impairs credit assignment. The
+    participant uses a temporal difference (TD-lambda) learning algorithm, where
+    the lambda parameter controls how much a second-stage prediction error
+    (surprise) updates the value of the first-stage choice. We hypothesize that
+    anxiety disrupts this backward propagation of information, leading to a
+    lower effective lambda. A lower lambda makes learning less "model-based."
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate)
+    beta: [0, 10]        (Inverse temperature for softmax)
+    lambda_base: [0, 1]  (Base credit assignment parameter)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_base = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate the effective lambda based on anxiety."""
+        # Higher anxiety leads to a lower lambda (less credit assignment)
+        self.lambda_eff = self.lambda_base * (1 - self.stai)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using TD(lambda). The first-stage value update is
+        influenced by both the value of the second stage (one-step TD) and the
+        final reward prediction error (credit assignment via lambda).
+        """
+        # Standard second-stage update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # First-stage update includes an eligibility trace controlled by lambda_eff
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * (delta_1 + self.lambda_eff * delta_2)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Driven Asymmetric Learning
+This model explores the idea that anxiety induces a pessimistic learning bias. Individuals with moderate anxiety might be more sensitive to negative outcomes (not receiving a reward) than positive ones. This model implements separate learning rates for positive and negative prediction errors. The participant's anxiety score determines the degree of this asymmetry, making them learn more from disappointments than from successes. This could lead to faster abandonment of an option after a few negative outcomes, potentially explaining the sharp switches in the data.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model suggests that anxiety creates a pessimistic learning
+    bias. The participant learns differently from positive and negative prediction
+    errors (PE). Specifically, anxiety amplifies the learning rate for negative PEs
+    (outcomes worse than expected) and dampens it for positive PEs. This
+    asymmetry is controlled by a 'sensitivity' parameter modulated by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha_base: [0, 1]   (Base learning rate)
+    beta: [0, 10]        (Inverse temperature for softmax)
+    sensitivity: [0, 2]  (Anxiety's effect on learning asymmetry)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_base, self.beta, self.sensitivity = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate anxiety-modulated asymmetric learning rates."""
+        # Anxiety increases learning from negative PEs and decreases it for positive PEs
+        alpha_pos_unclipped = self.alpha_base * (1 - self.stai * self.sensitivity)
+        alpha_neg_unclipped = self.alpha_base * (1 + self.stai * self.sensitivity)
+        
+        self.alpha_pos = np.clip(alpha_pos_unclipped, 0, 1)
+        self.alpha_neg = np.clip(alpha_neg_unclipped, 0, 1)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates Q-values using different learning rates for positive and
+        negative prediction errors.
+        """
+        # Stage 2 update with asymmetric learning
+        delta_2 = reward - self.q_stage2[state, action_2]
+        alpha_2 = self.alpha_pos if delta_2 >= 0 else self.alpha_neg
+        self.q_stage2[state, action_2] += alpha_2 * delta_2
+        
+        # Stage 1 update with asymmetric learning
+        # Note: we use the *updated* stage-2 value for the TD target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        alpha_1 = self.alpha_pos if delta_1 >= 0 else self.alpha_neg
+        self.q_stage1[action_1] += alpha_1 * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Neglect of Unchosen Options
+This model offers an alternative to simple perseveration to explain the participant's choice streaks. It proposes that anxiety narrows attentional focus, causing the participant to "neglect" the option they did not choose. Instead of maintaining a stable value estimate for the unchosen option, its value representation decays over time. This makes the value of the recently chosen option more distinct and stable, promoting repeated selection until a series of poor outcomes forces a switch. The rate of this value decay is scaled by the participant's anxiety level.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: This model proposes that anxiety causes an attentional narrowing,
+    leading to the neglect of unchosen options. While the value of the chosen
+    action is updated via reinforcement learning, the value of the unchosen
+    action is not maintained and instead decays towards its initial value (zero).
+    This promotes perseveration by making the chosen action's value more stable
+    and salient. The rate of decay is scaled by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]        (Learning rate for chosen options)
+    beta: [0, 10]        (Inverse temperature for softmax)
+    decay_base: [0, 1]   (Base decay rate for unchosen options)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_base = model_parameters
+
+    def init_model(self) -> None:
+        """Calculate the effective decay rate based on anxiety."""
+        self.decay_rate = self.decay_base * self.stai
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        """
+        Updates the chosen action's value and applies decay to the unchosen action.
+        """
+        # Standard TD update for the chosen action
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+        # Apply decay to the value of the unchosen first-stage action
+        unchosen_action = 1 - action_1
+        self.q_stage1[unchosen_action] *= (1 - self.decay_rate)
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

@@ -1,0 +1,116 @@
+Here are three new cognitive models that hypothesize different mechanisms for how anxiety (STAI) modulates decision-making in this task.
+
+### Model 1: Anxiety-Modulated Rigidity (Beta)
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety increases decision rigidity (Exploitation bias).
+    High anxiety individuals may exhibit reduced exploration and "freeze" on 
+    perceived high-value options, or simply behave more deterministically.
+    This model modulates the inverse temperature (beta) based on STAI.
+    Higher STAI leads to a higher effective beta (steeper softmax).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta_base: [0, 10]  # Baseline inverse temperature
+    stiff_k: [0, 5]     # Stiffness coefficient scaling with STAI
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta_base, self.stiff_k = model_parameters
+
+    def init_model(self) -> None:
+        # Effective beta increases with anxiety
+        # If stiff_k is 0, beta is constant. If positive, anxiety makes choices more rigid.
+        self.beta_effective = self.beta_base * (1.0 + self.stiff_k * self.stai)
+
+    def policy_stage1(self) -> np.ndarray:
+        return self.softmax(self.q_stage1, self.beta_effective)
+
+    def policy_stage2(self, state: int) -> np.ndarray:
+        return self.softmax(self.q_stage2[state], self.beta_effective)
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Modulated Credit Assignment (Eligibility Trace)
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety impairs long-range credit assignment.
+    Anxious individuals may focus on immediate outcomes (Stage 2) and fail to 
+    properly attribute them to the initial choice (Stage 1).
+    This model implements a TD(lambda) update where the eligibility trace parameter (lambda)
+    is negatively modulated by STAI. High anxiety -> low lambda (Stage 1 value 
+    is less affected by Stage 2 reward prediction error).
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    lambda_max: [0, 1]  # Maximum eligibility trace (at STAI=0)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.lambda_max = model_parameters
+
+    def init_model(self) -> None:
+        # Lambda decreases as STAI increases. 
+        # Assuming STAI is roughly [0, 1], we clamp to ensure non-negative.
+        self.lambda_eff = max(0.0, self.lambda_max * (1.0 - self.stai))
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate Stage 2 Prediction Error (R - Q2)
+        # Note: We use the Q-value *before* the update for the trace calculation
+        q2_old = self.q_stage2[state, action_2]
+        delta_2 = reward - q2_old
+        
+        # Standard Q2 update
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 Update:
+        # 1. TD(0) part: Update Q1 towards Q2 (using Q2_old or Q2_new is a design choice; 
+        #    base class uses Q2_new, we stick to standard TD logic here using Q2_old for the temporal difference)
+        delta_1 = q2_old - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # 2. Eligibility Trace part: Direct reinforcement of Action 1 by Reward
+        #    Q1 += alpha * lambda * delta_2
+        self.q_stage1[action_1] += self.alpha * self.lambda_eff * delta_2
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Induced Forgetting (Memory Decay)
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: Anxiety consumes cognitive resources, leading to faster memory decay.
+    Anxious individuals may have difficulty maintaining precise value representations 
+    over time. This model introduces a decay parameter that pulls Q-values back 
+    towards a neutral prior (0.5) at each trial. The rate of decay scales with STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    decay_k: [0, 1]     # Decay scaling factor
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.decay_k = model_parameters
+
+    def init_model(self) -> None:
+        # Decay rate is proportional to anxiety
+        # We clamp it to [0, 1] to prevent instability
+        self.decay_rate = min(1.0, max(0.0, self.decay_k * self.stai))
+
+    def pre_trial(self) -> None:
+        # Apply decay to all Q-values before the trial begins
+        # Values regress towards 0.5 (neutral expectation)
+        self.q_stage1 = (1.0 - self.decay_rate) * self.q_stage1 + self.decay_rate * 0.5
+        self.q_stage2 = (1.0 - self.decay_rate) * self.q_stage2 + self.decay_rate * 0.5
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

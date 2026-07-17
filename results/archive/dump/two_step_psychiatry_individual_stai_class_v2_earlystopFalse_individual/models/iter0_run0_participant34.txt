@@ -1,0 +1,165 @@
+Here are three cognitive models designed to capture the behavior of a high-anxiety participant in the two-step task.
+
+### Model 1: Anxiety-Driven Model-Based/Model-Free Hybrid
+This model hypothesizes that high anxiety (STAI) shifts the balance between goal-directed (Model-Based) and habitual (Model-Free) control. High anxiety is often associated with a reliance on habits or a deficit in model-based planning. This model uses a mixing parameter `w` that is modulated by the STAI score. A higher STAI score reduces the weight of the model-based system, making the participant more reliant on simple TD learning (Model-Free).
+
+```python
+class ParticipantModel1(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety (STAI) impairs model-based planning, leading to a dominance 
+    of model-free (habitual) control. The mixing weight 'w' determines the balance 
+    between MB and MF systems. The effective 'w' is reduced by the STAI score.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    w_base: [0, 1]      # Base weight for Model-Based control (0=MF, 1=MB)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize Model-Based values (Q_MB)
+        # Q_MB for stage 1 is calculated on the fly using transition matrix and stage 2 values
+        pass
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Free value (from standard TD)
+        q_mf = self.q_stage1
+        
+        # Model-Based value calculation
+        # Q_MB(s1, a) = sum(P(s2|s1, a) * max(Q_stage2(s2, :)))
+        # self.T is shape (2, 2) -> [action, next_state]
+        # self.q_stage2 is shape (2, 2) -> [state, action]
+        
+        # Max value of stage 2 states
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,)
+        
+        # Compute Q_MB for both stage 1 actions
+        # Action 0 (A) transitions based on row 0 of T
+        # Action 1 (U) transitions based on row 1 of T
+        # Note: The provided T in base class is [[0.7, 0.3], [0.3, 0.7]] roughly
+        # We assume row 0 corresponds to action 0 outcomes, row 1 to action 1 outcomes.
+        q_mb = np.zeros(self.n_choices)
+        q_mb[0] = np.sum(self.T[0] * v_stage2)
+        q_mb[1] = np.sum(self.T[1] * v_stage2)
+        
+        # Modulate mixing weight by STAI
+        # Higher anxiety reduces model-based contribution
+        # We model this as w_eff = w_base * (1 - stai)
+        # If stai is high (~1.0), w_eff -> 0 (Pure Model-Free)
+        w_eff = self.w_base * (1.0 - self.stai)
+        
+        # Combined Q-value
+        q_net = w_eff * q_mb + (1 - w_eff) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update for Model-Free values (both stages)
+        
+        # Stage 2 update
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (TD(0))
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Choice Perseveration
+This model hypothesizes that high anxiety leads to "stickiness" or perseveration, where the participant repeats their previous stage-1 choice regardless of the outcome (reward or transition). This is a heuristic strategy to reduce cognitive load under stress. The degree of perseveration is directly scaled by the STAI score.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety increases choice perseveration (stickiness). 
+    The participant is more likely to repeat the last stage-1 action, 
+    ignoring the specific reward outcome structure to some extent.
+    The perseveration bonus is scaled by STAI.
+
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]       # Learning rate
+    beta: [0, 10]       # Inverse temperature
+    pers_k: [0, 5]      # Perseveration strength scaling factor
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.pers_k = model_parameters
+
+    def policy_stage1(self) -> np.ndarray:
+        q_vals = self.q_stage1.copy()
+        
+        # Add perseveration bonus if there was a previous trial
+        if self.last_action1 is not None:
+            # The bonus is pers_k * STAI
+            # High anxiety -> High bonus to repeat last action
+            bonus = self.pers_k * self.stai
+            q_vals[self.last_action1] += bonus
+            
+        return self.softmax(q_vals, self.beta)
+
+    # Standard TD learning for value updates
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Modulated Learning Rate Asymmetry (Loss Aversion)
+This model hypothesizes that high anxiety makes participants hypersensitive to negative outcomes (losses or lack of reward). Instead of a single learning rate, the model uses separate learning rates for positive prediction errors (better than expected) and negative prediction errors (worse than expected). The STAI score amplifies the learning rate for negative prediction errors, reflecting a "negativity bias" common in anxiety.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    HYPOTHESIS: High anxiety leads to hypersensitivity to negative prediction errors.
+    The learning rate for negative PEs (alpha_neg) is boosted by the STAI score,
+    while the learning rate for positive PEs (alpha_pos) remains baseline.
+    
+    alpha_neg_effective = alpha_neg_base + (stai * alpha_boost)
+
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]   # Learning rate for positive PE
+    alpha_neg_base: [0, 1] # Base learning rate for negative PE
+    beta: [0, 10]       # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective negative learning rate based on STAI
+        # We clamp it to 1.0 to ensure stability
+        alpha_neg_eff = min(1.0, self.alpha_neg_base * (1.0 + self.stai))
+
+        # --- Stage 2 Update ---
+        pe_2 = reward - self.q_stage2[state, action_2]
+        
+        if pe_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * pe_2
+        else:
+            self.q_stage2[state, action_2] += alpha_neg_eff * pe_2
+            
+        # --- Stage 1 Update ---
+        # Note: In standard TD, the reward for stage 1 is the value of the state reached (Q_stage2)
+        pe_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        
+        if pe_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * pe_1
+        else:
+            self.q_stage1[action_1] += alpha_neg_eff * pe_1
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```

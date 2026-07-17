@@ -1,0 +1,156 @@
+Here are three new cognitive models exploring different mechanisms for how high anxiety (STAI = 0.575) might influence decision-making in this task.
+
+### Model 1: Anxiety-Modulated Model-Based vs. Model-Free Control
+This model tests the hypothesis that high anxiety impairs model-based planning (using the transition structure) and favors model-free learning (habitual caching of values). The mixing weight `w` determines the balance between these systems, and we hypothesize that `w` is reduced by anxiety.
+
+```python
+import numpy as np
+from abc import ABC, abstractmethod
+
+class ParticipantModel1(CognitiveModelBase):
+    """
+    Hypothesis: High anxiety impairs model-based control, shifting the participant towards 
+    model-free strategies. The mixing parameter 'w' (0=Model-Free, 1=Model-Based) is 
+    down-modulated by STAI score.
+    
+    The effective mixing weight is: w_eff = w_base * (1 - stai).
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta: [0, 10]   # Inverse temperature
+    w_base: [0, 1]  # Base model-based weight (before anxiety modulation)
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.w_base = model_parameters
+
+    def init_model(self) -> None:
+        # Initialize transition matrix (fixed for simplicity in this version, or could be learned)
+        # The task description says: A -> X (common), U -> Y (common).
+        # Let's assume indices: A=0, U=1; X=0, Y=1.
+        # Transition matrix T[action, state]
+        self.T = np.array([[0.7, 0.3], [0.3, 0.7]]) 
+
+    def policy_stage1(self) -> np.ndarray:
+        # Model-Free Value (Q_MF)
+        q_mf = self.q_stage1
+        
+        # Model-Based Value (Q_MB)
+        # Q_MB(a) = sum(P(s'|a) * max(Q_stage2(s', :)))
+        # We use the max of stage 2 values as the estimate of the value of the next state
+        v_stage2 = np.max(self.q_stage2, axis=1) # Shape (2,) for 2 states
+        q_mb = np.dot(self.T, v_stage2)
+        
+        # Effective mixing weight modulated by anxiety
+        # High anxiety (stai ~ 1) reduces w_eff towards 0 (Model-Free)
+        w_eff = self.w_base * (1.0 - self.stai)
+        w_eff = np.clip(w_eff, 0, 1)
+        
+        # Integrated Q-value
+        q_net = w_eff * q_mb + (1 - w_eff) * q_mf
+        
+        return self.softmax(q_net, self.beta)
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Stage 2 update (Model-Free)
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        # Stage 1 update (Model-Free TD(1) / SARSA-like)
+        # Note: In pure MB/MF models, MF often uses SARSA(lambda). 
+        # Here we use a simple TD update for the MF component.
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+
+cognitive_model1 = make_cognitive_model(ParticipantModel1)
+```
+
+### Model 2: Anxiety-Induced Punishment Sensitivity
+This model hypothesizes that anxiety creates a bias towards learning from negative outcomes (or lack of reward). Instead of a single learning rate, the participant has separate learning rates for positive prediction errors (better than expected) and negative prediction errors (worse than expected). Anxiety amplifies the learning rate for negative errors.
+
+```python
+class ParticipantModel2(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety increases sensitivity to negative prediction errors (punishment/omission of reward).
+    We split learning rate into alpha_pos and alpha_neg.
+    
+    The base negative learning rate is amplified by STAI:
+    alpha_neg_eff = alpha_neg_base + (stai * 0.5)  (clipped to 1.0)
+    
+    Parameter Bounds:
+    -----------------
+    alpha_pos: [0, 1]       # Learning rate for positive RPEs
+    alpha_neg_base: [0, 1]  # Base learning rate for negative RPEs
+    beta: [0, 10]           # Inverse temperature
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha_pos, self.alpha_neg_base, self.beta = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Calculate effective negative learning rate
+        # High anxiety increases the weight of negative experiences
+        alpha_neg_eff = self.alpha_neg_base + (self.stai * 0.5)
+        alpha_neg_eff = np.clip(alpha_neg_eff, 0.0, 1.0)
+        
+        # --- Stage 2 Update ---
+        delta_2 = reward - self.q_stage2[state, action_2]
+        if delta_2 >= 0:
+            self.q_stage2[state, action_2] += self.alpha_pos * delta_2
+        else:
+            self.q_stage2[state, action_2] += alpha_neg_eff * delta_2
+        
+        # --- Stage 1 Update ---
+        # Using the updated stage 2 value as the target
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        if delta_1 >= 0:
+            self.q_stage1[action_1] += self.alpha_pos * delta_1
+        else:
+            self.q_stage1[action_1] += alpha_neg_eff * delta_1
+
+cognitive_model2 = make_cognitive_model(ParticipantModel2)
+```
+
+### Model 3: Anxiety-Driven "Safety" Bias (Loss Aversion)
+This model hypothesizes that anxious participants are not just maximizing reward, but actively avoiding "unsafe" options. We model this as a "safety bias" parameter `rho`. If a choice recently resulted in 0 coins (a loss/omission), its value is penalized more heavily than standard TD learning would suggest. Anxiety scales this penalty.
+
+```python
+class ParticipantModel3(CognitiveModelBase):
+    """
+    Hypothesis: Anxiety induces a 'safety bias' or loss aversion. When a reward of 0 is received,
+    an additional penalty 'rho' is subtracted from the value of that action, making the participant
+    more likely to switch away from it than standard extinction would predict.
+    
+    The penalty is scaled by STAI: penalty = rho * stai.
+    
+    Parameter Bounds:
+    -----------------
+    alpha: [0, 1]   # Learning rate
+    beta: [0, 10]   # Inverse temperature
+    rho: [0, 2]     # Base safety/loss penalty parameter
+    """
+
+    def unpack_parameters(self, model_parameters: tuple) -> None:
+        self.alpha, self.beta, self.rho = model_parameters
+
+    def value_update(self, action_1: int, state: int, action_2: int, reward: float) -> None:
+        # Standard TD update first
+        delta_2 = reward - self.q_stage2[state, action_2]
+        self.q_stage2[state, action_2] += self.alpha * delta_2
+        
+        delta_1 = self.q_stage2[state, action_2] - self.q_stage1[action_1]
+        self.q_stage1[action_1] += self.alpha * delta_1
+        
+        # Apply Anxiety-Driven Penalty for 0 reward (Loss)
+        if reward == 0:
+            penalty = self.rho * self.stai
+            
+            # Penalize the specific stage 2 action that led to failure
+            self.q_stage2[state, action_2] -= penalty
+            
+            # Also penalize the stage 1 action that led here
+            self.q_stage1[action_1] -= penalty
+
+cognitive_model3 = make_cognitive_model(ParticipantModel3)
+```
