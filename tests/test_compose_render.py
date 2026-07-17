@@ -54,3 +54,23 @@ def test_bad_snippet_fails_smoke():
          "provenance": [], "excludes": []}]})
     with pytest.raises(Exception):
         smoke_check(render_candidate(inv, ["bad"]))
+
+
+def test_blank_lines_and_docstring_survive():
+    src = render_candidate(INV, ["mixture_w", "stick"])
+    assert "###EMPTY_SLOT###" not in src
+    doc = src.split('"""')[1]
+    assert "Parameters:" in doc
+    import ast as _ast
+    _ast.parse(src)  # still valid source
+
+
+def test_multiline_string_snippet_rejected():
+    from library_learning.compose.inventory import parse_inventory
+    inv = parse_inventory({"modules": [
+        {"id": "bad", "name": "bad", "description": "d", "params": [],
+         "slots": {"init": 'bad_label = """A\n\nB"""'}, "overrides": {},
+         "provenance": [], "excludes": []}]})
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        render_candidate(inv, ["bad"])

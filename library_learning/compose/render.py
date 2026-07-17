@@ -7,12 +7,15 @@ trials. Modules append statements to APPEND_SLOTS and/or replace
 OVERRIDE_SLOTS expressions. Everything renders to flat numpy-only source
 whose docstring bounds and unpack line stay parseable by gecco's regexes.
 """
+import ast
 import textwrap
 
 import numpy as np
 
-from .inventory import APPEND_SLOTS, OVERRIDE_SLOTS, Param
+from .inventory import APPEND_SLOTS, Param
 from ..loading import exec_model
+
+EMPTY_SLOT_SENTINEL = "###EMPTY_SLOT###"
 
 BACKBONE_PARAMS = [Param("learning_rate", (0.0, 1.0)), Param("beta", (0.0, 10.0))]
 
@@ -59,6 +62,16 @@ def render_candidate(inventory, module_ids):
         for slot, code in m.slots.items():
             appends[slot].append(code)
 
+    for m in mods:
+        for slot, code in m.slots.items():
+            tree = ast.parse(textwrap.dedent(code))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and "\n" in node.value):
+                    raise ValueError(
+                        "module snippet contains a multi-line string constant, "
+                        "unsupported: %s/%s" % (m.id, slot))
+
     doc_lines = ["Composed cognitive model: backbone"]
     if mods:
         doc_lines[0] += " + " + ", ".join(m.name for m in mods)
@@ -75,7 +88,9 @@ def render_candidate(inventory, module_ids):
 
     def block(slot, level):
         parts = [_indent(c, level) for c in appends[slot]]
-        return ("\n".join(parts) + "\n") if parts else ""
+        if not parts:
+            return _indent(EMPTY_SLOT_SENTINEL, level)
+        return "\n".join(parts) + "\n"
 
     src = '''def cognitive_model(action_1, state, action_2, reward, model_parameters):
     """
@@ -139,8 +154,12 @@ def render_candidate(inventory, module_ids):
         update_extra=block("update_extra", 3),
         post_trial=block("post_trial", 2),
     )
-    # drop blank slot lines so the source stays tidy
-    src = "\n".join(line for line in src.splitlines() if line.strip() != "") + "\n"
+    # drop only the sentinel lines left by empty append slots; every other
+    # line (including blank lines inside the docstring or a snippet) is kept
+    # exactly as rendered.
+    src = "\n".join(
+        line for line in src.splitlines() if line.strip() != EMPTY_SLOT_SENTINEL
+    ) + "\n"
     return src
 
 
@@ -152,7 +171,7 @@ SMOKE_DATA = {
 }
 
 
-def smoke_check(source, inventory=None, module_ids=None, params=None):
+def smoke_check(source, params=None):
     """Exec + run on dummy data with -1 missed trials; return NLL or raise."""
     func = exec_model(source, "cognitive_model")
     if params is None:
