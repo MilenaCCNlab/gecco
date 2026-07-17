@@ -36,11 +36,34 @@ OCI-stratified: sort test participants by `oci`, alternate/seeded-sample within
 strata to get 10 validation + 21 test) and reused everywhere. Report OCI
 mean/std per half as a balance check.
 
-## Stage 1 — Module extraction (LLM-curated, miner-grounded)
+## Stage 1 — Module extraction (Gemini-curated, miner-grounded, fully logged)
+
+**Reproducibility requirement (user-mandated):** the LLM abstraction step runs
+through the **Gemini API** — not in-session — with **every prompt and response
+logged verbatim** to disk.
+
+- **Model:** `gemini-3.5-flash` (verified available and generating,
+  2026-07-17), temperature 0. **Key:** `GEMINI_API_KEY_LAKELAB` from `.env`
+  (verified working; plain `GEMINI_API_KEY` is invalid — do not use).
+- **Logging:** every call writes `llm_log/call_{NNN}.json` containing
+  `{model, modelVersion (from response), generationConfig, full prompt,
+  full raw response, timestamp}`. The logged artifacts freeze the actual run;
+  re-running replays from prompts.
+- **LLM step structure:** (1) one call per seed program → structured mechanism
+  annotation; (2) one merge call over all 12 annotations + mining report →
+  deduplicated module inventory (JSON: name, injection-point code, params +
+  bounds, provenance, incompatibilities). Deterministic Python validates and
+  renders the inventory into `module_inventory.py`; malformed LLM output fails
+  loudly, and any manual repair is recorded in `llm_log/MANUAL_EDITS.md`.
+- `google-genai` gets pip-installed into `gecco-env/` (or plain REST via
+  urllib — decide at implementation; REST avoids a new dependency).
+
+Pipeline details:
 
 - Run the existing `library_learning` AST fragment miner (`library_learning/mining.py`)
   over the 12 seed programs (`models/best_model_0_participant{P}.txt`).
-- Claude reads the 12 programs + mining report and curates `module_inventory.py`:
+- Gemini reads the 12 programs + mining report and curates the inventory behind
+  `module_inventory.py`:
   - **Backbone**: shared scaffold — softmax choice rules, TD updates, MB lookahead
     with `T=[[.7,.3],[.3,.7]]`, standard NLL tail.
   - **Mechanism modules**: every distinct mechanism found in the seeds —
@@ -99,6 +122,7 @@ hybrid). Validation-set tables reported separately, labeled as selection data.
 
 New dir `results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_individual/library_composition/`:
 - `module_inventory.py`, `MODULES.md`
+- `llm_log/` (every Gemini prompt/response, verbatim, numbered)
 - `splits.json`
 - `candidates/` (rendered candidate programs), `search_log.json`
 - `composed_model.txt`, `winner_params_validation.csv`
@@ -110,7 +134,7 @@ New dir `results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_
 
 New subcommands in the existing repo-level `library_learning/` package
 (reuse `config.py` resolution, `loading.py` loaders, `mining.py`):
-- `compose-modules` — mine + emit inventory skeleton (curation stays manual/LLM)
+- `compose-modules` — mine + run the logged Gemini extraction calls + validate/render inventory
 - `compose-search` — enumerate (count-only mode first for the checkpoint), fit,
   select
 - `compose-eval` — final-test fits + stats + figure
