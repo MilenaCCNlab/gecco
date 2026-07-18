@@ -138,17 +138,21 @@ Winner frozen as `composed_model.txt`; all models fit per-participant on the
 |---|---|
 | Composed program | The claim |
 | Group gecco `best_model_0.txt` | Headline rival (same information budget) |
+| Canonical RLWM (Collins & Frank 2012) baseline | Field standard; cross-check vs. `baseline_bic` column |
 | Individual gecco per-participant programs | Ceiling reference (not a fair rival) |
 
-**No hybrid-analog arm in this run** (user decision: main arms first). The
-canonical Collins & Frank RLWM baseline + `compose-hybrid-search` equivalent
-is the designated follow-up once main results look sane. The data's stored
-`baseline_bic` column is reported as a reference column in `test_results.csv`
-(not refit, provenance unknown — reference only).
+The canonical baseline (delta-rule RL + one-shot WM with decay toward uniform
+and set-size-scaled mixture weight; exact source frozen in
+`canonical_rlwm.py`) mirrors two-step's Daw-hybrid role exactly, including
+the cross-check of its refits against the data's stored `baseline_bic`
+column (WARN on mismatch, investigate before reporting). Only the
+**hybrid-base composition search** (`compose-hybrid-search` analog: canonical
+model as fixed base + exhaustive search over missing library modules) is
+deferred (user decision: main arms first).
 
 **Stats:** mean BIC per model; per-participant ΔBIC vs group; win/tie/loss;
-paired Wilcoxon (composed vs group). Validation tables reported separately,
-labeled as selection data.
+paired Wilcoxon (composed vs group, composed vs canonical). Validation
+tables reported separately, labeled as selection data.
 
 ## Outputs
 
@@ -161,9 +165,8 @@ New dir `results/rlwm_individual/library_composition/`:
   (unseen-participant coverage)
 - `composed_model.txt`, `winner.json`
 - `test_results.json`, `test_results.csv`, `RESULTS.md`
-- Comparison figure, paper style (blue = composed winner, gray = others,
-  teal reserved for the canonical baseline when the follow-up arm lands;
-  PNG + PDF)
+- Comparison figure, paper style (teal = canonical RLWM reference,
+  blue = composed winner, gray = others; PNG + PDF)
 
 ## Code placement — parallel RLWM modules (user decision)
 
@@ -178,7 +181,8 @@ Two-step modules stay byte-identical; RLWM gets parallel siblings in
 | `splits_rlwm.py` | age-stratified partition, held-out ∩ fitted intersection | `splits.parse_split`, `splits.group_split_pids` |
 | `search_rlwm.py` | enumeration/greedy with 3 backbone params, cap 6 | `fitting.py` |
 | `reconstruct_rlwm.py` | per-pid library coverage | `fitting.py` |
-| `evaluate_rlwm.py` | composed/group/individual fits (no hybrid), stats, RESULTS.md | `fitting.py`, `loading.py` |
+| `canonical_rlwm.py` | Collins & Frank RLWM source + bounds (analog of `hybrid.py`) | — |
+| `evaluate_rlwm.py` | composed/group/canonical/individual fits, stats, RESULTS.md | `fitting.py`, `loading.py` |
 
 - `__main__.py` gains dispatch **by the target's resolved `task.name`**
   (`rlwm` → rlwm modules; anything else → existing two-step path). Existing
@@ -198,16 +202,20 @@ Two-step modules stay byte-identical; RLWM gets parallel siblings in
 4. Every rendered candidate smoke-checked before fitting; `compose-search`
    exits nonzero on any fit failure.
 5. `splits.json` age balance reported (mean/std per subset).
-6. Freeze discipline: `compose-eval` refuses to run without
+6. Canonical RLWM refits cross-checked against the data's `baseline_bic`
+   column (WARN on mismatch — the column's producing variant is unknown;
+   investigate before reporting), mirroring two-step's hybrid cross-check.
+7. Freeze discipline: `compose-eval` refuses to run without
    `composed_model.txt`.
-7. Existing test suite passes unchanged (confirms two-step untouched);
+8. Existing test suite passes unchanged (confirms two-step untouched);
    two-step `compose-*` subcommands still resolve their defaults.
-8. `set -o pipefail` on any piped shell invocations (two-step lesson).
+9. `set -o pipefail` on any piped shell invocations (two-step lesson).
 
 ## Non-goals
 
-- No hybrid-analog arm (Collins & Frank canonical RLWM baseline) — designated
-  follow-up.
+- No hybrid-base composition search (`compose-hybrid-search` analog:
+  canonical model as fixed base + missing-module search) — designated
+  follow-up. The canonical baseline itself IS fit in Stage 3.
 - No individual-gecco fitting of the 48 unfitted held-out pids; no
   evaluation on them this run.
 - No task-adapter refactor of the two-step compose modules (explicitly
