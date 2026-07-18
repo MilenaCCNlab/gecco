@@ -9,6 +9,7 @@ from .compose import search as search_mod
 from .compose.evaluate import cross_checks, evaluate_models, summarize
 from .compose.extract import run_extraction, validate_inventory_obj
 from .compose.figure import plot_comparison
+from .compose.hybrid import HYBRID_MODULES
 from .compose.inventory import load_inventory
 from .compose.reconstruct import reconstruct_participants
 from .compose.splits import load_splits
@@ -69,6 +70,29 @@ def cmd_search(args):
     return 0
 
 
+def cmd_hybrid_search(args):
+    """Exhaustive search over modules missing from the Daw hybrid, using the
+    hybrid-equivalent module set as a fixed base. Outputs under hybrid_base/."""
+    target = resolve_target(args.results_dir, config_dir=args.config_dir)
+    out = out_dir_for(target)
+    inv = load_inventory(out / "module_inventory.json")
+    val_pids = load_splits(target)["composition_validation_pids"]
+    hb_out = out / "hybrid_base"
+    hb_out.mkdir(exist_ok=True)
+    cands = search_mod.enumerate_from_base(inv, HYBRID_MODULES,
+                                           param_cap=args.param_cap)
+    print("hybrid base %s: %d candidates (param cap %d)"
+          % ("+".join(HYBRID_MODULES), len(cands), args.param_cap))
+    results = search_mod.score_candidates(inv, target, val_pids, cands, hb_out)
+    winner = search_mod.select_winner(results)
+    search_mod.freeze_winner(winner, inv, hb_out)
+    search_mod.selection_report(results, hb_out)
+    print("WINNER %s mean validation BIC %.2f -> %s"
+          % (winner["candidate_id"], winner["mean_bic"],
+             hb_out / "composed_model.txt"))
+    return 0
+
+
 def cmd_reconstruct(args):
     target = resolve_target(args.results_dir, config_dir=args.config_dir)
     out = out_dir_for(target)
@@ -123,6 +147,12 @@ def main(argv=None):
     add_common(p)
     p.add_argument("--mode", choices=["exhaustive", "greedy"], required=True)
     p.set_defaults(fn=cmd_search)
+
+    p = subs.add_parser("compose-hybrid-search",
+                        help="exhaustive search over modules missing from the Daw hybrid")
+    add_common(p)
+    p.add_argument("--param-cap", type=int, default=9)
+    p.set_defaults(fn=cmd_hybrid_search)
 
     p = subs.add_parser("compose-reconstruct",
                         help="per-participant library coverage on the reconstruction set")

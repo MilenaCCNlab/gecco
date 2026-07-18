@@ -5,6 +5,13 @@ against the data's baseline_bic column (WARN-level in evaluate)."""
 HYBRID_BOUNDS = [(0.0, 1.0), (0.0, 1.0), (0.0, 10.0), (0.0, 10.0),
                  (0.0, 1.0), (0.0, 1.0), (0.0, 5.0)]
 
+# Library modules that, composed on the backbone, reproduce this hybrid
+# (learning_rate_2, beta_2, w, lambd, perseveration respectively). The only
+# non-identity: choice_stickiness adds its bonus after beta scaling with
+# bounds [0, 5], while HYBRID_SOURCE applies perseveration before beta.
+HYBRID_MODULES = ["choice_stickiness", "eligibility_trace", "mb_mf_mixture",
+                  "separate_learning_rates", "separate_stage_betas"]
+
 HYBRID_SOURCE = '''def cognitive_model(action_1, state, action_2, reward, model_parameters):
     """
     Hybrid MB/MF model with eligibility trace and perseveration (Daw baseline).

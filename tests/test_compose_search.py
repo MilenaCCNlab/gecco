@@ -31,6 +31,20 @@ def test_enumerate_respects_cap_and_excludes():
     assert ("a", "b") not in tight and ("a",) in tight
 
 
+def test_enumerate_from_base():
+    cands = S.enumerate_from_base(INV, ["b"], param_cap=8)
+    assert ("b",) in cands                 # base itself is a candidate
+    assert () not in cands                 # never drops below the base
+    assert ("a", "b") in cands and ("b", "c") in cands
+    assert ("a", "b", "c") not in cands    # a excludes c
+    tight = S.enumerate_from_base(INV, ["b"], param_cap=4)
+    assert tight == [("b",)]               # cap leaves no room for additions
+    with pytest.raises(ValueError):
+        S.enumerate_from_base(INV, ["a", "c"], param_cap=8)  # incompatible base
+    with pytest.raises(ValueError):
+        S.enumerate_from_base(INV, ["b"], param_cap=3)       # base over cap
+
+
 def test_count_report():
     rep = S.count_report(INV, param_cap=8)
     assert rep["n_candidates"] == len(S.enumerate_candidates(INV, 8))

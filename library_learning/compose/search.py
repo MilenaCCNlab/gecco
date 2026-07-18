@@ -30,6 +30,27 @@ def enumerate_candidates(inventory, param_cap=PARAM_CAP):
     return out
 
 
+def enumerate_from_base(inventory, base, param_cap=PARAM_CAP):
+    """All valid supersets of a fixed base module set (base itself included)."""
+    base = tuple(sorted(base))
+    ok, msg = compatible(inventory, list(base))
+    if not ok:
+        raise ValueError("base set incompatible: %s" % msg)
+    if _n_params(inventory, base) > param_cap:
+        raise ValueError("base set alone exceeds param cap %d" % param_cap)
+    rest = sorted(set(inventory.ids()) - set(base))
+    out = []
+    for k in range(len(rest) + 1):
+        for extra in itertools.combinations(rest, k):
+            cand = tuple(sorted(base + extra))
+            if _n_params(inventory, cand) > param_cap:
+                continue
+            ok, _ = compatible(inventory, list(cand))
+            if ok:
+                out.append(cand)
+    return out
+
+
 def count_report(inventory, param_cap=PARAM_CAP):
     cands = enumerate_candidates(inventory, param_cap)
     return {
