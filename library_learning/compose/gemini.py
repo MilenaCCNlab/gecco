@@ -29,7 +29,8 @@ def _urllib_transport(url, payload):
         url, data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     last_err = None
-    for attempt in range(5):
+    n_attempts = 5
+    for attempt in range(n_attempts):
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return json.loads(resp.read().decode())
@@ -37,6 +38,9 @@ def _urllib_transport(url, payload):
             last_err = e
             if e.code not in RETRY_STATUSES:
                 raise RuntimeError("Gemini HTTP %s: %s" % (e.code, e.read()[:500]))
+        except urllib.error.URLError as e:
+            last_err = e
+        if attempt != n_attempts - 1:
             time.sleep(2 ** attempt)
     raise RuntimeError("Gemini API failed after 5 retries: %s" % last_err)
 

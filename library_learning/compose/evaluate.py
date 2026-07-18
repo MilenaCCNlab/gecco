@@ -64,13 +64,20 @@ def evaluate_models(target, group_dir, out_dir, pids, set_name):
     return results
 
 
-def cross_checks(results, target, group_dir, pids):
+def cross_checks(results, target, group_dir, pids, heldout_pids=None):
     warnings = []
     stored_path = Path(group_dir) / "bics" / "best_bic_on_test_run0.json"
     if stored_path.exists():
         stored = json.loads(stored_path.read_text())["individual_BIC"]
+        if heldout_pids is None:
+            heldout_pids = sorted(range(14, 14 + len(stored)))
         for pid in pids:
-            idx = pid - 14
+            if pid not in heldout_pids:
+                warnings.append(
+                    "cross-check skipped for p%d: not in stored held-out mapping"
+                    % pid)
+                continue
+            idx = heldout_pids.index(pid)
             if 0 <= idx < len(stored):
                 diff = results["group"][pid]["bic"] - stored[idx]
                 if abs(diff) > CROSS_CHECK_TOL:

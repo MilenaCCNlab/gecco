@@ -13,6 +13,28 @@ def test_parse_split_slice():
     assert parse_split("[14:]", list(range(45))) == list(range(14, 45))
 
 
+def test_parse_split_remainder_returns_none():
+    assert parse_split("remainder", list(range(45))) is None
+
+
+def test_group_split_pids_remainder_test(tmp_path, monkeypatch):
+    import pandas as pd
+    from library_learning.compose import splits as splits_mod
+
+    data = pd.DataFrame({"participant": list(range(1, 15)), "oci": 0.0})
+    data_path = tmp_path / "data.csv"
+    data.to_csv(data_path, index=False)
+
+    monkeypatch.setattr(splits_mod, "_group_config", lambda group_dir, config_dir=None: {
+        "data": {"id_column": "participant",
+                 "splits": {"prompt": "[0:2]", "eval": "[2:4]", "test": "remainder"}}
+    })
+    pids = group_split_pids("unused", data_path=data_path)
+    assert pids["prompt"] == [1, 2]
+    assert pids["eval"] == [3, 4]
+    assert pids["heldout"] == list(range(5, 15))
+
+
 def test_group_split_pids():
     pids = group_split_pids(GRP)
     assert pids["prompt"] == [1, 2]

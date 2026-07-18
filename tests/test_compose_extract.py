@@ -64,6 +64,13 @@ def test_validate_flags_destructured_and_loop_state_vars():
     assert any("unprefixed" in e and "leaked" in e for e in errors)
 
 
+def test_validate_flags_walrus_state_vars():
+    bad = make_good()
+    bad["modules"][0]["slots"]["post_trial"] = "if (leaked := a1) != -1:\n    pass"
+    inv, errors = validate_inventory_obj(bad)
+    assert any("unprefixed" in e and "leaked" in e for e in errors)
+
+
 def test_parse_json_reply_prefers_valid_json_fence():
     reply = ("Here is an example:\n```python\nnot json\n```\n"
              "```json\n{\"modules\": []}\n```")
@@ -86,3 +93,16 @@ def test_audit_coverage_string_pids():
          "decision": "mapped"}]}
     annotations = {"1": {"mechanisms": [{"name": "stickiness"}]}}
     assert audit_coverage(obj, annotations) == []
+
+
+def test_audit_coverage_malformed_pid_reported():
+    obj = {"modules": [], "coverage": [
+        {"pid": "not-a-number", "mechanism": "stickiness", "module": "stick",
+         "decision": "mapped"}]}
+    annotations = {"1": {"mechanisms": [{"name": "stickiness"}]}}
+    errors = audit_coverage(obj, annotations)
+    assert any("malformed coverage entry" in e and "not-a-number" in e
+               for e in errors)
+    # the mechanism is still reported missing since the malformed entry
+    # could not be recorded as covering it
+    assert any("coverage missing" in e and "stickiness" in e for e in errors)

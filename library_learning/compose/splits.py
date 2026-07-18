@@ -10,14 +10,18 @@ from ..config import REPO_ROOT, Target, resolve_target
 
 
 def parse_split(value, unique_ids):
-    """Mirror of gecco/prepare_data/io.py::parse_split (index slice over sorted ids)."""
+    """Mirror of gecco/prepare_data/io.py::parse_split (index slice over sorted
+    ids; "remainder" defers to the caller, returning None)."""
     if isinstance(value, list):
         return value
-    if isinstance(value, str) and value.startswith("[") and value.endswith("]"):
-        start_str, end_str = value[1:-1].split(":")
-        start = int(start_str) if start_str else None
-        end = int(end_str) if end_str else None
-        return unique_ids[start:end]
+    if isinstance(value, str):
+        if value == "remainder":
+            return None
+        if value.startswith("[") and value.endswith("]"):
+            start_str, end_str = value[1:-1].split(":")
+            start = int(start_str) if start_str else None
+            end = int(end_str) if end_str else None
+            return unique_ids[start:end]
     raise ValueError("unsupported split spec: %r" % (value,))
 
 
@@ -43,7 +47,11 @@ def group_split_pids(group_dir, config_dir=None, data_path=None):
     splits = data_sec["splits"]
     prompt = sorted(parse_split(splits["prompt"], unique_ids))
     ev = sorted(parse_split(splits["eval"], unique_ids))
-    heldout = sorted(parse_split(splits["test"], unique_ids))
+    test = parse_split(splits["test"], unique_ids)
+    if test is None:
+        heldout = [pid for pid in unique_ids if pid not in prompt + ev]
+    else:
+        heldout = sorted(test)
     return {"prompt": prompt, "eval": ev, "heldout": heldout,
             "seed": sorted(prompt + ev)}
 

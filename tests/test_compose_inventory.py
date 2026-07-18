@@ -73,3 +73,11 @@ def test_provenance_non_integer_rejected():
     obj["modules"][0]["provenance"] = ["p1"]
     with pytest.raises(InventoryError):
         parse_inventory(obj)
+
+
+def test_bad_module_id_rejected():
+    obj = make_obj()
+    obj["modules"][0]["id"] = "MixtureW"  # not snake_case
+    with pytest.raises(InventoryError) as e:
+        parse_inventory(obj)
+    assert "snake_case" in str(e.value)

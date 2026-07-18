@@ -104,7 +104,7 @@ def selection_report(results, out_dir, k=10):
     """Top-k + leave-one-participant-out rank stability (winner's-curse probe)."""
     ranked = sorted(results, key=lambda r: r["mean_bic"])[:k]
     top_ids = [r["candidate_id"] for r in ranked]
-    pids = sorted(next(iter(results))["per_pid"].keys()) if results else []
+    pids = sorted(next(iter(results))["per_pid"].keys(), key=int) if results else []
     loo_ranks = {cid: [] for cid in top_ids}
     for left_out in pids:
         loo = sorted(
@@ -120,6 +120,7 @@ def selection_report(results, out_dir, k=10):
                    "n_params": r["n_params"],
                    "mean_bic": r["mean_bic"]} for r in ranked],
         "loo_ranks": loo_ranks,
+        "loo_pids": pids,
     }
     Path(out_dir, "selection_report.json").write_text(json.dumps(report, indent=2))
     return report

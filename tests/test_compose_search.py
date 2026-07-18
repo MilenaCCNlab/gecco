@@ -56,6 +56,7 @@ def test_selection_report(tmp_path):
     assert [t["candidate_id"] for t in rep["top_k"]] == ["x", "y"]
     assert set(rep["loo_ranks"]) == {"x", "y"}
     assert rep["loo_ranks"]["x"] == [1, 1]
+    assert rep["loo_pids"] == ["4", "5"]
     import json as _json
     assert _json.loads((tmp_path / "selection_report.json").read_text()) == rep
 

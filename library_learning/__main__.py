@@ -91,10 +91,16 @@ def cmd_eval(args):
         results_val = evaluate_models(target, args.group_dir, out,
                                       splits["composition_validation_pids"],
                                       "validation")
+    if "test" not in sets:
+        print("validation-only run (--sets=%s): skipping test evaluation, "
+              "cross-checks, summary, and figure" % args.sets)
+        return 0
     results_test = evaluate_models(target, args.group_dir, out,
                                    splits["test_pids"], "test")
+    heldout_pids = sorted(set(splits["reconstruction_pids"])
+                          | set(splits["test_pids"]))
     warnings = cross_checks(results_test, target, args.group_dir,
-                            splits["test_pids"])
+                            splits["test_pids"], heldout_pids=heldout_pids)
     summarize(results_val, results_test, warnings, out, target=target)
     plot_comparison(out / "test_results.csv", out)
     print("results -> %s (warnings: %d)" % (out / "RESULTS.md", len(warnings)))

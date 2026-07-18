@@ -156,6 +156,7 @@ def verify_participant(
                 trace_ok = False
                 rec["trace_divergence"] = div
     except Exception as e:  # instrumentation must never mask a scalar verdict
+        trace_ok = False
         rec["trace_available"] = False
         rec["trace_error"] = f"{type(e).__name__}: {e}"
 

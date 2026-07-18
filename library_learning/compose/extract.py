@@ -142,6 +142,8 @@ def _unprefixed_assignments(module):
             elif isinstance(node, ast.withitem):
                 if node.optional_vars is not None:
                     targets = [node.optional_vars]
+            elif isinstance(node, ast.NamedExpr):
+                targets = [node.target]
             for t in targets:
                 for name in _target_names(t):
                     if (name not in CANONICAL_NAMES
@@ -185,12 +187,14 @@ def validate_inventory_obj(obj):
 def audit_coverage(obj, annotations):
     """Every annotated mechanism (pid, name) must appear in obj['coverage']."""
     covered = set()
+    errors = []
     for c in obj.get("coverage", []):
         try:
             covered.add((int(c.get("pid")), c.get("mechanism")))
         except (TypeError, ValueError):
-            continue
-    errors = []
+            errors.append(
+                "malformed coverage entry (pid=%r, mechanism=%r): pid must "
+                "be an integer" % (c.get("pid"), c.get("mechanism")))
     for pid, ann in annotations.items():
         for mech in ann.get("mechanisms", []):
             if (int(pid), mech["name"]) not in covered:

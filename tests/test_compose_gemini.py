@@ -1,7 +1,8 @@
 import json
+import urllib.error
 from pathlib import Path
 
-from library_learning.compose.gemini import GeminiClient, load_env_key
+from library_learning.compose.gemini import GeminiClient, _urllib_transport, load_env_key
 
 
 def test_load_env_key(tmp_path):
@@ -33,6 +34,36 @@ def test_generate_logs_verbatim(tmp_path):
 
     client.generate("again", tag="smoke")
     assert (tmp_path / "call_001_smoke.json").exists()
+
+
+def test_urllib_transport_retries_url_error(monkeypatch):
+    import urllib.request as ur
+
+    calls = {"n": 0}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"ok": True}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("connection refused")
+        return FakeResp()
+
+    monkeypatch.setattr(ur, "urlopen", fake_urlopen)
+    from library_learning.compose import gemini as gemini_mod
+    monkeypatch.setattr(gemini_mod.time, "sleep", lambda s: None)
+
+    result = _urllib_transport("http://x", {"a": 1})
+    assert result == {"ok": True}
+    assert calls["n"] == 2
 
 
 def test_log_numbering_skips_gaps(tmp_path):

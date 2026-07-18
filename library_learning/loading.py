@@ -96,10 +96,15 @@ def parse_bounds(code: str, param_names: List[str]) -> Dict[str, Tuple[float, fl
                 found[name] = (float(lo), float(hi))
             except ValueError:
                 continue
+    found_lower = {k.lower(): v for k, v in found.items()}
     bounds = {}
     for name in param_names:
         if name in found:
             bounds[name] = found[name]
+        elif name.lower() in found:
+            bounds[name] = found[name.lower()]
+        elif name.lower() in found_lower:
+            bounds[name] = found_lower[name.lower()]
         elif "beta" in name.lower() or "temperature" in name.lower():
             bounds[name] = (0.0, 10.0)
         else:

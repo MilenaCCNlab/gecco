@@ -1,5 +1,6 @@
 """Module inventory: the validated data model behind module_inventory.json."""
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -9,6 +10,7 @@ APPEND_SLOTS = ("init", "pre_stage1", "stage1_logits_extra",
 OVERRIDE_SLOTS = ("q2_init", "stage1_values", "stage2_values",
                   "stage1_temp", "stage2_temp", "stage1_update", "stage2_update")
 BACKBONE_PARAM_NAMES = ("learning_rate", "beta")
+MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class InventoryError(ValueError):
@@ -60,6 +62,8 @@ def parse_inventory(obj):
         mid = raw.get("id", "<missing id>")
         if mid in seen_ids:
             errors.append("duplicate module id: %s" % mid)
+        if not MODULE_ID_RE.match(mid):
+            errors.append("invalid module id '%s' (must be snake_case)" % mid)
         seen_ids.add(mid)
         params = []
         for p in raw.get("params", []):
