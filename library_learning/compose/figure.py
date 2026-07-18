@@ -23,6 +23,8 @@ def plot_comparison(test_results_csv, out_dir, rng_seed=7):
     fig, ax = plt.subplots(figsize=(5.0, 3.4))
     for i, model in enumerate(ORDER):
         vals = df[df.model == model]["bic"].to_numpy()
+        if len(vals) == 0:
+            raise ValueError("no test rows for model '%s'" % model)
         ax.bar(i, vals.mean(), width=0.62, color=COLORS[model],
                edgecolor="none", zorder=2)
         x = i + rng.uniform(-0.16, 0.16, size=len(vals))

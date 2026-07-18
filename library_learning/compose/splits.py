@@ -6,7 +6,8 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from ..config import REPO_ROOT, Target, resolve_target
+from ..config import REPO_ROOT
+from ..loading import load_dataframe
 
 
 def parse_split(value, unique_ids):
@@ -69,7 +70,7 @@ def make_splits(target, group_dir, out_dir=None, oci_column="oci"):
     out_dir = Path(out_dir) if out_dir else target.results_dir / "library_composition"
     out_dir.mkdir(parents=True, exist_ok=True)
     pids = group_split_pids(group_dir, data_path=target.data_path)
-    df = pd.read_csv(target.data_path)
+    df = load_dataframe(target)
     oci = df.groupby(target.id_column)[oci_column].first()
     ranked = sorted(pids["heldout"], key=lambda p: (float(oci[p]), p))
     reconstruction = [p for i, p in enumerate(ranked) if i % 3 == 1]

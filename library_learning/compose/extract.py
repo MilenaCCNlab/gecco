@@ -7,10 +7,13 @@ import re
 import textwrap
 from pathlib import Path
 
+from .fitting import fit_model_on_pids
 from .gemini import DEFAULT_MODEL, GeminiClient
-from .inventory import InventoryError, parse_inventory
-from .render import render_candidate, smoke_check
-from ..loading import load_original_code
+from .inventory import Inventory, InventoryError, compatible, parse_inventory
+from .render import candidate_params, render_candidate, smoke_check
+from .splits import make_splits
+from ..loading import (extract_unpack_names, load_original_code,
+                       load_stored_bic, parse_bounds)
 from ..mining import mine_fragments, render_mining_report
 
 PROMPT_ANNOTATE = '''You are a renowned cognitive scientist analyzing computational models of the two-step decision task (Daw et al.). Below is a Python cognitive model that was fit to participant {pid}'s behavior.
@@ -67,6 +70,7 @@ Previous JSON:
 {previous}'''
 
 FENCE_RE = re.compile(r"```(\w*)[ \t]*\n?(.*?)```", re.DOTALL)
+RECONSTRUCTION_GATE_TOL = 15.0
 
 
 def _parse_json_reply(text):
@@ -154,7 +158,6 @@ def _unprefixed_assignments(module):
 
 
 def validate_inventory_obj(obj):
-    from .inventory import compatible
     try:
         inv = parse_inventory(obj)
     except InventoryError as e:
@@ -206,7 +209,6 @@ def audit_coverage(obj, annotations):
 def check_bounds_against_sources(inv, target):
     """WARN where a module param's bounds disagree with a provenance
     participant's docstring bounds for the same param name."""
-    from ..loading import load_original_code, extract_unpack_names, parse_bounds
     warnings = []
     for m in inv.modules:
         for pid in m.provenance:
@@ -228,13 +230,10 @@ def check_bounds_against_sources(inv, target):
     return warnings
 
 
-def reconstruction_gate(inv, obj, target, seed_pids, out_dir, tol=15.0):
+def reconstruction_gate(inv, obj, target, seed_pids, out_dir,
+                        tol=RECONSTRUCTION_GATE_TOL):
     """Fidelity gate: recompose each seed from its provenance modules, fit to
     that seed's own data, compare BIC to the stored individual-gecco BIC."""
-    from .inventory import compatible
-    from .fitting import fit_model_on_pids
-    from .render import candidate_params
-    from ..loading import load_stored_bic
     report, failures = [], []
     for pid in seed_pids:
         mods, dropped = [], []
@@ -267,7 +266,6 @@ def reconstruction_gate(inv, obj, target, seed_pids, out_dir, tol=15.0):
 
 def merge_inventory(client, annotations, mining_report, target=None,
                     seed_pids=None, out_dir=None, max_repair_rounds=3):
-    from .inventory import Inventory
     backbone_src = render_candidate(Inventory(modules=[]), [])
     prompt = PROMPT_MERGE.format(
         annotations=json.dumps(annotations, indent=1),
@@ -317,7 +315,6 @@ def render_modules_md(inv, seed_pids):
 
 
 def run_extraction(target, group_dir, out_dir, client=None):
-    from .splits import make_splits
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     splits = make_splits(target, group_dir, out_dir=out_dir)

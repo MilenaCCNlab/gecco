@@ -3,7 +3,6 @@ compression pipeline (scan/verify/report) gets wired here when resumed."""
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from .config import resolve_target
 from .compose import search as search_mod
@@ -12,7 +11,7 @@ from .compose.extract import run_extraction, validate_inventory_obj
 from .compose.figure import plot_comparison
 from .compose.inventory import load_inventory
 from .compose.reconstruct import reconstruct_participants
-from .compose.splits import load_splits, make_splits
+from .compose.splits import load_splits
 
 DEFAULT_IND = "results/two_step_psychiatry_individual_function_ocibalanced_maxsetting_individual"
 DEFAULT_GRP = "results/two_step_psychiatry_group_function_ocibalanced_maxsetting"

@@ -112,6 +112,13 @@ def parse_bounds(code: str, param_names: List[str]) -> Dict[str, Tuple[float, fl
     return bounds
 
 
+def bounds_for_code(code: str) -> List[Tuple[float, float]]:
+    """Bounds list (in unpack order) for a model's own docstring/unpack line."""
+    names = extract_unpack_names(code)
+    b = parse_bounds(code, names)
+    return [b[n] for n in names]
+
+
 def load_fitted_params(target: Target, pid: int) -> Tuple[List[str], np.ndarray]:
     path = target.params_dir / f"best_params_run0_participant{pid}.csv"
     lines = path.read_text().strip().splitlines()

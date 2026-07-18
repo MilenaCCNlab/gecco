@@ -13,7 +13,7 @@ import textwrap
 import numpy as np
 
 from .inventory import APPEND_SLOTS, Param
-from ..loading import exec_model
+from ..loading import exec_model, extract_unpack_names, parse_bounds
 
 EMPTY_SLOT_SENTINEL = "###EMPTY_SLOT###"
 
@@ -175,10 +175,9 @@ def smoke_check(source, params=None):
     """Exec + run on dummy data with -1 missed trials; return NLL or raise."""
     func = exec_model(source, "cognitive_model")
     if params is None:
-        import re
-        bounds = re.findall(r"\[\s*([\-\d.eE+]+)\s*,\s*([\-\d.eE+]+)\s*\]",
-                            source.split('"""')[1])
-        params = [(float(lo) + float(hi)) / 2.0 for lo, hi in bounds]
+        names = extract_unpack_names(source)
+        bounds_map = parse_bounds(source, names)
+        params = [(bounds_map[n][0] + bounds_map[n][1]) / 2.0 for n in names]
     nll = float(func(SMOKE_DATA["action_1"], SMOKE_DATA["state"],
                      SMOKE_DATA["action_2"], SMOKE_DATA["reward"], params))
     if not np.isfinite(nll):

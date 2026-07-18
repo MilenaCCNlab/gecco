@@ -9,8 +9,8 @@ from scipy.stats import wilcoxon
 
 from .fitting import fit_model_on_pids
 from .hybrid import HYBRID_BOUNDS, HYBRID_SOURCE
-from ..loading import (extract_unpack_names, function_name_and_args,
-                       load_original_code, parse_bounds, strip_fences)
+from ..loading import (bounds_for_code, function_name_and_args,
+                       load_dataframe, load_original_code, strip_fences)
 
 TIE_TOL = 1.0
 CROSS_CHECK_TOL = 5.0
@@ -22,12 +22,6 @@ def _wilcoxon_p(a, b):
         return float(wilcoxon(a, b).pvalue)
     except ValueError:
         return 1.0
-
-
-def _bounds_for(code):
-    names = extract_unpack_names(code)
-    b = parse_bounds(code, names)
-    return [b[n] for n in names]
 
 
 def evaluate_models(target, group_dir, out_dir, pids, set_name):
@@ -45,10 +39,10 @@ def evaluate_models(target, group_dir, out_dir, pids, set_name):
 
     results = {}
     results["composed"] = fit_model_on_pids(
-        composed_src, target, pids, _bounds_for(composed_src),
+        composed_src, target, pids, bounds_for_code(composed_src),
         tag="eval:%s:composed" % set_name)
     results["group"] = fit_model_on_pids(
-        group_src, target, pids, _bounds_for(group_src),
+        group_src, target, pids, bounds_for_code(group_src),
         tag="eval:%s:group" % set_name, func_name=group_func_name)
     results["hybrid"] = fit_model_on_pids(
         HYBRID_SOURCE, target, pids, HYBRID_BOUNDS,
@@ -58,7 +52,7 @@ def evaluate_models(target, group_dir, out_dir, pids, set_name):
         code = load_original_code(target, pid)
         fname, _ = function_name_and_args(code)
         individual.update(fit_model_on_pids(
-            code, target, [pid], _bounds_for(code),
+            code, target, [pid], bounds_for_code(code),
             tag="eval:%s:individual" % set_name, func_name=fname))
     results["individual"] = individual
     return results
@@ -84,7 +78,7 @@ def cross_checks(results, target, group_dir, pids, heldout_pids=None):
                     warnings.append(
                         "group refit BIC differs from stored for p%d: %.2f vs %.2f"
                         % (pid, results["group"][pid]["bic"], stored[idx]))
-    df = pd.read_csv(target.data_path)
+    df = load_dataframe(target)
     baseline = df.groupby(target.id_column)["baseline_bic"].first()
     for pid in pids:
         diff = results["hybrid"][pid]["bic"] - float(baseline[pid])
@@ -109,7 +103,7 @@ def _rows(results, set_name, oci):
 def summarize(results_val, results_test, warnings, out_dir, target=None):
     out_dir = Path(out_dir)
     if target is not None:
-        df = pd.read_csv(target.data_path)
+        df = load_dataframe(target)
         oci = df.groupby(target.id_column)["oci"].first()
     else:
         all_pids = {p for r in [results_val, results_test] if r

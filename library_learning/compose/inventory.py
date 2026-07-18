@@ -42,15 +42,15 @@ class Module:
 @dataclass
 class Inventory:
     modules: List[Module]
+    _by_id: Dict[str, Module] = field(default=None, repr=False, compare=False)
 
     def ids(self):
         return [m.id for m in self.modules]
 
     def module(self, mid):
-        for m in self.modules:
-            if m.id == mid:
-                return m
-        raise KeyError(mid)
+        if self._by_id is None:
+            self._by_id = {m.id: m for m in self.modules}
+        return self._by_id[mid]
 
 
 def parse_inventory(obj):

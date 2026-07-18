@@ -6,14 +6,8 @@ from pathlib import Path
 from .fitting import fit_model_on_pids
 from .search import (enumerate_candidates, greedy_search, score_candidates,
                      select_winner)
-from ..loading import (extract_unpack_names, function_name_and_args,
-                       load_original_code, parse_bounds, strip_fences)
-
-
-def _bounds_for(code):
-    names = extract_unpack_names(code)
-    b = parse_bounds(code, names)
-    return [b[n] for n in names]
+from ..loading import (bounds_for_code, function_name_and_args,
+                       load_original_code, strip_fences)
 
 
 def reconstruct_participants(inventory, target, group_dir, pids, out_dir,
@@ -23,12 +17,13 @@ def reconstruct_participants(inventory, target, group_dir, pids, out_dir,
         (Path(group_dir) / "models" / "best_model_0.txt").read_text())
     group_fname, _ = function_name_and_args(group_src)
 
+    cands = enumerate_candidates(inventory) if mode == "exhaustive" else None
+
     results = []
     for pid in pids:
         pid_dir = out_dir / "reconstruction" / ("p%d" % pid)
         pid_dir.mkdir(parents=True, exist_ok=True)
         if mode == "exhaustive":
-            cands = enumerate_candidates(inventory)
             recs = score_candidates(inventory, target, [pid], cands, pid_dir)
         else:
             recs = greedy_search(inventory, target, [pid], pid_dir)
@@ -36,9 +31,9 @@ def reconstruct_participants(inventory, target, group_dir, pids, out_dir,
 
         own_code = load_original_code(target, pid)
         own_fname, _ = function_name_and_args(own_code)
-        own = fit_model_on_pids(own_code, target, [pid], _bounds_for(own_code),
+        own = fit_model_on_pids(own_code, target, [pid], bounds_for_code(own_code),
                                 tag="recon:individual", func_name=own_fname)
-        grp = fit_model_on_pids(group_src, target, [pid], _bounds_for(group_src),
+        grp = fit_model_on_pids(group_src, target, [pid], bounds_for_code(group_src),
                                 tag="recon:group", func_name=group_fname)
         results.append({
             "pid": pid,
