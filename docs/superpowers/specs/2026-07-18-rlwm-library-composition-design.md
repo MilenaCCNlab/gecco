@@ -14,10 +14,16 @@
 This is the RLWM replication of the two-step library-composition run
 (`docs/superpowers/specs/2026-07-17-library-composition-design.md`). Group gecco
 evolved a single RL+WM program (`results/rlwm/models/best_model_0.txt`, 5 params)
-from prompt participants **1–3** and eval participants **4–13** (splits `prompt
-[1:4]`, `eval [4:14]`, `test [14:]` over sorted ids). Individual gecco programs
-exist for **30 of 78** participants only: pids **0–14** (young) and **36–50**
-(old); the remaining 48 held-out pids have no individual fits.
+from prompt participants **1–3** and eval participants **10–19** (splits `prompt
+[1:4]`, `eval [10:20]`, `test [14:]` over sorted ids in `config/rlwm.yaml` —
+note the config's eval window **overlaps** its test split on pids 14–19; those
+pids are treated as group-seen and excluded from our test pool). Individual
+gecco programs exist for **30 of 78** participants only: pids **0–14** (young)
+and **36–50** (old).
+
+**LLM usage:** the original gecco programs were generated with GPT-5 (data
+provenance only). This pipeline makes **no OpenAI calls** — every LLM call is
+`gemini-3.1-pro-preview` (user decision).
 
 **Question:** same as two-step — can a library of cognitive modules extracted
 from the individual programs of exactly the participants group gecco saw beat
@@ -30,22 +36,29 @@ doubles as *does a young-derived module library span older adults?*
 
 | Set | Participants | Used for |
 |---|---|---|
-| Library seed | 1–13 (13 subjects, all young, all individually fitted) | Module extraction (+ seed reconstruction gate) |
-| Composition validation | 4–13 (group gecco's eval set) | Selecting the single composed program (mean BIC) |
-| Library reconstruction | 5 of the held-out fitted pool, age-stratified, deterministic | Per-participant best composition — does the library span unseen individuals? |
-| Final test | remaining 11 of the held-out fitted pool | The ONLY set results are claimed on |
+| Library seed | {1,2,3} ∪ ({10–19} ∩ fitted) = **{1,2,3,10–14}** (8 subjects, all young) | Module extraction (+ seed reconstruction gate) |
+| Composition validation | 10–19 (group gecco's eval set; fitting needs data only) | Selecting the single composed program (mean BIC) |
+| Library reconstruction | 7 of the held-out fitted pool, age-stratified, deterministic | Per-participant best composition — does the library span unseen individuals? |
+| Final test | remaining 15 of the held-out fitted pool | The ONLY set results are claimed on |
 
-- **Held-out fitted pool** = group test pids ∩ individually fitted =
-  **{14, 36–50}** (16 subjects: 1 young, 15 old). The other 48 held-out pids
-  are unused (no individual-gecco ceiling available); evaluating composed vs
-  group on all 64 held-out pids is a disclosed follow-up, not part of this run.
+- **Group-seen pids** = prompt ∪ eval = {1,2,3} ∪ {10–19}. Eval pids
+  **15–19 have no individual fits** and therefore cannot seed the library —
+  disclosed in `splits.json` (`seed_pids_excluded_unfitted`). Pids 14–19 sit
+  in both the config's eval and test windows; they are treated as group-seen
+  and excluded from the test pool.
+- **Held-out fitted pool** (user decision: reclaim unused young) = fitted
+  pids never seen by group gecco = **{0, 4–9} ∪ {36–50}** (22 subjects:
+  7 young, 15 old). Pids 0 and 4–9 are outside the config's declared test
+  split but were consumed by neither prompt nor eval — leak-free, disclosed
+  deviation from the two-step "held-out ⊆ config test" convention. The 48
+  unfitted held-out pids are unused (no individual-gecco ceiling); evaluating
+  composed vs group on them is a disclosed follow-up, not part of this run.
 - **Reconstruction assignment** is deterministic: sort the pool by
-  `(age, pid)`, take indices `i % 3 == 1` → 5 reconstruction pids, 11 test
+  `(age, pid)`, take indices `i % 3 == 1` → 7 reconstruction pids, 15 test
   pids (~1:2 ratio as in two-step). Written once to `splits.json` with age
   mean/std per subset as a balance check.
-- **Disclosed limitation:** 5/11 subjects is underpowered relative to
-  two-step's 10/21; and the recon set will be all-old while test contains the
-  single young pid 14. Both facts get stated in RESULTS.md.
+- **Disclosed limitation:** 8 seeds and 7/15 recon/test subjects is smaller
+  than two-step's 12 seeds and 10/21; stated in RESULTS.md.
 
 ## Stage 1 — Module extraction (Gemini-curated, miner-grounded, fully logged)
 
@@ -57,7 +70,7 @@ Identical protocol to two-step, RLWM-specific content:
 - **Logging:** every call → `llm_log/call_{NNN}.json` (model, modelVersion,
   generationConfig, full prompt, full raw response, timestamp). Manual repairs
   recorded in `llm_log/MANUAL_EDITS.md`.
-- **LLM step structure:** (1) one annotation call per seed program (13 calls);
+- **LLM step structure:** (1) one annotation call per seed program (8 calls);
   (2) one merge call over all annotations + mining report → deduplicated module
   inventory. Deterministic Python validates and renders; ≤3 repair rounds.
 - **Pid coercion at the boundary:** LLM-returned JSON pids arrive as strings —
@@ -87,13 +100,13 @@ Q update, NLL accumulation. Backbone parameters: `learning_rate` [0, 1],
   Some seed models index `-2` unguarded; skipping only *lowers* the
   reconstructed NLL, so the fidelity gate direction is safe. Noted in
   RESULTS.md as a protocol difference between refits and original fits.
-- The exact backbone text is finalized during implementation against the 13
+- The exact backbone text is finalized during implementation against the 8
   seed programs and `mining.py`'s shared-fragment report **before any Gemini
   call**; the annotation prompt's "backbone machinery — do not list as
   mechanisms" list must name exactly what the frozen backbone contains.
 
 **Extraction quality gates** (unchanged from two-step): seed reconstruction
-gate (recomposed seed BIC ≤ stored individual BIC + 15, all 13 seeds,
+gate (recomposed seed BIC ≤ stored individual BIC + 15, all 8 seeds,
 `reconstruction_report.json`), slot-expressibility escape hatch, coverage
 audit, bounds cross-check against source docstrings, module state isolation
 (`{id}_` prefix rule + AST check, all module pairs smoke-tested).
@@ -198,7 +211,7 @@ Two-step modules stay byte-identical; RLWM gets parallel siblings in
 1. RLWM backbone renders, execs, and smoke-fits (empty candidate) on pid 1
    before any Gemini call; smoke data includes `-2` missed trials.
 2. Backbone-only candidate behaves like a plain RL+WM mixture (sanity).
-3. Seed reconstruction gate 13/13 before search.
+3. Seed reconstruction gate 8/8 before search.
 4. Every rendered candidate smoke-checked before fitting; `compose-search`
    exits nonzero on any fit failure.
 5. `splits.json` age balance reported (mean/std per subset).
