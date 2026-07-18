@@ -78,3 +78,11 @@ def test_audit_coverage():
                                         {"name": "decay"}]}}
     errors = audit_coverage(obj, annotations)
     assert len(errors) == 1 and "decay" in errors[0]
+
+
+def test_audit_coverage_string_pids():
+    obj = {"modules": [], "coverage": [
+        {"pid": "1", "mechanism": "stickiness", "module": "stick",
+         "decision": "mapped"}]}
+    annotations = {"1": {"mechanisms": [{"name": "stickiness"}]}}
+    assert audit_coverage(obj, annotations) == []

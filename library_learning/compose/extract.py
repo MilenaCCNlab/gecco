@@ -184,8 +184,12 @@ def validate_inventory_obj(obj):
 
 def audit_coverage(obj, annotations):
     """Every annotated mechanism (pid, name) must appear in obj['coverage']."""
-    covered = {(c.get("pid"), c.get("mechanism"))
-               for c in obj.get("coverage", [])}
+    covered = set()
+    for c in obj.get("coverage", []):
+        try:
+            covered.add((int(c.get("pid")), c.get("mechanism")))
+        except (TypeError, ValueError):
+            continue
     errors = []
     for pid, ann in annotations.items():
         for mech in ann.get("mechanisms", []):

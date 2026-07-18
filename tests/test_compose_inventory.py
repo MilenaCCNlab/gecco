@@ -59,3 +59,17 @@ def test_excludes():
     inv = parse_inventory(obj)
     ok, why = compatible(inv, ["mixture_w", "stick"])
     assert not ok and "excludes" in why
+
+
+def test_provenance_string_coercion():
+    obj = make_obj()
+    obj["modules"][0]["provenance"] = ["1", "5"]
+    inv = parse_inventory(obj)
+    assert inv.module("mixture_w").provenance == [1, 5]
+
+
+def test_provenance_non_integer_rejected():
+    obj = make_obj()
+    obj["modules"][0]["provenance"] = ["p1"]
+    with pytest.raises(InventoryError):
+        parse_inventory(obj)

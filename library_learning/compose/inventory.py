@@ -85,10 +85,16 @@ def parse_inventory(obj):
                 errors.append("%s: unknown override slot '%s'" % (mid, s))
         if not slots and not overrides:
             errors.append("%s: module has no code (empty slots and overrides)" % mid)
+        provenance = []
+        for p in raw.get("provenance", []):
+            try:
+                provenance.append(int(p))
+            except (TypeError, ValueError):
+                errors.append("%s: non-integer provenance entry %r" % (mid, p))
         modules.append(Module(
             id=mid, name=raw.get("name", mid), description=raw.get("description", ""),
             params=params, slots=slots, overrides=overrides,
-            provenance=list(raw.get("provenance", [])),
+            provenance=provenance,
             excludes=list(raw.get("excludes", []))))
     for m in modules:
         for ex in m.excludes:
