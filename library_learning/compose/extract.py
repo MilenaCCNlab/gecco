@@ -314,10 +314,19 @@ def render_modules_md(inv, seed_pids):
     return "\n".join(lines)
 
 
+def resolve_splits(target, group_dir, out_dir):
+    """Honor a pre-provisioned splits.json (e.g. manifest-derived splits that
+    make_splits cannot express); otherwise derive from the group config."""
+    path = Path(out_dir) / "splits.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return make_splits(target, group_dir, out_dir=out_dir)
+
+
 def run_extraction(target, group_dir, out_dir, client=None):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    splits = make_splits(target, group_dir, out_dir=out_dir)
+    splits = resolve_splits(target, group_dir, out_dir)
     seed_pids = splits["seed_pids"]
     client = client or GeminiClient(log_dir=out_dir / "llm_log")
 
