@@ -106,6 +106,16 @@ def main():
     pooled_gain = {m: grp_mean(g, pids) for m, g in gains.items()}
     top_add = sorted(pooled_gain, key=pooled_gain.get, reverse=True)[:N_ADD]
 
+    # v2 selection: modules where Low vs High OCI differ most, with a floor so
+    # at least one group shows a reasonable improvement (else a big % difference
+    # between two tiny gains would dominate).
+    FLOOR = 8.0
+    add_low = {m: grp_mean(gains[m], by_t["Low"]) for m in gains}
+    add_high = {m: grp_mean(gains[m], by_t["High"]) for m in gains}
+    reasonable = [m for m in gains if max(add_low[m], add_high[m]) >= FLOOR]
+    diff_add = sorted(reasonable, key=lambda m: abs(add_high[m] - add_low[m]),
+                      reverse=True)[:N_ADD]
+
     # removals: keep only components whose removal IMPROVES fit (pooled full-abl > 0)
     rm_modules = [m for m in BASE if have_rem and grp_mean(rem[m], pids) > 0]
     n_rm = len(rm_modules)
@@ -170,14 +180,23 @@ def main():
     fig.savefig(FIG / "library_component_ledger_overall.pdf")
     plt.close(fig)
 
-    # ---- poster-ready Low-vs-High OCI ledger ----
-    _poster(rows, rm_modules, top_add, rem, gains, by_t)
+    # ---- poster-ready Low-vs-High OCI ledgers (two selections) ----
+    _poster(rm_modules, top_add, rem, gains, by_t,
+            "library_component_ledger_poster",
+            "Library component ledger, by OCI group (test participants)")
+    _poster(rm_modules, diff_add, rem, gains, by_t,
+            "library_component_ledger_poster_ocidiff",
+            "Mechanisms most different between Low and High OCI")
 
     print("removals present:", have_rem)
     print("top added modules (pooled gain over backbone):")
     for m in top_add:
         print("  %-34s %+.1f" % (m, pooled_gain[m]))
-    print("saved library_component_ledger{,_overall,_poster}.{png,pdf}")
+    print("\nv2: modules where Low/High OCI differ most (floor %.0f):" % FLOOR)
+    for m in diff_add:
+        print("  %-34s low %+.1f  high %+.1f  |diff| %.1f"
+              % (m, add_low[m], add_high[m], abs(add_high[m] - add_low[m])))
+    print("saved library_component_ledger{,_overall,_poster,_poster_ocidiff}.{png,pdf}")
 
 
 def _clean(label):
@@ -188,13 +207,15 @@ def _npos(d, grp):  # count of participants in grp with positive contribution
     return sum(1 for p in grp if p in d and d[p] > 0)
 
 
-def _poster(rows, rm_modules, top_add, rem, gains, by_t):
+def _poster(rm_modules, add_modules, rem, gains, by_t, fname, title):
     LOW_C, HIGH_C = "#86bce6", "#17456f"          # low = lighter, high = darker
     BAND_RM, BAND_ADD, GRID = "#f3f5f4", "#eef2f7", "#e1e0d9"
     n_rm = len(rm_modules)
     nlow, nhigh = len(by_t["Low"]), len(by_t["High"])
-    raw = {**{m: rem[m] for m in rm_modules}, **{m: gains[m] for m in top_add}}
-    order = rm_modules + top_add  # top-to-bottom
+    raw = {**{m: rem[m] for m in rm_modules}, **{m: gains[m] for m in add_modules}}
+    order = rm_modules + add_modules  # top-to-bottom
+    rows = ([(RM_LABEL[m], "rm") for m in rm_modules]
+            + [(module_pretty(m), "add") for m in add_modules])
     yp = np.arange(len(rows))[::-1]
     hh = 0.36
     fig, ax = plt.subplots(figsize=(11.0, 0.62 * len(rows) + 1.6))
@@ -207,7 +228,7 @@ def _poster(rows, rm_modules, top_add, rem, gains, by_t):
     all_vals = [grp_mean(raw[m], by_t[t]) for m in order for t in GROUPS]
     xmax = max(all_vals) * 1.18
     xmin = min(min(all_vals), 0) - 0.04 * xmax - 6
-    for i, (m, (lbl, kind, vals)) in enumerate(zip(order, rows)):
+    for i, (m, (lbl, kind)) in enumerate(zip(order, rows)):
         yi = yp[i]
         gl, gh = grp_mean(raw[m], by_t["Low"]), grp_mean(raw[m], by_t["High"])
         cl, ch = _npos(raw[m], by_t["Low"]), _npos(raw[m], by_t["High"])
@@ -225,6 +246,7 @@ def _poster(rows, rm_modules, top_add, rem, gains, by_t):
         ax.axvline(gx, color=GRID, lw=0.8, zorder=0)
     ax.set_yticks(yp); ax.set_yticklabels([_clean(r[0]) for r in rows], fontsize=12.5)
     ax.set_xlim(xmin, xmax); ax.set_ylim(bot, top)
+    ax.set_title(title, fontsize=13)
     ax.set_xlabel("BIC improvement contributed   ( +  better fit )", fontsize=13.5)
     ax.tick_params(axis="y", length=0); ax.tick_params(axis="x", labelsize=11.5)
     if n_rm and n_rm < len(rows):
@@ -239,8 +261,8 @@ def _poster(rows, rm_modules, top_add, rem, gains, by_t):
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     fig.tight_layout()
-    fig.savefig(FIG / "library_component_ledger_poster.png", dpi=400)
-    fig.savefig(FIG / "library_component_ledger_poster.pdf")
+    fig.savefig(FIG / (fname + ".png"), dpi=400)
+    fig.savefig(FIG / (fname + ".pdf"))
     plt.close(fig)
 
 
