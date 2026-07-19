@@ -70,7 +70,19 @@ rationale.
     (expected/benign, results use guarded hybrid); (c) individual-150 config
     has stale dead splits; (d) Task 6 gate must check pids 0-49 specifically,
     not total best-model count. None blocks the run.
-12. **Monitor pattern was too broad (2026-07-18).** Benign numpy
+12. **Transient Gemini 503 killed chunk 0:25 at pid 7 (2026-07-18 ~22:20).**
+    `google.genai.errors.ServerError: 503 UNAVAILABLE` after tenacity retries
+    exhausted → process exit 1. Completed pids 0-6; other 5 chunks unaffected.
+    Built a per-pid resilient driver (scratchpad `run_individual_resilient.sh`):
+    runs each pid singly, skips those with an existing best_model, retries each
+    up to 6× with 45s backoff — isolates transient failures to one pid and never
+    overwrites a good model. Relaunched pids 7-24 with it (LAKELAB). Posture for
+    the still-running 5 chunks: reactive — a 503 death re-invokes via the
+    background-failure notification; resume that chunk's remaining pids with the
+    same driver. (Monitor's `429`/`503 ` numeric tokens also matched BIC values
+    like 429.57 → replaced with error-string-only pattern: ServerError,
+    google.genai.errors, RESOURCE_EXHAUSTED, Traceback, etc.)
+13. **Monitor pattern was too broad (2026-07-18).** Benign numpy
     `RuntimeWarning: invalid value encountered in divide` / `overflow
     encountered in exp` (unstable softmax in an LLM-proposed model during
     fitting) tripped the monitor's `invalid` grep — false alarm; chunk 100:125
