@@ -17,7 +17,8 @@ from .inventory import Inventory, InventoryError
 from .inventory_rlwm import compatible, parse_inventory
 from .render_rlwm import candidate_params, render_candidate, smoke_check
 from .splits_rlwm import make_splits
-from ..loading import load_original_code, load_stored_bic
+from ..loading import (bounds_for_code, function_name_and_args,
+                       load_original_code, load_stored_bic)
 from ..mining import mine_fragments, render_mining_report
 
 PROMPT_ANNOTATE = '''You are a renowned cognitive scientist analyzing computational models of a reinforcement learning working memory task (RLWM, Collins & Frank). On each trial the participant sees a stimulus (state) and chooses one of 3 actions; each state has one fixed correct action (reward 1, else 0). States come in blocks with set size 3 (low load) or 6 (high load); states reset between blocks. Below is a Python cognitive model that was fit to participant {pid}'s behavior.
@@ -159,7 +160,14 @@ def validate_inventory_obj(obj):
 def reconstruction_gate(inv, obj, target, seed_pids, out_dir,
                         tol=RECONSTRUCTION_GATE_TOL):
     """Fidelity gate: recompose each seed from its provenance modules, fit to
-    that seed's own data, compare BIC to the stored individual-gecco BIC."""
+    that seed's own data, compare BIC to the seed's ORIGINAL program refit
+    under the identical seeded protocol.
+
+    Unlike two-step, the stored best_bic_0_participant*.json values are NOT
+    a valid reference here: refitting the original programs on the full 324
+    trials lands +100..+220 BIC above them uniformly (the gecco RLWM run
+    recorded BICs on a different data span). Stored values are still written
+    to the report for disclosure."""
     report, failures = [], []
     for pid in seed_pids:
         mods, dropped = [], []
@@ -174,17 +182,23 @@ def reconstruction_gate(inv, obj, target, seed_pids, out_dir,
         src = render_candidate(inv, mods)
         bounds = [p.bounds for p in candidate_params(inv, mods)]
         fits = fit_model_on_pids(src, target, [pid], bounds, tag="recon")
+        code = load_original_code(target, pid)
+        fname, _ = function_name_and_args(code)
+        refit = fit_model_on_pids(code, target, [pid], bounds_for_code(code),
+                                  tag="recon:original", func_name=fname)
         stored = load_stored_bic(target, pid)
-        delta = (fits[pid]["bic"] - stored) if stored is not None else None
+        delta = fits[pid]["bic"] - refit[pid]["bic"]
         entry = {"pid": pid, "modules": mods, "dropped": dropped,
-                 "recon_bic": fits[pid]["bic"], "stored_bic": stored,
-                 "delta": delta}
+                 "recon_bic": fits[pid]["bic"],
+                 "original_refit_bic": refit[pid]["bic"],
+                 "stored_bic": stored, "delta": delta}
         report.append(entry)
-        if delta is not None and delta > tol:
+        if delta > tol:
             failures.append(
-                "seed %d reconstruction BIC %.2f exceeds stored %.2f by %.2f "
-                "(> %.1f): extraction likely distorted a mechanism (modules %s)"
-                % (pid, fits[pid]["bic"], stored, delta, tol, mods))
+                "seed %d reconstruction BIC %.2f exceeds original refit %.2f "
+                "by %.2f (> %.1f): extraction likely distorted a mechanism "
+                "(modules %s)"
+                % (pid, fits[pid]["bic"], refit[pid]["bic"], delta, tol, mods))
     Path(out_dir, "reconstruction_report.json").write_text(
         json.dumps(report, indent=2))
     return failures
