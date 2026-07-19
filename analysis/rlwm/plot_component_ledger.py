@@ -1,0 +1,117 @@
+"""Component ledger vs the canonical baseline (plot-span, 30 participants).
+
+Every component that separates the library-composed model from the canonical
+RLWM baseline, with its signed BIC contribution per age group (+ = improves
+fit / lowers BIC for that group):
+
+  REMOVED from baseline (leave-one-out ablation, full - ablation):
+    capacity scaling, uniform lapse, load-independent WM decay
+  ADDED by the library (single-module gain over the backbone):
+    graded/asymmetric WM update, choice habits, etc.
+
+Inputs: baseline_ablation_bics.json (removals) + per-participant search logs
+(additions). Removals and additions are on the same BIC scale but come from
+different references (full baseline vs backbone); the divider marks that.
+"""
+import json
+from collections import defaultdict
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[2]
+FIG_DIR = Path(__file__).resolve().parent / "figures"
+LC = ROOT / "results/rlwm_individual/library_composition"
+SEARCH = Path("/private/tmp/claude-501/-Users-akshay-projects-gecco/"
+              "420634c3-f29d-483d-ab87-6f2cf48ae8c1/scratchpad/perpid_plotspan")
+
+YOUNG_C, OLD_C, INK = "#40baec", "#708190", "#0b0b0b"
+plt.rcParams.update({
+    "font.family": "sans-serif", "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
+    "font.size": 11, "axes.edgecolor": INK, "axes.labelcolor": INK,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "xtick.color": INK, "ytick.color": INK, "figure.dpi": 150,
+    "savefig.dpi": 300, "savefig.bbox": "tight", "savefig.facecolor": "white",
+    "pdf.fonttype": 42,
+})
+
+PIDS = list(range(15)) + list(range(36, 51))
+young = [p for p in PIDS if p < 36]
+old = [p for p in PIDS if p >= 36]
+
+# ---- removals (leave-one-out on baseline) ----
+abl = json.load(open(LC / "baseline_ablation_bics.json"))
+def rem(name, grp):
+    return float(np.mean([abl["full"][str(p)] - abl[name][str(p)] for p in grp]))
+
+# ---- additions (single-module gain over backbone) ----
+gains = defaultdict(dict)
+for pdir in sorted(SEARCH.iterdir()):
+    if not (pdir / "search_log.jsonl").exists():
+        continue
+    pid = int(pdir.name[1:])
+    recs = [json.loads(l) for l in (pdir / "search_log.jsonl").read_text().splitlines()]
+    bb = next(r["mean_bic"] for r in recs if r["candidate_id"] == "backbone")
+    for r in recs:
+        if len(r["module_ids"]) == 1:
+            gains[r["module_ids"][0]][pid] = bb - r["mean_bic"]
+def add(m, grp):
+    return float(np.mean([gains[m][p] for p in grp if p in gains[m]]))
+
+# ledger: (label, kind, young, old)
+rows = [
+    ("REMOVE capacity scaling", "rm", rem("no_capacity", young), rem("no_capacity", old)),
+    ("REMOVE uniform lapse", "rm", rem("no_lapse", young), rem("no_lapse", old)),
+    ("REMOVE load-indep. WM decay", "rm", rem("no_decay", young), rem("no_decay", old)),
+    ("ADD choice stickiness/persev.", "add", add("action_stickiness", young), add("action_stickiness", old)),
+    ("ADD graded WM update/decay", "add", add("unified_wm_update_decay", young), add("unified_wm_update_decay", old)),
+    ("ADD arbitration-scaled WM upd.", "add", add("arbitration_scaled_wm_update", young), add("arbitration_scaled_wm_update", old)),
+    ("ADD asymmetric WM update", "add", add("wm_asymmetric_update_p1", young), add("wm_asymmetric_update_p1", old)),
+]
+
+labels = [r[0] for r in rows]
+y = np.arange(len(rows))[::-1]
+h = 0.38
+fig, ax = plt.subplots(figsize=(7.6, 4.4))
+for yi, (_, kind, gy, go) in zip(y, rows):
+    ax.barh(yi + h/2, gy, height=h, color=YOUNG_C,
+            edgecolor="white", zorder=2)
+    ax.barh(yi - h/2, go, height=h, color=OLD_C, edgecolor="white", zorder=2)
+    for val, off in [(gy, h/2), (go, -h/2)]:
+        sgn = "+" if val >= 0 else "−"
+        ax.text(val + (0.3 if val >= 0 else -0.3), yi + off,
+                "%s%.1f" % (sgn, abs(val)), va="center",
+                ha="left" if val >= 0 else "right", fontsize=7.5, color=INK)
+ax.axvline(0, color=INK, lw=1.0)
+# divider between removals (top 3) and additions
+ax.axhline(y[3] + 0.5, color="0.6", lw=0.8, ls=":")
+ax.text(ax.get_xlim()[1], y[0] + 0.55, "removed from baseline (+ = removal lowers BIC)",
+        ha="right", fontsize=8, color="#4a5560", style="italic")
+ax.text(ax.get_xlim()[1], y[3] - 0.45, "added by library (+ = addition lowers BIC vs backbone)",
+        ha="right", fontsize=8, color="#4a5560", style="italic")
+ax.set_yticks(y)
+ax.set_yticklabels(labels, fontsize=9)
+ax.set_xlabel("BIC improvement contributed  (+ better fit)", fontsize=10)
+ax.set_title("Component ledger vs canonical baseline, by age group", fontsize=11.5)
+ax.tick_params(axis="y", length=0)
+ax.legend(handles=[Patch(facecolor=YOUNG_C, label="young (18–36, n=15)"),
+                   Patch(facecolor=OLD_C, label="old (46–85, n=15)")],
+          loc="lower right", fontsize=8.5, frameon=False)
+fig.tight_layout()
+fig.savefig(FIG_DIR / "library_component_ledger.png")
+fig.savefig(FIG_DIR / "library_component_ledger.pdf")
+plt.close(fig)
+
+print("removals (full-ablation, +=removal helps):")
+for lbl, kind, gy, go in rows:
+    if kind == "rm":
+        print("  %-30s young %+.1f  old %+.1f" % (lbl, gy, go))
+print("additions (gain over backbone):")
+for lbl, kind, gy, go in rows:
+    if kind == "add":
+        print("  %-30s young %+.1f  old %+.1f" % (lbl, gy, go))
+print("saved library_component_ledger")
