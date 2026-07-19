@@ -42,9 +42,10 @@ PIDS = list(range(15)) + list(range(36, 51))
 N_SIM_REPS = 20
 N_ITERS = 9
 
-BLACK, GRAY, DBLUE, BLUE = "#1a1a1a", "#708190", "#2b6cb8", "#40baec"
+BLACK, TEAL, GRAY, BLUE = "#1a1a1a", "#008181", "#708190", "#40baec"
 INK, GRID = "#0b0b0b", "#e1e0d9"
-LIGHT = {BLACK: "#b3b3b3", GRAY: "#bfc7ce", DBLUE: "#9dc4ea", BLUE: "#a9e0f6"}
+LIGHT = {BLACK: "#b3b3b3", TEAL: "#9dcece", GRAY: "#bfc7ce", BLUE: "#a9e0f6"}
+LIT_SIM_CSV = ANALYSIS_DIR / "rlwm_literature_model_simulated.csv"
 
 plt.rcParams.update({
     "font.family": "sans-serif", "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
@@ -196,6 +197,19 @@ def library_curves(df, inv, per_pid_modules):
     return np.array(ns3), np.array(ns6)
 
 
+def baseline_curves(lit):
+    """RLWM literature-model simulated learning curves (same 30 pids)."""
+    ns3, ns6 = [], []
+    for p in PIDS:
+        d = lit[lit.participant == p]
+        if "blocks" in d.columns:
+            d = d[d.blocks < 5]
+        d = d[d.rewards >= 0]
+        c3, c6 = learning_curves(d)
+        ns3.append(c3); ns6.append(c6)
+    return np.array(ns3), np.array(ns6)
+
+
 def group_gecco_curves():
     """Pooled young+old GeCCo-group PPC curves saved by the main pipeline."""
     ns3 = pd.concat([pd.read_csv(ANALYSIS_DIR / "ns3_young_group_age.csv", index_col=0),
@@ -238,17 +252,20 @@ def main():
     perpid = json.load(open(LC / "perpid_plotspan_results.json"))
     indiv_mods = {r["pid"]: r["modules"] for r in perpid}
 
-    print("simulating human / gecco(group) / library(individual) curves...")
+    print("simulating human / RLWM / gecco(group) / library(individual) curves...")
     h3, h6 = human_curves(df)
+    b3, b6 = baseline_curves(pd.read_csv(LIT_SIM_CSV))
     gg3, gg6 = group_gecco_curves()
     i3, i6 = library_curves(df, inv_full, indiv_mods)
-    for lbl, c3, c6 in [("human", h3, h6), ("gecco-group", gg3, gg6), ("lib-indiv", i3, i6)]:
+    for lbl, c3, c6 in [("human", h3, h6), ("RLWM", b3, b6),
+                        ("gecco-group", gg3, gg6), ("lib-indiv", i3, i6)]:
         print("  %-12s ss3 final %.2f | ss6 final %.2f"
               % (lbl, np.nanmean(c3, 0)[-1], np.nanmean(c6, 0)[-1]))
 
-    panels = [("Humans", h3, h6, BLACK), ("GeCCo\n(group)", gg3, gg6, GRAY),
+    panels = [("Humans", h3, h6, BLACK), ("RLWM", b3, b6, TEAL),
+              ("GeCCo\n(group)", gg3, gg6, GRAY),
               ("Library\n(individual)", i3, i6, BLUE)]
-    fig, axes = plt.subplots(1, 3, figsize=(6.6, 3.0), sharey=True)
+    fig, axes = plt.subplots(1, 4, figsize=(8.4, 2.9), sharey=True)
     for i, (ax, (title, ns3, ns6, color)) in enumerate(zip(axes, panels)):
         draw(ax, ns3, ns6, color, ylabel=(i == 0), xlabel=(i == 0), annotate=(i == 0))
         ax.set_title(title)
