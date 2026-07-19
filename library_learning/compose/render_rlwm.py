@@ -132,8 +132,8 @@ def render_candidate(inventory, module_ids):
 {probs_extra}
                 log_loss -= np.log(probs[a] + eps)
                 delta = r - q[s, a]
-                {rl_update}
-                {wm_update}
+{rl_update}
+{wm_update}
 {update_extra}
 {post_trial}
     return log_loss
@@ -147,8 +147,10 @@ def render_candidate(inventory, module_ids):
         wm_values=overrides["wm_values"],
         wm_temp=overrides["wm_temp"],
         mix_weight=overrides["mix_weight"],
-        rl_update=overrides["rl_update"],
-        wm_update=overrides["wm_update"],
+        # statement overrides are block-indented (dedent + reindent) so
+        # multi-line statements (e.g. if/else WM updates) stay syntactic
+        rl_update=_indent(overrides["rl_update"], 4),
+        wm_update=_indent(overrides["wm_update"], 4),
         init=block("init", 1),
         block_init=block("block_init", 2),
         pre_choice=block("pre_choice", 4),

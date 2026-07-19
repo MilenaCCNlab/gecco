@@ -65,6 +65,19 @@ def test_missed_trials_skip_likelihood():
     assert abs(nll - base) < 1e-12
 
 
+def test_multiline_update_overrides_render():
+    # rl_update/wm_update overrides are statements and may span lines
+    # (if/else WM updates were the norm in the first extraction run).
+    inv = parse_inventory({"modules": [{
+        "id": "wm_two_line", "name": "t", "description": "d", "params": [],
+        "slots": {},
+        "overrides": {
+            "rl_update": "if r > 0:\n    q[s, a] += learning_rate * delta\nelse:\n    q[s, a] += 0.5 * learning_rate * delta",
+            "wm_update": "if r > 0.5:\n    w[s, a] = 1.0\nelse:\n    w[s, a] = 0.0"},
+        "provenance": [1], "excludes": []}]})
+    assert np.isfinite(smoke_check(render_candidate(inv, ["wm_two_line"])))
+
+
 def test_bad_snippet_fails_smoke():
     inv = parse_inventory({"modules": [
         {"id": "bad", "name": "bad", "description": "d", "params": [],
