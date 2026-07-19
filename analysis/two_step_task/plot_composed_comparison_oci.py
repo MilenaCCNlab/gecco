@@ -71,14 +71,15 @@ def load():
     return data, tert, pids
 
 
-def bar_panel(ax, means, errs, colors, labels, title=None):
+def bar_panel(ax, means, errs, colors, labels, title=None, ylim=None):
     x = np.arange(len(means))
     ax.bar(x, means, width=0.75, color=colors, zorder=2)
     ax.errorbar(x, means, yerr=errs, fmt="o", markersize=4, color="black",
                 ecolor="black", elinewidth=1.4, capsize=0, zorder=3)
-    lo = np.floor((min(means) - max(errs)) / 20) * 20 - 10
-    hi = np.ceil((max(means) + max(errs)) / 20) * 20
-    ax.set_ylim(lo, hi)
+    if ylim is None:
+        ylim = (np.floor((min(means) - max(errs)) / 20) * 20 - 10,
+                np.ceil((max(means) + max(errs)) / 20) * 20)
+    ax.set_ylim(*ylim)
     ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9)
     ax.tick_params(axis="x", length=0)
     ax.set_ylabel("Test BIC")
@@ -101,12 +102,21 @@ def main():
     plt.close(fig)
 
     # ---- by OCI tertile ----
+    # precompute one shared y-range so sharey panels never clip a low bar
+    per_t = {}
+    for t in TERTILES:
+        grp = [p for p in pids if tert[p] == t]
+        per_t[t] = ([np.mean([data[l][p] for p in grp]) for l in labels],
+                    [sem([data[l][p] for p in grp]) for l in labels], len(grp))
+    all_m = [v for m, e, _ in per_t.values() for v in m]
+    all_e = [v for m, e, _ in per_t.values() for v in e]
+    shared_ylim = (np.floor((min(all_m) - max(all_e)) / 20) * 20 - 10,
+                   np.ceil((max(all_m) + max(all_e)) / 20) * 20)
     fig, axes = plt.subplots(1, 3, figsize=(9.6, 3.3), sharey=True)
     for ax, t in zip(axes, TERTILES):
-        grp = [p for p in pids if tert[p] == t]
-        m = [np.mean([data[l][p] for p in grp]) for l in labels]
-        e = [sem([data[l][p] for p in grp]) for l in labels]
-        bar_panel(ax, m, e, colors, ["" for _ in labels], title="%s OCI (n=%d)" % (t, len(grp)))
+        m, e, n = per_t[t]
+        bar_panel(ax, m, e, colors, ["" for _ in labels],
+                  title="%s OCI (n=%d)" % (t, n), ylim=shared_ylim)
         if ax is not axes[0]:
             ax.set_ylabel("")
     # shared legend

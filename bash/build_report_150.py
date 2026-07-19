@@ -4,6 +4,7 @@ renders 4 paper-style figures (matplotlib, base64-embedded) and one HTML file.
 Run AFTER Task 9 eval:  PYTHONPATH=<repo> gecco-env/bin/python bash/build_report_150.py
 """
 import base64
+import datetime
 import io
 import json
 from pathlib import Path
@@ -124,7 +125,7 @@ table{border-collapse:collapse;margin:.5rem 0}td,th{border:1px solid #ccc;paddin
 code{background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:.85em}.fig{margin:1rem 0}.k{color:#008181;font-weight:600}</style>
 <h1>Library learning &amp; composition — two-step psychiatry (OCI-balanced, 150 participants)</h1>
 <p>Generated %s. Gemini generator <code>gemini-3.1-pro-preview</code>. All results on the 50 held-out <b>test</b> participants; the composed winners were frozen on the 50 <b>validation</b> participants before test data was touched.</p>
-""" % ("2026-07-19",)]
+""" % (datetime.date.today().isoformat(),)]
 
     html.append("<h2>1 · What was run</h2><p>150 Gillan-2016 participants, OCI-tertile-stratified (cuts %.0f/%.0f), split 50 train / 50 validation / 50 test (shuffled, no index–OCI confound). Individual GeCCo fit all 150; group GeCCo used 5 in-context + 50 validation. A %d-module library was extracted from the 50 train programs and composed two ways: <b>bare-bone</b> (greedy from backbone) and <b>hybrid-base</b> (exhaustive over modules added to the Daw-hybrid module set).</p>"
                 % (manifest["cuts"]["low"], manifest["cuts"]["high"], len(json.loads((LC/'module_inventory.json').read_text())['modules'])))

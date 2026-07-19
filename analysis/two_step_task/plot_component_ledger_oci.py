@@ -65,7 +65,9 @@ def load_additions():
             continue
         pid = int(pdir.name[1:])
         recs = [json.loads(l) for l in log.read_text().splitlines()]
-        bb = next(r["mean_bic"] for r in recs if r["candidate_id"] == "backbone")
+        bb = next((r["mean_bic"] for r in recs if r["candidate_id"] == "backbone"), None)
+        if bb is None:  # no backbone baseline logged for this pid — skip it
+            continue
         for r in recs:
             if len(r["module_ids"]) == 1:
                 gains[r["module_ids"][0]][pid] = bb - r["mean_bic"]  # + = adding helps
