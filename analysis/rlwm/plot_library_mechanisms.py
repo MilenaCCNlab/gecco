@@ -176,4 +176,92 @@ fig.savefig(FIG_DIR / "library_mechanisms_age.png")
 fig.savefig(FIG_DIR / "library_mechanisms_age.pdf")
 plt.close(fig)
 
-print("saved library_mechanisms_impact_frequency + library_mechanisms_age")
+# ---------------- Fig 3: top drivers WITHIN each age group ----------------
+def group_mean(m, grp):
+    vals = [g for p, g in gains[m].items() if (p in young_pids) == (grp == "young")]
+    return float(np.mean(vals)) if vals else np.nan
+
+
+young_rank = sorted(gains, key=lambda m: -group_mean(m, "young"))[:5]
+old_rank = sorted(gains, key=lambda m: -group_mean(m, "old"))[:5]
+
+fig, axes = plt.subplots(1, 2, figsize=(8.8, 3.6))
+for ax, names, label in [(axes[0], young_rank, "young"),
+                         (axes[1], old_rank, "old")]:
+    y = np.arange(len(names))[::-1]
+    h = 0.36
+    for yi, n in zip(y, names):
+        gy, go = group_mean(n, "young"), group_mean(n, "old")
+        ax.barh(yi + h / 2, gy, height=h, color="#40baec", zorder=2)
+        ax.barh(yi - h / 2, go, height=h, color="#708190", zorder=2)
+    ax.axvline(0, color=INK, lw=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels([SHORT[n] for n in names], fontsize=9)
+    ax.set_xlabel("mean BIC improvement over backbone", fontsize=10)
+    ax.set_title("Top 5 for %s adults" % label, fontsize=11)
+    ax.tick_params(axis="y", length=0)
+# shared x-scale so the asymmetry is visible at a glance
+xmax = max(ax.get_xlim()[1] for ax in axes)
+xmin = min(ax.get_xlim()[0] for ax in axes)
+for ax in axes:
+    ax.set_xlim(xmin, xmax)
+legend = [Patch(facecolor="#40baec", label="young (18–36, n=15)"),
+          Patch(facecolor="#708190", label="old (46–85, n=15)")]
+fig.legend(handles=legend, loc="lower center", ncol=2, fontsize=9,
+           frameon=False, bbox_to_anchor=(0.5, -0.08))
+fig.tight_layout()
+fig.savefig(FIG_DIR / "library_mechanisms_group_drivers.png")
+fig.savefig(FIG_DIR / "library_mechanisms_group_drivers.pdf")
+plt.close(fig)
+
+# ---------------- Fig 4: cross-group top-3 (union), mean gain + breadth ----------------
+def gvals(m, is_young):
+    return [g for p, g in gains[m].items() if (p in young_pids) == is_young]
+
+
+def gmean(m, is_young):
+    v = gvals(m, is_young)
+    return float(np.mean(v)) if v else np.nan
+
+
+def gbreadth(m, is_young):
+    v = gvals(m, is_young)
+    return sum(1 for x in v if x > 1)
+
+
+top3_young = sorted(gains, key=lambda m: -gmean(m, True))[:3]
+top3_old = sorted(gains, key=lambda m: -gmean(m, False))[:3]
+# union, ordered by old mean (keeps the shared top mechanisms adjacent)
+union = sorted(set(top3_young) | set(top3_old), key=lambda m: -gmean(m, False))
+
+fig, ax = plt.subplots(figsize=(6.4, 3.8))
+y = np.arange(len(union))[::-1]
+h = 0.38
+for yi, m in zip(y, union):
+    gy, go = gmean(m, True), gmean(m, False)
+    by, bo = gbreadth(m, True), gbreadth(m, False)
+    ax.barh(yi + h / 2, gy, height=h, color="#40baec", zorder=2)
+    ax.barh(yi - h / 2, go, height=h, color="#708190", zorder=2)
+    ax.text(gy + 0.3, yi + h / 2, "%d/15" % by, va="center", fontsize=7.5,
+            color="#2b6cb8")
+    ax.text(go + 0.3, yi - h / 2, "%d/15" % bo, va="center", fontsize=7.5,
+            color="#4a5560")
+ax.axvline(0, color=INK, lw=1.0)
+ax.set_yticks(y)
+ax.set_yticklabels([SHORT[m] for m in union], fontsize=9.5)
+ax.set_xlabel("mean BIC improvement over backbone\n(labels: # of 15 helped by >1 BIC)",
+              fontsize=9.5)
+ax.set_title("Top-3 drivers per age group (union)", fontsize=11)
+ax.tick_params(axis="y", length=0)
+star = [m for m in union if m in top3_young and m in top3_old]
+legend = [Patch(facecolor="#40baec", label="young (18–36, n=15)"),
+          Patch(facecolor="#708190", label="old (46–85, n=15)")]
+ax.legend(handles=legend, loc="lower right", fontsize=8.5, frameon=False)
+fig.tight_layout()
+fig.savefig(FIG_DIR / "library_mechanisms_crossgroup.png")
+fig.savefig(FIG_DIR / "library_mechanisms_crossgroup.pdf")
+plt.close(fig)
+print("top-3 young:", top3_young, "| top-3 old:", top3_old, "| shared:", star)
+
+print("saved library_mechanisms_impact_frequency + library_mechanisms_age"
+      " + library_mechanisms_group_drivers + library_mechanisms_crossgroup")
