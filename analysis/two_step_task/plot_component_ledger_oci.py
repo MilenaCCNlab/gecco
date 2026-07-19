@@ -228,9 +228,10 @@ def _poster(rows, rm_modules, top_add, rem, gains, by_t):
     ax.set_xlabel("BIC improvement contributed   ( +  better fit )", fontsize=13.5)
     ax.tick_params(axis="y", length=0); ax.tick_params(axis="x", labelsize=11.5)
     if n_rm and n_rm < len(rows):
-        ax.text(xmin + 0.06 * (xmax - xmin), (div + top) / 2, "REMOVED\nFROM BASELINE",
+        lx = xmin / 2.0  # centered in the gap between the left axis and the 0 line
+        ax.text(lx, (div + top) / 2, "REMOVED\nFROM BASELINE",
                 rotation=90, va="center", ha="center", fontsize=10, color="#008181", linespacing=0.95, zorder=4)
-        ax.text(xmin + 0.06 * (xmax - xmin), (bot + div) / 2, "ADDED\nBY LIBRARY",
+        ax.text(lx, (bot + div) / 2, "ADDED\nBY LIBRARY",
                 rotation=90, va="center", ha="center", fontsize=10, color="#2b6cb8", linespacing=0.95, zorder=4)
     ax.legend(handles=[Patch(facecolor=LOW_C, label="Low OCI (n = %d)" % nlow),
                        Patch(facecolor=HIGH_C, label="High OCI (n = %d)" % nhigh)],
