@@ -14,6 +14,8 @@ import argparse
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='', help='*REQUIRED* config.yaml')
+    parser.add_argument('--participants', type=str, default=None,
+                        help='START:END positional slice over participants (default: all)')
     args = parser.parse_args()
     # --- Load configuration & data ---
     project_root = Path(__file__).resolve().parents[1]
@@ -32,7 +34,12 @@ def main():
         # --- Convert data to narrative text for the LLM ---
         data2text = get_data2text_function(data_cfg.data2text_function)
 
-        for participant in df.participant.unique()[:14]:
+        participants = df.participant.unique()
+        if args.participants:
+            start_str, end_str = args.participants.split(":")
+            participants = participants[int(start_str) if start_str else None:
+                                        int(end_str) if end_str else None]
+        for participant in participants:
 
             # best_hybrid_bic =
             df_participant = df[df.participant == participant].reset_index()
