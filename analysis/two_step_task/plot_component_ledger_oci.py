@@ -116,6 +116,25 @@ def main():
     diff_add = sorted(reasonable, key=lambda m: abs(add_high[m] - add_low[m]),
                       reverse=True)[:N_ADD]
 
+    # de-duplicated selection: collapse each excludes-substitute family to its
+    # single best-gaining representative (+ keep singletons), so each DISTINCT
+    # mechanism idea appears once.
+    inv_path = LC / "module_inventory.json"
+    dedup_add, dedup_labels = [], {}
+    if inv_path.exists():
+        for fam in excludes_families(inv_path):
+            fam_g = [m for m in fam if m in gains]
+            if not fam_g:
+                continue
+            rep = max(fam_g, key=lambda m: pooled_gain.get(m, -1e9))
+            if pooled_gain.get(rep, 0) <= 0:
+                continue
+            dedup_add.append(rep)
+            lbl = family_label(fam)
+            if lbl:
+                dedup_labels[rep] = "ADD " + lbl
+        dedup_add = sorted(dedup_add, key=lambda m: pooled_gain[m], reverse=True)[:N_ADD]
+
     # removals: keep only components whose removal IMPROVES fit (pooled full-abl > 0)
     rm_modules = [m for m in BASE if have_rem and grp_mean(rem[m], pids) > 0]
     n_rm = len(rm_modules)
@@ -187,6 +206,11 @@ def main():
     _poster(rm_modules, diff_add, rem, gains, by_t,
             "library_component_ledger_poster_ocidiff",
             "Mechanisms most different between Low and High OCI")
+    if dedup_add:
+        _poster(rm_modules, dedup_add, rem, gains, by_t,
+                "library_component_ledger_dedup",
+                "Distinct mechanisms (substitute families collapsed to best representative)",
+                add_label=dedup_labels)
 
     print("removals present:", have_rem)
     print("top added modules (pooled gain over backbone):")
@@ -203,19 +227,61 @@ def _clean(label):
     return label.replace("REMOVE ", "").replace("ADD ", "").replace("_", " ")
 
 
+# human names for the excludes-substitute families (keyed by a signature member)
+FAMILY_SIG = {
+    "mb_mf_mixture": "MB/MF control",
+    "stage1_stickiness": "Choice stickiness / perseveration",
+    "value_decay_to_zero": "Value decay / forgetting",
+    "direct_mf_update": "MF update / learning rates",
+}
+
+
+def excludes_families(inv_path):
+    """Connected components of the symmetrized module `excludes` graph =
+    substitute families (alternative formulations of one mechanism)."""
+    inv = json.loads(Path(inv_path).read_text())
+    ids = {m["id"] for m in inv["modules"]}
+    adj = {i: set() for i in ids}
+    for m in inv["modules"]:
+        for e in m.get("excludes", []):
+            if e in ids:
+                adj[m["id"]].add(e); adj[e].add(m["id"])
+    seen, comps = set(), []
+    for i in ids:
+        if i in seen:
+            continue
+        stack, comp = [i], set()
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x); comp.add(x)
+            stack.extend(adj[x] - seen)
+        comps.append(comp)
+    return comps
+
+
+def family_label(fam):
+    for sig, name in FAMILY_SIG.items():
+        if sig in fam:
+            return name
+    return None  # singleton / unnamed -> caller uses the representative's name
+
+
 def _npos(d, grp):  # count of participants in grp with positive contribution
     return sum(1 for p in grp if p in d and d[p] > 0)
 
 
-def _poster(rm_modules, add_modules, rem, gains, by_t, fname, title):
+def _poster(rm_modules, add_modules, rem, gains, by_t, fname, title, add_label=None):
     LOW_C, HIGH_C = "#86bce6", "#17456f"          # low = lighter, high = darker
     BAND_RM, BAND_ADD, GRID = "#f3f5f4", "#eef2f7", "#e1e0d9"
+    add_label = add_label or {}
     n_rm = len(rm_modules)
     nlow, nhigh = len(by_t["Low"]), len(by_t["High"])
     raw = {**{m: rem[m] for m in rm_modules}, **{m: gains[m] for m in add_modules}}
     order = rm_modules + add_modules  # top-to-bottom
     rows = ([(RM_LABEL[m], "rm") for m in rm_modules]
-            + [(module_pretty(m), "add") for m in add_modules])
+            + [(add_label.get(m, module_pretty(m)), "add") for m in add_modules])
     yp = np.arange(len(rows))[::-1]
     hh = 0.36
     fig, ax = plt.subplots(figsize=(11.0, 0.62 * len(rows) + 1.6))
