@@ -33,9 +33,20 @@ def fit_participant(func, inputs, bounds, seed, n_starts=N_STARTS):
     best_nll, best_x = np.inf, None
     for _ in range(n_starts):
         x0 = [rng.uniform(lo, hi) for lo, hi in bounds]
-        res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
+        try:
+            res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
+        except ValueError:
+            # L-BFGS-B + finite-difference gradient can step a hair outside a
+            # bound (float rounding) and scipy then rejects the point; skip this
+            # start rather than aborting the whole candidate.
+            continue
         if res.fun < best_nll:
             best_nll, best_x = float(res.fun), [float(v) for v in res.x]
+    if best_x is None:
+        # every start hit the boundary-fp rejection; degenerate but finite so
+        # the candidate is ranked (poorly), not crashed.
+        best_nll = 1e10
+        best_x = [float(np.clip((lo + hi) / 2.0, lo, hi)) for lo, hi in bounds]
     return {"nll": best_nll, "params": best_x, "n_starts": n_starts}
 
 
