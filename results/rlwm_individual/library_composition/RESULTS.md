@@ -31,3 +31,36 @@ composed vs canonical: mean dBIC -17.01, wilcoxon p=0.0103
 - canonical refit BIC differs from baseline_bic for p47: 464.96 vs 311.89 (the column's producing variant is unknown)
 - canonical refit BIC differs from baseline_bic for p48: 591.30 vs 353.31 (the column's producing variant is unknown)
 - canonical refit BIC differs from baseline_bic for p50: 642.35 vs 383.23 (the column's producing variant is unknown)
+
+## Library reconstruction (leak-free, 7 held-out participants)
+
+Per-participant best composition beats the participant's own individual-gecco
+refit 7/7 (mean 458.4 vs 515.0) and the group program 7/7 (497.2). Caveat: the
+per-participant composition selects on that participant's own data, as does
+individual gecco — information-matched, but not a held-out claim.
+
+## Disclosures
+
+- Library seeds: 8 of the 13 group-seen participants (eval pids 15-19 have no
+  individual gecco fits). All seeds young (18-36); 20 of 22 test/reconstruction
+  participants are older adults (46-85).
+- Held-out pool reclaims fitted pids 0, 4-9 (never consumed by group gecco's
+  prompt or eval) in addition to test-split pids 36-50; config eval/test
+  overlap pids 14-19 are treated as group-seen and excluded.
+- Three extracted modules condition the current choice's likelihood on the
+  current trial's reward (faithful to their source programs; reward is
+  deterministic given choice, so this is within-trial outcome leakage). They
+  are excluded from the composed-program and reconstruction arms
+  (module_inventory_leakfree.json); the unconstrained arm is archived under
+  unconstrained_search/ and reconstruction_results_fulllib.json. Individual
+  gecco refits retain their original mechanisms, leaks included — where a
+  source program leaks, its "ceiling" BIC is inflated in the composed
+  program's disfavor.
+- Stored BICs (best_bic_0_participant*.json and the data's baseline_bic
+  column) are not comparable under this pipeline's protocol (different data
+  span); all comparisons use refits under one seeded protocol. The
+  reconstruction fidelity gate references the original-program refit.
+- The composed backbone skips missed trials (actions == -2, ~3%) in
+  likelihood and updates; several original programs index them unguarded.
+- Samples are small: 8 seeds, 10 validation, 7 reconstruction, 15 test.
+  Search was greedy (exhaustive ~18 h; DECISIONS.md #7).
