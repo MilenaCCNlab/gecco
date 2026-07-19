@@ -131,9 +131,9 @@ def render_candidate(inventory, module_ids):
 
         if a1 != -1 and s_idx != -1 and a2 != -1:
             delta_stage1 = q_stage2_mf[s_idx, a2] - q_stage1_mf[a1]
-            {stage1_update}
+{stage1_update}
             delta_stage2 = r - q_stage2_mf[s_idx, a2]
-            {stage2_update}
+{stage2_update}
 {update_extra}
 {post_trial}
     return log_loss
@@ -145,8 +145,10 @@ def render_candidate(inventory, module_ids):
         stage1_temp=overrides["stage1_temp"],
         stage2_values=overrides["stage2_values"],
         stage2_temp=overrides["stage2_temp"],
-        stage1_update=overrides["stage1_update"],
-        stage2_update=overrides["stage2_update"],
+        # statement overrides are block-indented (dedent + reindent) so
+        # multi-line statements (e.g. asymmetric/direct MF updates) stay syntactic
+        stage1_update=_indent(overrides["stage1_update"], 3),
+        stage2_update=_indent(overrides["stage2_update"], 3),
         init=block("init", 1),
         pre_stage1=block("pre_stage1", 2),
         stage1_logits_extra=block("stage1_logits_extra", 2),
