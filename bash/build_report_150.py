@@ -139,9 +139,11 @@ code{background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:.85em}.fig{m
 
     if have_hb:
         cvg_h = stats_h["composed_vs_group"]; cvh_h = stats_h["composed_vs_hybrid"]
-        html.append("<h2>3 · Hybrid + missing library components: the best shared program</h2>")
+        html.append("<h2>3 · Hybrid base + missing library components</h2>")
         html.append('<div class="fig">%s</div>' % img(f4))
         html.append("<p>Winner: <code>%s</code> (%d params). " % (win_h["candidate_id"], win_h["n_params"]))
+        _cvg_bb = stats_b["composed_vs_group"]["mean_delta"]
+        html.append('This arm is <i>constrained</i> to carry the five Daw-hybrid modules as a fixed base. It beats the Daw hybrid but, unlike the bare-bone arm, it does <b>not</b> beat group GeCCo here — the hybrid base forces in components the component ledger (analysis/two_step_task/figures/) flags as dead weight (separate learning rates, separate stage-2 beta), so the leaner bare-bone winner (§2, ΔBIC %.1f vs group) is the stronger shared program on this dataset. ' % _cvg_bb)
         html.append('Composed vs group: mean ΔBIC <span class="k">%.1f</span>, W/T/L %d/%d/%d, Wilcoxon p=%.4f. Composed vs Daw hybrid: mean ΔBIC %.1f, p=%.4f.</p>'
                     % (cvg_h["mean_delta"], cvg_h["wins"], cvg_h["ties"], cvg_h["losses"], cvg_h["wilcoxon_p"], cvh_h["mean_delta"], cvh_h["wilcoxon_p"]))
         html.append(bic_table(test_h, stats_h))
