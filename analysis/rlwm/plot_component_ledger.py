@@ -106,6 +106,43 @@ fig.savefig(FIG_DIR / "library_component_ledger.png")
 fig.savefig(FIG_DIR / "library_component_ledger.pdf")
 plt.close(fig)
 
+# ---- overall (all 30) single-series companion ----
+ALL = PIDS
+rows_all = [
+    ("REMOVE capacity scaling", "rm", rem("no_capacity", ALL)),
+    ("REMOVE uniform lapse", "rm", rem("no_lapse", ALL)),
+    ("REMOVE load-indep. WM decay", "rm", rem("no_decay", ALL)),
+    ("ADD choice stickiness/persev.", "add", add("action_stickiness", ALL)),
+    ("ADD graded WM update/decay", "add", add("unified_wm_update_decay", ALL)),
+    ("ADD arbitration-scaled WM upd.", "add", add("arbitration_scaled_wm_update", ALL)),
+    ("ADD asymmetric WM update", "add", add("wm_asymmetric_update_p1", ALL)),
+]
+ya = np.arange(len(rows_all))[::-1]
+fig, ax = plt.subplots(figsize=(7.2, 4.2))
+for yi, (_, kind, g) in zip(ya, rows_all):
+    ax.barh(yi, g, height=0.6, color="#2b6cb8" if kind == "add" else "#1b9e91",
+            edgecolor="white", zorder=2)
+    sgn = "+" if g >= 0 else "−"
+    ax.text(g + (0.3 if g >= 0 else -0.3), yi, "%s%.1f" % (sgn, abs(g)),
+            va="center", ha="left" if g >= 0 else "right", fontsize=8.5, color=INK)
+ax.axvline(0, color=INK, lw=1.0)
+ax.axhline(ya[3] + 0.5, color="0.6", lw=0.8, ls=":")
+ax.set_yticks(ya)
+ax.set_yticklabels([r[0] for r in rows_all], fontsize=9)
+ax.set_xlabel("BIC improvement contributed  (+ better fit)", fontsize=10)
+ax.set_title("Component ledger vs canonical baseline (all 30 participants)", fontsize=11.5)
+ax.tick_params(axis="y", length=0)
+ax.legend(handles=[Patch(facecolor="#1b9e91", label="removed from baseline"),
+                   Patch(facecolor="#2b6cb8", label="added by library")],
+          loc="lower right", fontsize=8.5, frameon=False)
+fig.tight_layout()
+fig.savefig(FIG_DIR / "library_component_ledger_overall.png")
+fig.savefig(FIG_DIR / "library_component_ledger_overall.pdf")
+plt.close(fig)
+print("overall (all 30):")
+for lbl, kind, g in rows_all:
+    print("  %-30s %+.1f" % (lbl, g))
+
 print("removals (full-ablation, +=removal helps):")
 for lbl, kind, gy, go in rows:
     if kind == "rm":
