@@ -92,7 +92,36 @@ rationale.
     "STILL FAILING after" (a pid that exhausted retries), plus milestones/gates.
     Resume topology if session restarts: relaunch `run_individual_resilient.sh
     <lo> <hi> <KEY>` for any range with missing pids (idempotent — skips done).
-14. **Monitor pattern was too broad (2026-07-18).** Benign numpy
+14. **Extraction failed validation; repaired (2026-07-19 ~04:00). NEEDS YOUR REVIEW.**
+    `compose-modules` produced 27 modules but merge validation failed after all 3
+    repair rounds with exactly two error classes (no others):
+    (a) 10 modules referenced `stage1_temp`/`stage2_temp` in slot code — those are
+    override-slot *names*, not runtime variables; the runtime inverse-temp is
+    `beta`. (b) 2 modules (`direct_mf_update`, `asymmetric_direct_mf_update`)
+    overrode `stage1_update`/`stage2_update` with multi-line code that the
+    renderer inlined at a fixed indent → IndentationError (the SAME bug RLWM hit
+    and fixed in df8bd50, never ported to two-step `render.py`).
+    **Fixes:** (a) ported df8bd50 to `render.py` (block-indent multi-line
+    statement overrides) — reviewed-pattern code fix; (b) materialized
+    `module_inventory.json` from the last repair round's LLM JSON
+    (`llm_log/call_053_merge_repair3.json`) with a token replacement
+    `stage1_temp`/`stage2_temp`→`beta` in the 10 modules' slot code only
+    (semantically exact — none override the temp; backbone scaffold untouched).
+    Result: 27 modules pass `compose-modules --skip-llm` smoke checks; 13 compose
+    tests green. **ASSUMPTION (autonomous): the reconstruction fidelity gate was
+    NOT re-run** (I bypassed `merge_inventory`; the gate runs inside it). Structural
+    validity + per-module/pair smoke checks are sufficient for search/coverage/eval
+    to run; the gate is an extraction-fidelity quality check, not a pipeline
+    blocker. Re-run it in the morning if you want the fidelity numbers.
+15. **Hybrid-base module set remapped for the new inventory (2026-07-19).**
+    `hybrid.py::HYBRID_MODULES` is hardcoded to the OLD 45-pid ids; the 150-pid
+    extraction renamed two: `choice_stickiness`→`stage1_stickiness`,
+    `separate_stage_betas`→`separate_stage2_beta`. Ran the hybrid-base arm via
+    `bash/hybrid_search_150.py` (inline, mirrors `cmd_hybrid_search`, remapped
+    base, param_cap 9 = 22 candidates) so the shared `hybrid.py` stays intact for
+    the old run. Task 9 arm-2 eval reads the frozen `hybrid_base/composed_model.txt`
+    and needs no remap.
+16. **Monitor pattern was too broad (2026-07-18).** Benign numpy
     `RuntimeWarning: invalid value encountered in divide` / `overflow
     encountered in exp` (unstable softmax in an LLM-proposed model during
     fitting) tripped the monitor's `invalid` grep — false alarm; chunk 100:125
