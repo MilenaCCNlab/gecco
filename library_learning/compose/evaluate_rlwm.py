@@ -42,6 +42,11 @@ def evaluate_models(target, group_dir, out_dir, pids, set_name):
         tag="eval:%s:canonical" % set_name)
     individual = {}
     for pid in pids:
+        # validation pids 15-19 have no individual gecco fits (only 0-14 and
+        # 36-50 were run); the individual baseline covers fitted pids only.
+        # All reconstruction/test pids are fitted by construction (splits).
+        if not (target.models_dir / ("best_model_0_participant%d.txt" % pid)).exists():
+            continue
         code = load_original_code(target, pid)
         fname, _ = function_name_and_args(code)
         individual.update(fit_model_on_pids(
