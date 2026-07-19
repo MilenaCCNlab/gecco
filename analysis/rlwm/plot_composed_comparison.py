@@ -122,8 +122,8 @@ def main_with_individual_composed():
     models = [
         ("RLWM", pd.read_csv(ANALYSIS_DIR / "baseline_bics.csv")["bic"].to_numpy(), TEAL),
         ("GeCCo\n(group)", pd.read_csv(ANALYSIS_DIR / "group_bics.csv")["bic"].to_numpy(), GRAY),
-        ("Composed\nlibrary\n(shared)", pd.read_csv(CSV)["bic"].to_numpy(), DBLUE),
-        ("Composed\nlibrary\n(individual)", pp, BLUE),
+        ("Library\n(group)", pd.read_csv(CSV)["bic"].to_numpy(), DBLUE),
+        ("Library\n(individual)", pp, BLUE),
     ]
     print("variant means:", {n.replace(chr(10), " "): round(float(np.mean(v)), 2)
                              for n, v, _ in models},
