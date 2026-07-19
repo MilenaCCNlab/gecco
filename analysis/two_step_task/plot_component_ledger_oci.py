@@ -28,9 +28,10 @@ FIG = ADIR / "figures"; FIG.mkdir(exist_ok=True)
 LC = ROOT / "results/two_step_psychiatry_individual_function_ocibalanced150_maxsetting_individual/library_composition"
 ABL = ADIR / "baseline_ablation_bics_oci.json"
 
-# low / medium / high OCI — sequential teal->blue
-C_LOW, C_MED, C_HIGH, INK = "#9dcece", "#40baec", "#2b6cb8", "#0b0b0b"
-TCOL = {"Low": C_LOW, "Medium": C_MED, "High": C_HIGH}
+# low / high OCI — sequential teal->blue (medium dropped for a clean contrast)
+C_LOW, C_HIGH, INK = "#9dcece", "#2b6cb8", "#0b0b0b"
+GROUPS = ["Low", "High"]
+TCOL = {"Low": C_LOW, "High": C_HIGH}
 N_ADD = 7  # top library modules to show
 
 plt.rcParams.update({
@@ -96,7 +97,7 @@ def module_pretty(m):
 def main():
     tert = tertiles()
     pids = sorted(tert)
-    by_t = {t: [p for p in pids if tert[p] == t] for t in ["Low", "Medium", "High"]}
+    by_t = {t: [p for p in pids if tert[p] == t] for t in GROUPS}
     gains = load_additions()
     have_rem = ABL.exists()
     rem = load_removals() if have_rem else {}
@@ -105,32 +106,34 @@ def main():
     pooled_gain = {m: grp_mean(g, pids) for m, g in gains.items()}
     top_add = sorted(pooled_gain, key=pooled_gain.get, reverse=True)[:N_ADD]
 
-    # ledger rows: removals (BASE) then additions (top_add)
+    # removals: keep only components whose removal IMPROVES fit (pooled full-abl > 0)
+    rm_modules = [m for m in BASE if have_rem and grp_mean(rem[m], pids) > 0]
+    n_rm = len(rm_modules)
+
+    # ledger rows: kept removals then additions (top_add)
     rows = []
-    if have_rem:
-        for m in BASE:
-            rows.append((RM_LABEL[m], "rm", {t: grp_mean(rem[m], by_t[t]) for t in by_t}))
+    for m in rm_modules:
+        rows.append((RM_LABEL[m], "rm", {t: grp_mean(rem[m], by_t[t]) for t in by_t}))
     for m in top_add:
         rows.append((module_pretty(m), "add", {t: grp_mean(gains[m], by_t[t]) for t in by_t}))
 
-    # ---- grouped-by-tertile ledger ----
+    # ---- grouped-by-OCI ledger (Low vs High) ----
     y = np.arange(len(rows))[::-1]
-    h = 0.26
+    h = 0.38
     fig, ax = plt.subplots(figsize=(8.4, 0.55 * len(rows) + 1.4))
-    offs = {"Low": h, "Medium": 0.0, "High": -h}
+    offs = {"Low": h / 2, "High": -h / 2}
     for yi, (_, kind, vals) in zip(y, rows):
-        for t in ["Low", "Medium", "High"]:
-            v = vals[t]
-            ax.barh(yi + offs[t], v, height=h, color=TCOL[t], edgecolor="white", zorder=2)
+        for t in GROUPS:
+            ax.barh(yi + offs[t], vals[t], height=h, color=TCOL[t], edgecolor="white", zorder=2)
     ax.axvline(0, color=INK, lw=1.0)
-    if have_rem:
-        ax.axhline(y[len(BASE) - 1] - 0.5, color="0.6", lw=0.8, ls=":")
+    if n_rm and n_rm < len(rows):
+        ax.axhline(y[n_rm - 1] - 0.5, color="0.6", lw=0.8, ls=":")
     ax.set_yticks(y); ax.set_yticklabels([r[0] for r in rows], fontsize=9)
     ax.set_xlabel("BIC improvement contributed  (+ better fit)", fontsize=10)
-    ax.set_title("Library component ledger, by OCI tertile (test participants)", fontsize=11.5)
+    ax.set_title("Library component ledger, by OCI group (test participants)", fontsize=11.5)
     ax.tick_params(axis="y", length=0)
     ax.legend(handles=[Patch(facecolor=TCOL[t], label="%s OCI (n=%d)" % (t, len(by_t[t])))
-                       for t in ["Low", "Medium", "High"]],
+                       for t in GROUPS],
               loc="lower right", fontsize=8.5, frameon=False)
     fig.tight_layout()
     fig.savefig(FIG / "library_component_ledger.png")
@@ -139,9 +142,8 @@ def main():
 
     # ---- overall (pooled) ----
     rows_all = []
-    if have_rem:
-        for m in BASE:
-            rows_all.append((RM_LABEL[m], "rm", grp_mean(rem[m], pids)))
+    for m in rm_modules:
+        rows_all.append((RM_LABEL[m], "rm", grp_mean(rem[m], pids)))
     for m in top_add:
         rows_all.append((module_pretty(m), "add", grp_mean(gains[m], pids)))
     ya = np.arange(len(rows_all))[::-1]
@@ -153,8 +155,8 @@ def main():
         ax.text(g + (0.3 if g >= 0 else -0.3), yi, "%s%.1f" % (sgn, abs(g)),
                 va="center", ha="left" if g >= 0 else "right", fontsize=8.5, color=INK)
     ax.axvline(0, color=INK, lw=1.0)
-    if have_rem:
-        ax.axhline(ya[len(BASE) - 1] - 0.5, color="0.6", lw=0.8, ls=":")
+    if n_rm and n_rm < len(rows_all):
+        ax.axhline(ya[n_rm - 1] - 0.5, color="0.6", lw=0.8, ls=":")
     ax.set_yticks(ya); ax.set_yticklabels([r[0] for r in rows_all], fontsize=9)
     ax.set_xlabel("BIC improvement contributed  (+ better fit)", fontsize=10)
     ax.set_title("Library component ledger (all 50 test participants)", fontsize=11.5)

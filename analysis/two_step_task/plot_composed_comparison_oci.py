@@ -33,7 +33,7 @@ MODELS = [  # (label, color, source-key)
     ("GeCCo\n(individual)", INK, ("tr", "individual")),
     ("Composed\n(individual)", DBLUE, ("rc", "library_bic")),
 ]
-TERTILES = ["Low", "Medium", "High"]
+TERTILES = ["Low", "High"]  # medium dropped for a clean low-vs-high contrast
 
 plt.rcParams.update({
     "font.family": "sans-serif", "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
@@ -112,7 +112,7 @@ def main():
     all_e = [v for m, e, _ in per_t.values() for v in e]
     shared_ylim = (np.floor((min(all_m) - max(all_e)) / 20) * 20 - 10,
                    np.ceil((max(all_m) + max(all_e)) / 20) * 20)
-    fig, axes = plt.subplots(1, 3, figsize=(9.6, 3.3), sharey=True)
+    fig, axes = plt.subplots(1, len(TERTILES), figsize=(3.4 * len(TERTILES), 3.3), sharey=True)
     for ax, t in zip(axes, TERTILES):
         m, e, n = per_t[t]
         bar_panel(ax, m, e, colors, ["" for _ in labels],
