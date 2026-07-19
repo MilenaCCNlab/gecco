@@ -55,3 +55,25 @@ rationale.
    configs updated. CAVEAT for the report: the 150-run's generator differs from
    the 45-run's (3.1 vs 3.0), so cross-run comparisons confound model change;
    within-run comparisons are unaffected. Extraction already used 3.1.
+10. **Not reusing the old 45-pid individual models (user suggestion 2026-07-18).**
+    Overlap between old-45 and new-150 subjects is only 12 (4 per split) —
+    old set used fixed OCI bins, new uses percentile tertiles. Reuse saves
+    ~8% of individual runs but would splice gemini-3-pro-preview models into a
+    gemini-3.1 individual-ceiling set, confounding the coverage claim (library
+    vs individual ceiling) with a model-version difference. Run already 12/150
+    and progressing cheaply. Decision: let the uniform 3.1 run finish; do not
+    reuse. Revisit only if API cost/quota becomes a hard blocker.
+11. **Code review (xhigh) findings logged 2026-07-18** — see review in session:
+    (a) `clean_raw_file` dropped the original per-file missing-marker guard
+    (latent, 0/150 affected); (b) `baseline_bic` hybrid counts -1 trials while
+    eval HYBRID_SOURCE guards them → Task 9 cross-checks will warn for 53 pids
+    (expected/benign, results use guarded hybrid); (c) individual-150 config
+    has stale dead splits; (d) Task 6 gate must check pids 0-49 specifically,
+    not total best-model count. None blocks the run.
+12. **Monitor pattern was too broad (2026-07-18).** Benign numpy
+    `RuntimeWarning: invalid value encountered in divide` / `overflow
+    encountered in exp` (unstable softmax in an LLM-proposed model during
+    fitting) tripped the monitor's `invalid` grep — false alarm; chunk 100:125
+    was healthy. Restarted the monitor matching only real failures (Traceback,
+    RESOURCE_EXHAUSTED/429/quota, "no longer available", Killed, MemoryError,
+    google.genai.errors).
