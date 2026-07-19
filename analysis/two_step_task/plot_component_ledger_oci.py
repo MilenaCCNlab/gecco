@@ -170,11 +170,77 @@ def main():
     fig.savefig(FIG / "library_component_ledger_overall.pdf")
     plt.close(fig)
 
+    # ---- poster-ready Low-vs-High OCI ledger ----
+    _poster(rows, rm_modules, top_add, rem, gains, by_t)
+
     print("removals present:", have_rem)
     print("top added modules (pooled gain over backbone):")
     for m in top_add:
         print("  %-34s %+.1f" % (m, pooled_gain[m]))
-    print("saved library_component_ledger{,_overall}.{png,pdf}")
+    print("saved library_component_ledger{,_overall,_poster}.{png,pdf}")
+
+
+def _clean(label):
+    return label.replace("REMOVE ", "").replace("ADD ", "").replace("_", " ")
+
+
+def _npos(d, grp):  # count of participants in grp with positive contribution
+    return sum(1 for p in grp if p in d and d[p] > 0)
+
+
+def _poster(rows, rm_modules, top_add, rem, gains, by_t):
+    LOW_C, HIGH_C = "#86bce6", "#17456f"          # low = lighter, high = darker
+    BAND_RM, BAND_ADD, GRID = "#f3f5f4", "#eef2f7", "#e1e0d9"
+    n_rm = len(rm_modules)
+    nlow, nhigh = len(by_t["Low"]), len(by_t["High"])
+    raw = {**{m: rem[m] for m in rm_modules}, **{m: gains[m] for m in top_add}}
+    order = rm_modules + top_add  # top-to-bottom
+    yp = np.arange(len(rows))[::-1]
+    hh = 0.36
+    fig, ax = plt.subplots(figsize=(11.0, 0.62 * len(rows) + 1.6))
+    top, bot = yp[0] + 0.6, yp[-1] - 0.6
+    if n_rm and n_rm < len(rows):
+        div = yp[n_rm - 1] - 0.5
+        ax.axhspan(div, top, color=BAND_RM, zorder=0)
+        ax.axhspan(bot, div, color=BAND_ADD, zorder=0)
+        ax.axhline(div, color="0.72", lw=0.9, ls=(0, (4, 3)), zorder=1)
+    all_vals = [grp_mean(raw[m], by_t[t]) for m in order for t in GROUPS]
+    xmax = max(all_vals) * 1.18
+    xmin = min(min(all_vals), 0) - 0.04 * xmax - 6
+    for i, (m, (lbl, kind, vals)) in enumerate(zip(order, rows)):
+        yi = yp[i]
+        gl, gh = grp_mean(raw[m], by_t["Low"]), grp_mean(raw[m], by_t["High"])
+        cl, ch = _npos(raw[m], by_t["Low"]), _npos(raw[m], by_t["High"])
+        ax.barh(yi + hh / 2, gl, height=hh, color=LOW_C, edgecolor="white", lw=1.2, zorder=3)
+        ax.barh(yi - hh / 2, gh, height=hh, color=HIGH_C, edgecolor="white", lw=1.2, zorder=3)
+        for val, off, cnt, tot in [(gl, hh / 2, cl, nlow), (gh, -hh / 2, ch, nhigh)]:
+            sgn = "+" if val >= 0 else "−"
+            ax.annotate("%s%.1f  (%d/%d)" % (sgn, abs(val), cnt, tot), (val, yi + off),
+                        xytext=(5 if val >= 0 else -5, 0), textcoords="offset points",
+                        va="center", ha="left" if val >= 0 else "right",
+                        fontsize=10.5, color=INK, zorder=4)
+    ax.axvline(0, color=INK, lw=1.2, zorder=2)
+    step = 20 if xmax > 60 else 10
+    for gx in range(step, int(xmax) + 1, step):
+        ax.axvline(gx, color=GRID, lw=0.8, zorder=0)
+    ax.set_yticks(yp); ax.set_yticklabels([_clean(r[0]) for r in rows], fontsize=12.5)
+    ax.set_xlim(xmin, xmax); ax.set_ylim(bot, top)
+    ax.set_xlabel("BIC improvement contributed   ( +  better fit )", fontsize=13.5)
+    ax.tick_params(axis="y", length=0); ax.tick_params(axis="x", labelsize=11.5)
+    if n_rm and n_rm < len(rows):
+        ax.text(xmin + 0.06 * (xmax - xmin), (div + top) / 2, "REMOVED\nFROM BASELINE",
+                rotation=90, va="center", ha="center", fontsize=10, color="#008181", linespacing=0.95, zorder=4)
+        ax.text(xmin + 0.06 * (xmax - xmin), (bot + div) / 2, "ADDED\nBY LIBRARY",
+                rotation=90, va="center", ha="center", fontsize=10, color="#2b6cb8", linespacing=0.95, zorder=4)
+    ax.legend(handles=[Patch(facecolor=LOW_C, label="Low OCI (n = %d)" % nlow),
+                       Patch(facecolor=HIGH_C, label="High OCI (n = %d)" % nhigh)],
+              loc="upper right", fontsize=11.5, frameon=False, bbox_to_anchor=(1.0, 0.99))
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(FIG / "library_component_ledger_poster.png", dpi=400)
+    fig.savefig(FIG / "library_component_ledger_poster.pdf")
+    plt.close(fig)
 
 
 if __name__ == "__main__":
