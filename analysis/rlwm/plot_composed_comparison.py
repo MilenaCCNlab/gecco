@@ -109,5 +109,52 @@ def main():
     print("saved figures/bic_comparison_baseline_vs_gecco_composed.{png,pdf}")
 
 
+def main_with_individual_composed():
+    """Variant: add the per-participant ('individual') library composition as a
+    bar, and show GeCCo-individual as a horizontal reference line."""
+    import json
+    if not CSV.exists():
+        fit_composed_plotspan()
+    perpid = json.load(open(OUT / "perpid_plotspan_results.json"))
+    pp = np.array([r["library_bic"] for r in perpid])  # pid order 0-14,36-50
+    indiv = pd.read_csv(ANALYSIS_DIR / "individual_bics.csv")["bic"].to_numpy()
+
+    models = [
+        ("Baseline", pd.read_csv(ANALYSIS_DIR / "baseline_bics.csv")["bic"].to_numpy(), TEAL),
+        ("GeCCo\n(group)", pd.read_csv(ANALYSIS_DIR / "group_bics.csv")["bic"].to_numpy(), GRAY),
+        ("Composed\nlibrary\n(shared)", pd.read_csv(CSV)["bic"].to_numpy(), DBLUE),
+        ("Composed\nlibrary\n(individual)", pp, BLUE),
+    ]
+    print("variant means:", {n.replace(chr(10), " "): round(float(np.mean(v)), 2)
+                             for n, v, _ in models},
+          "| individual line:", round(float(indiv.mean()), 2))
+
+    fig, ax = plt.subplots(figsize=(4.0, 3.3))
+    x = np.arange(len(models))
+    means = [np.mean(v) for _, v, _ in models]
+    errs = [sem(v) for _, v, _ in models]
+    ax.bar(x, means, width=0.72, color=[c for _, _, c in models], zorder=2)
+    ax.errorbar(x, means, yerr=errs, fmt="o", markersize=5, color="black",
+                ecolor="black", elinewidth=1.6, capsize=0, zorder=3)
+    # GeCCo individual as a reference line
+    im = float(indiv.mean())
+    ax.axhline(im, color=INK, lw=1.4, ls=(0, (5, 3)), zorder=4)
+    ax.text(len(models) - 0.55, im, "GeCCo individual", va="bottom", ha="right",
+            fontsize=9, color=INK, style="italic")
+    ax.set_xlim(-0.6, len(models) - 0.4)
+    lo = np.floor((min(means + [im]) - max(errs)) / 20) * 20 - 20
+    hi = np.ceil((max(means + [im]) + max(errs)) / 20) * 20
+    ax.set_xticks(x)
+    ax.set_xticklabels([m[0] for m in models], fontsize=9.5)
+    ax.set_ylabel("BIC")
+    ax.set_ylim(lo, hi)
+    ax.tick_params(axis="x", length=0)
+    fig.savefig(FIG_DIR / "bic_comparison_baseline_vs_gecco_composed_individual.png")
+    fig.savefig(FIG_DIR / "bic_comparison_baseline_vs_gecco_composed_individual.pdf")
+    plt.close(fig)
+    print("saved figures/bic_comparison_baseline_vs_gecco_composed_individual.{png,pdf}")
+
+
 if __name__ == "__main__":
     main()
+    main_with_individual_composed()

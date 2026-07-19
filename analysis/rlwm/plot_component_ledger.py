@@ -187,8 +187,8 @@ for yi, (lbl, kind, gy, go, ny, no) in zip(yp, rows):
     ax.barh(yi + hh/2, gy, height=hh, color=Y_C, edgecolor="white", lw=1.2, zorder=3)
     ax.barh(yi - hh/2, go, height=hh, color=O_C, edgecolor="white", lw=1.2, zorder=3)
     for val, off, cnt in [(gy, hh/2, ny), (go, -hh/2, no)]:
-        sgn = "+" if val >= 0 else "-"
-        txt = r"$\mathbf{%s%.1f}$  (%d/15)" % (sgn, abs(val), cnt)
+        sgn = "+" if val >= 0 else "−"
+        txt = "%s%.1f  (%d/15)" % (sgn, abs(val), cnt)
         ax.annotate(txt, (val, yi + off), xytext=(5 if val >= 0 else -5, 0),
                     textcoords="offset points", va="center",
                     ha="left" if val >= 0 else "right", fontsize=11.5,
@@ -206,12 +206,12 @@ ax.set_xlabel("BIC improvement contributed   ( +  better fit )", fontsize=13.5)
 ax.tick_params(axis="y", length=0)
 ax.tick_params(axis="x", labelsize=11.5)
 # vertical section labels in the left margin (no collision with bars/labels)
-ax.text(xmin + 0.5, (div + top) / 2, "REMOVED\nFROM BASELINE", rotation=90,
-        va="center", ha="center", fontsize=10, fontweight="bold",
-        color="#008181", linespacing=0.95, zorder=4)
-ax.text(xmin + 0.5, (bot + div) / 2, "ADDED\nBY LIBRARY", rotation=90,
-        va="center", ha="center", fontsize=10, fontweight="bold",
-        color="#2b6cb8", linespacing=0.95, zorder=4)
+ax.text(xmin + 1.7, (div + top) / 2, "REMOVED\nFROM BASELINE", rotation=90,
+        va="center", ha="center", fontsize=10, color="#008181",
+        linespacing=0.95, zorder=4)
+ax.text(xmin + 1.7, (bot + div) / 2, "ADDED\nBY LIBRARY", rotation=90,
+        va="center", ha="center", fontsize=10, color="#2b6cb8",
+        linespacing=0.95, zorder=4)
 ax.legend(handles=[Patch(facecolor=Y_C, label="Young (18–36, n = 15)"),
                    Patch(facecolor=O_C, label="Older (46–85, n = 15)")],
           loc="upper right", fontsize=11.5, frameon=False,
