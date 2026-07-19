@@ -48,6 +48,9 @@ abl = json.load(open(LC / "baseline_ablation_bics.json"))
 def rem(name, grp):
     return float(np.mean([abl["full"][str(p)] - abl[name][str(p)] for p in grp]))
 
+def rem_n(name, grp):  # # of group helped by >1 BIC by REMOVING the component
+    return sum((abl["full"][str(p)] - abl[name][str(p)]) > 1 for p in grp)
+
 # ---- additions (single-module gain over backbone) ----
 gains = defaultdict(dict)
 for pdir in sorted(SEARCH.iterdir()):
@@ -62,31 +65,35 @@ for pdir in sorted(SEARCH.iterdir()):
 def add(m, grp):
     return float(np.mean([gains[m][p] for p in grp if p in gains[m]]))
 
-# ledger: (label, kind, young, old)
+def add_n(m, grp):  # # of group helped by >1 BIC by ADDING the module (over backbone)
+    return sum(gains[m].get(p, 0) > 1 for p in grp)
+
+# ledger: (label, kind, young, old, young_n, old_n) — n = of 15 helped by >1 BIC
 rows = [
-    ("REMOVE capacity scaling", "rm", rem("no_capacity", young), rem("no_capacity", old)),
-    ("REMOVE uniform lapse", "rm", rem("no_lapse", young), rem("no_lapse", old)),
-    ("REMOVE load-indep. WM decay", "rm", rem("no_decay", young), rem("no_decay", old)),
-    ("ADD choice stickiness/persev.", "add", add("action_stickiness", young), add("action_stickiness", old)),
-    ("ADD graded WM update/decay", "add", add("unified_wm_update_decay", young), add("unified_wm_update_decay", old)),
-    ("ADD arbitration-scaled WM upd.", "add", add("arbitration_scaled_wm_update", young), add("arbitration_scaled_wm_update", old)),
-    ("ADD asymmetric WM update", "add", add("wm_asymmetric_update_p1", young), add("wm_asymmetric_update_p1", old)),
+    ("REMOVE capacity scaling", "rm", rem("no_capacity", young), rem("no_capacity", old), rem_n("no_capacity", young), rem_n("no_capacity", old)),
+    ("REMOVE uniform lapse", "rm", rem("no_lapse", young), rem("no_lapse", old), rem_n("no_lapse", young), rem_n("no_lapse", old)),
+    ("REMOVE load-indep. WM decay", "rm", rem("no_decay", young), rem("no_decay", old), rem_n("no_decay", young), rem_n("no_decay", old)),
+    ("ADD choice stickiness/persev.", "add", add("action_stickiness", young), add("action_stickiness", old), add_n("action_stickiness", young), add_n("action_stickiness", old)),
+    ("ADD graded WM update/decay", "add", add("unified_wm_update_decay", young), add("unified_wm_update_decay", old), add_n("unified_wm_update_decay", young), add_n("unified_wm_update_decay", old)),
+    ("ADD arbitration-scaled WM upd.", "add", add("arbitration_scaled_wm_update", young), add("arbitration_scaled_wm_update", old), add_n("arbitration_scaled_wm_update", young), add_n("arbitration_scaled_wm_update", old)),
+    ("ADD asymmetric WM update", "add", add("wm_asymmetric_update_p1", young), add("wm_asymmetric_update_p1", old), add_n("wm_asymmetric_update_p1", young), add_n("wm_asymmetric_update_p1", old)),
 ]
 
 labels = [r[0] for r in rows]
 y = np.arange(len(rows))[::-1]
 h = 0.38
-fig, ax = plt.subplots(figsize=(7.6, 4.4))
-for yi, (_, kind, gy, go) in zip(y, rows):
+fig, ax = plt.subplots(figsize=(8.4, 4.6))
+for yi, (_, kind, gy, go, ny, no) in zip(y, rows):
     ax.barh(yi + h/2, gy, height=h, color=YOUNG_C,
             edgecolor="white", zorder=2)
     ax.barh(yi - h/2, go, height=h, color=OLD_C, edgecolor="white", zorder=2)
-    for val, off in [(gy, h/2), (go, -h/2)]:
+    for val, off, cnt in [(gy, h/2, ny), (go, -h/2, no)]:
         sgn = "+" if val >= 0 else "−"
         ax.text(val + (0.3 if val >= 0 else -0.3), yi + off,
-                "%s%.1f" % (sgn, abs(val)), va="center",
+                "%s%.1f  (%d/15)" % (sgn, abs(val), cnt), va="center",
                 ha="left" if val >= 0 else "right", fontsize=7.5, color=INK)
 ax.axvline(0, color=INK, lw=1.0)
+ax.set_xlim(ax.get_xlim()[0], ax.get_xlim()[1] + 4)  # room for (x/15) labels
 # divider between removals (top 3) and additions
 ax.axhline(y[3] + 0.5, color="0.6", lw=0.8, ls=":")
 ax.text(ax.get_xlim()[1], y[0] + 0.55, "removed from baseline (+ = removal lowers BIC)",
@@ -109,23 +116,24 @@ plt.close(fig)
 # ---- overall (all 30) single-series companion ----
 ALL = PIDS
 rows_all = [
-    ("REMOVE capacity scaling", "rm", rem("no_capacity", ALL)),
-    ("REMOVE uniform lapse", "rm", rem("no_lapse", ALL)),
-    ("REMOVE load-indep. WM decay", "rm", rem("no_decay", ALL)),
-    ("ADD choice stickiness/persev.", "add", add("action_stickiness", ALL)),
-    ("ADD graded WM update/decay", "add", add("unified_wm_update_decay", ALL)),
-    ("ADD arbitration-scaled WM upd.", "add", add("arbitration_scaled_wm_update", ALL)),
-    ("ADD asymmetric WM update", "add", add("wm_asymmetric_update_p1", ALL)),
+    ("REMOVE capacity scaling", "rm", rem("no_capacity", ALL), rem_n("no_capacity", ALL)),
+    ("REMOVE uniform lapse", "rm", rem("no_lapse", ALL), rem_n("no_lapse", ALL)),
+    ("REMOVE load-indep. WM decay", "rm", rem("no_decay", ALL), rem_n("no_decay", ALL)),
+    ("ADD choice stickiness/persev.", "add", add("action_stickiness", ALL), add_n("action_stickiness", ALL)),
+    ("ADD graded WM update/decay", "add", add("unified_wm_update_decay", ALL), add_n("unified_wm_update_decay", ALL)),
+    ("ADD arbitration-scaled WM upd.", "add", add("arbitration_scaled_wm_update", ALL), add_n("arbitration_scaled_wm_update", ALL)),
+    ("ADD asymmetric WM update", "add", add("wm_asymmetric_update_p1", ALL), add_n("wm_asymmetric_update_p1", ALL)),
 ]
 ya = np.arange(len(rows_all))[::-1]
-fig, ax = plt.subplots(figsize=(7.2, 4.2))
-for yi, (_, kind, g) in zip(ya, rows_all):
+fig, ax = plt.subplots(figsize=(8.0, 4.4))
+for yi, (_, kind, g, ncnt) in zip(ya, rows_all):
     ax.barh(yi, g, height=0.6, color="#2b6cb8" if kind == "add" else "#1b9e91",
             edgecolor="white", zorder=2)
     sgn = "+" if g >= 0 else "−"
-    ax.text(g + (0.3 if g >= 0 else -0.3), yi, "%s%.1f" % (sgn, abs(g)),
+    ax.text(g + (0.3 if g >= 0 else -0.3), yi, "%s%.1f  (%d/30)" % (sgn, abs(g), ncnt),
             va="center", ha="left" if g >= 0 else "right", fontsize=8.5, color=INK)
 ax.axvline(0, color=INK, lw=1.0)
+ax.set_xlim(ax.get_xlim()[0], ax.get_xlim()[1] + 3)  # room for (x/30) labels
 ax.axhline(ya[3] + 0.5, color="0.6", lw=0.8, ls=":")
 ax.set_yticks(ya)
 ax.set_yticklabels([r[0] for r in rows_all], fontsize=9)
@@ -140,15 +148,14 @@ fig.savefig(FIG_DIR / "library_component_ledger_overall.png")
 fig.savefig(FIG_DIR / "library_component_ledger_overall.pdf")
 plt.close(fig)
 print("overall (all 30):")
-for lbl, kind, g in rows_all:
-    print("  %-30s %+.1f" % (lbl, g))
+for lbl, kind, g, ncnt in rows_all:
+    print("  %-30s %+.1f (%d/30)" % (lbl, g, ncnt))
 
-print("removals (full-ablation, +=removal helps):")
-for lbl, kind, gy, go in rows:
-    if kind == "rm":
-        print("  %-30s young %+.1f  old %+.1f" % (lbl, gy, go))
-print("additions (gain over backbone):")
-for lbl, kind, gy, go in rows:
-    if kind == "add":
-        print("  %-30s young %+.1f  old %+.1f" % (lbl, gy, go))
+for kind_lbl, kk in [("removals (full-ablation, +=removal helps)", "rm"),
+                     ("additions (gain over backbone)", "add")]:
+    print(kind_lbl + ":")
+    for lbl, kind, gy, go, ny, no in rows:
+        if kind == kk:
+            print("  %-30s young %+.1f (%d/15)  old %+.1f (%d/15)"
+                  % (lbl, gy, ny, go, no))
 print("saved library_component_ledger")
