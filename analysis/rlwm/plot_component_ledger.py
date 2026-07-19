@@ -159,3 +159,67 @@ for kind_lbl, kk in [("removals (full-ablation, +=removal helps)", "rm"),
             print("  %-30s young %+.1f (%d/15)  old %+.1f (%d/15)"
                   % (lbl, gy, ny, go, no))
 print("saved library_component_ledger")
+
+# ---------------- poster-ready age-split ledger ----------------
+CLEAN = {  # drop the REMOVE/ADD prefix (section bands carry that), tidy names
+    "REMOVE capacity scaling": "Capacity scaling",
+    "REMOVE uniform lapse": "Uniform lapse",
+    "REMOVE load-indep. WM decay": "Load-independent WM decay",
+    "ADD choice stickiness/persev.": "Choice stickiness / perseveration",
+    "ADD graded WM update/decay": "Graded WM update / decay",
+    "ADD arbitration-scaled WM upd.": "Arbitration-scaled WM update",
+    "ADD asymmetric WM update": "Asymmetric WM update",
+}
+# light / dark shades of the composed-library blue (#2b6cb8)
+Y_C, O_C = "#86bce6", "#17456f"           # young = lighter, older = darker
+BAND_RM, BAND_ADD = "#f3f5f4", "#eef2f7"  # faint neutral section bands
+GRID = "#e1e0d9"
+
+fig, ax = plt.subplots(figsize=(11.0, 5.6))
+yp = np.arange(len(rows))[::-1]
+hh = 0.36
+div = yp[3] + 0.5                      # between removals (top 3) and additions
+top, bot = yp[0] + 0.6, yp[-1] - 0.6
+ax.axhspan(div, top, color=BAND_RM, zorder=0)
+ax.axhspan(bot, div, color=BAND_ADD, zorder=0)
+xmin, xmax = -5.0, 28.0
+for yi, (lbl, kind, gy, go, ny, no) in zip(yp, rows):
+    ax.barh(yi + hh/2, gy, height=hh, color=Y_C, edgecolor="white", lw=1.2, zorder=3)
+    ax.barh(yi - hh/2, go, height=hh, color=O_C, edgecolor="white", lw=1.2, zorder=3)
+    for val, off, cnt in [(gy, hh/2, ny), (go, -hh/2, no)]:
+        sgn = "+" if val >= 0 else "-"
+        txt = r"$\mathbf{%s%.1f}$  (%d/15)" % (sgn, abs(val), cnt)
+        ax.annotate(txt, (val, yi + off), xytext=(5 if val >= 0 else -5, 0),
+                    textcoords="offset points", va="center",
+                    ha="left" if val >= 0 else "right", fontsize=11.5,
+                    color=INK, zorder=4)
+ax.axvline(0, color=INK, lw=1.2, zorder=2)
+ax.axhline(div, color="0.72", lw=0.9, ls=(0, (4, 3)), zorder=1)
+for gx in range(5, 26, 5):
+    ax.axvline(gx, color=GRID, lw=0.8, zorder=0)
+ax.set_yticks(yp)
+ax.set_yticklabels([CLEAN[r[0]] for r in rows], fontsize=12.5)
+ax.set_xlim(xmin, xmax)
+ax.set_ylim(bot, top)
+ax.set_xticks(range(0, 26, 5))
+ax.set_xlabel("BIC improvement contributed   ( +  better fit )", fontsize=13.5)
+ax.tick_params(axis="y", length=0)
+ax.tick_params(axis="x", labelsize=11.5)
+# vertical section labels in the left margin (no collision with bars/labels)
+ax.text(xmin + 0.5, (div + top) / 2, "REMOVED\nFROM BASELINE", rotation=90,
+        va="center", ha="center", fontsize=10, fontweight="bold",
+        color="#008181", linespacing=0.95, zorder=4)
+ax.text(xmin + 0.5, (bot + div) / 2, "ADDED\nBY LIBRARY", rotation=90,
+        va="center", ha="center", fontsize=10, fontweight="bold",
+        color="#2b6cb8", linespacing=0.95, zorder=4)
+ax.legend(handles=[Patch(facecolor=Y_C, label="Young (18–36, n = 15)"),
+                   Patch(facecolor=O_C, label="Older (46–85, n = 15)")],
+          loc="upper right", fontsize=11.5, frameon=False,
+          bbox_to_anchor=(1.0, 0.99))
+for s in ("top", "right"):
+    ax.spines[s].set_visible(False)
+fig.tight_layout()
+fig.savefig(FIG_DIR / "library_component_ledger_poster.png", dpi=400)
+fig.savefig(FIG_DIR / "library_component_ledger_poster.pdf")
+plt.close(fig)
+print("saved library_component_ledger_poster")
