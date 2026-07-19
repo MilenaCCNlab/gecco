@@ -121,7 +121,20 @@ rationale.
     base, param_cap 9 = 22 candidates) so the shared `hybrid.py` stays intact for
     the old run. Task 9 arm-2 eval reads the frozen `hybrid_base/composed_model.txt`
     and needs no remap.
-16. **Monitor pattern was too broad (2026-07-18).** Benign numpy
+16. **Compose fitting must run on `gecco-env` (scipy 1.13.1), not `gecco-env313`
+    (scipy 1.18) (2026-07-19).** First launched the composition arms + coverage on
+    gecco-env313; the hybrid-base search crashed with scipy's
+    `ValueError: x0 violates bound constraints` — scipy 1.18 strictly rejects an
+    initial guess even marginally outside bounds, whereas 1.13.1 (the validated env,
+    what the 13 compose tests + 45-pid run use) tolerates it. scipy<1.14 can't
+    install on Python 3.13, so the fix is to run all compose FITTING (search,
+    hybrid, coverage, eval) on `gecco-env`. Only EXTRACTION needed gecco-env313
+    (it doesn't do the bound-sensitive fits). Consistency bonus: all BICs now come
+    from one optimizer. Killed the 313 jobs, cleared partial `hybrid_base/`, relaunched
+    on gecco-env. (Import on gecco-env is fine; an earlier 2-min "hang" was my probe
+    calling `enumerate_candidates` on all ~55k combos — the real jobs use greedy /
+    enumerate_from_base.)
+17. **Monitor pattern was too broad (2026-07-18).** Benign numpy
     `RuntimeWarning: invalid value encountered in divide` / `overflow
     encountered in exp` (unstable softmax in an LLM-proposed model during
     fitting) tripped the monitor's `invalid` grep — false alarm; chunk 100:125
