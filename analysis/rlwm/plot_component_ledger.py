@@ -223,3 +223,78 @@ fig.savefig(FIG_DIR / "library_component_ledger_poster.png", dpi=400)
 fig.savefig(FIG_DIR / "library_component_ledger_poster.pdf")
 plt.close(fig)
 print("saved library_component_ledger_poster")
+
+# ---------------- poster-ready FREQUENCY ledger (final compositions) --------
+# Based on each participant's FINAL best composition
+# (perpid_plotspan_results.json). REMOVED rows = how often the library
+# re-selects the dropped baseline mechanism; ADDED rows = selection frequency
+# of the library's new components (ranked by total use).
+perpid_final = json.load(open(LC / "perpid_plotspan_results.json"))
+fy = [r for r in perpid_final if r["pid"] < 36]
+fo = [r for r in perpid_final if r["pid"] >= 36]
+
+def fcount(grp, members):
+    return sum(1 for r in grp if set(r["modules"]) & set(members))
+
+FAM = [  # (label, kind, [library module ids])
+    ("Capacity scaling", "rm", ["load_scaled_wm_weight"]),
+    ("Load-dependent WM decay", "rm", ["set_size_wm_decay", "load_dependent_wm_decay_global"]),
+    ("Uniform lapse", "rm", []),
+    ("WM normalization", "add", ["wm_normalization"]),
+    ("Asymmetric WM update", "add", ["wm_asymmetric_update_p1", "wm_asymmetric_update_p2", "asymmetric_fixed_wm_update"]),
+    ("One-shot WM encoding", "add", ["wm_perfect_encoding_on_reward"]),
+    ("Choice stickiness / perseveration", "add", ["action_stickiness", "choice_perseveration"]),
+    ("Eligibility trace", "add", ["eligibility_trace"]),
+    ("Arbitration-scaled WM update", "add", ["arbitration_scaled_wm_update"]),
+]
+frows = [(lbl, kind, fcount(fy, mem), fcount(fo, mem)) for lbl, kind, mem in FAM]
+n_rm = sum(1 for _, k, _, _ in frows if k == "rm")
+
+fig, ax = plt.subplots(figsize=(10.5, 5.6))
+yp = np.arange(len(frows))[::-1]
+hh = 0.36
+div = yp[n_rm - 1] - 0.5                  # boundary below the removed rows
+top, bot = yp[0] + 0.6, yp[-1] - 0.6
+ax.axhspan(div, top, color=BAND_RM, zorder=0)
+ax.axhspan(bot, div, color=BAND_ADD, zorder=0)
+xmax = 17.0
+for yi, (lbl, kind, cy, co) in zip(yp, frows):
+    ax.barh(yi + hh/2, cy, height=hh, color=Y_C, edgecolor="white", lw=1.2, zorder=3)
+    ax.barh(yi - hh/2, co, height=hh, color=O_C, edgecolor="white", lw=1.2, zorder=3)
+    for cnt, off in [(cy, hh/2), (co, -hh/2)]:
+        ax.annotate("%d/15" % cnt, (cnt, yi + off), xytext=(5, 0),
+                    textcoords="offset points", va="center", ha="left",
+                    fontsize=11.5, color=INK, zorder=4)
+ax.axvline(0, color=INK, lw=1.2, zorder=2)
+ax.axhline(div, color="0.72", lw=0.9, ls=(0, (4, 3)), zorder=1)
+for gx in range(5, 16, 5):
+    ax.axvline(gx, color=GRID, lw=0.8, zorder=0)
+ax.set_yticks(yp)
+ax.set_yticklabels([r[0] for r in frows], fontsize=12.5)
+ax.set_xlim(-5.0, xmax)
+ax.set_ylim(bot, top)
+ax.set_xticks(range(0, 16, 5))
+ax.set_xlabel("participants whose best composition uses it   ( of 15 per group )",
+              fontsize=13)
+ax.tick_params(axis="y", length=0)
+ax.tick_params(axis="x", labelsize=11.5)
+ax.text(-5.0 + 1.7, (div + top) / 2, "RE-SELECTED\nFROM BASELINE", rotation=90,
+        va="center", ha="center", fontsize=10, color="#008181",
+        linespacing=0.95, zorder=4)
+ax.text(-5.0 + 1.7, (bot + div) / 2, "NEW IN\nLIBRARY", rotation=90,
+        va="center", ha="center", fontsize=10, color="#2b6cb8",
+        linespacing=0.95, zorder=4)
+ax.legend(handles=[Patch(facecolor=Y_C, label="Young (18–36, n = 15)"),
+                   Patch(facecolor=O_C, label="Older (46–85, n = 15)")],
+          loc="lower right", fontsize=11.5, frameon=False,
+          bbox_to_anchor=(1.0, 0.02))
+for s in ("top", "right"):
+    ax.spines[s].set_visible(False)
+fig.tight_layout()
+fig.savefig(FIG_DIR / "library_component_ledger_frequency_poster.png", dpi=400)
+fig.savefig(FIG_DIR / "library_component_ledger_frequency_poster.pdf")
+plt.close(fig)
+print("frequency ledger:")
+for lbl, kind, cy, co in frows:
+    print("  %-34s young %2d/15  old %2d/15  [%s]" % (lbl, cy, co, kind))
+print("saved library_component_ledger_frequency_poster")
