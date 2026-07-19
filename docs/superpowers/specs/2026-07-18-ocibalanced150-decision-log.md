@@ -82,7 +82,17 @@ rationale.
     same driver. (Monitor's `429`/`503 ` numeric tokens also matched BIC values
     like 429.57 → replaced with error-string-only pattern: ServerError,
     google.genai.errors, RESOURCE_EXHAUSTED, Traceback, etc.)
-13. **Monitor pattern was too broad (2026-07-18).** Benign numpy
+13. **Network blip killed all 5 remaining plain chunks at once (~22:30).**
+    `httpx.ReadError: [Errno 54] Connection reset by peer` — a momentary local
+    network drop reset every open socket simultaneously (not quota/outage; both
+    keys probed "Pong!" immediately after). Switched the WHOLE run to resilient
+    per-pid drivers: 6 drivers cover 7-24 / 25-49 / 50-74 / 75-99 / 100-124 /
+    125-149 (each skips done pids, retries each pid 6×). pids 0-6 already done.
+    3 drivers per key. Now blip-resilient. Monitor retuned to alert only on
+    "STILL FAILING after" (a pid that exhausted retries), plus milestones/gates.
+    Resume topology if session restarts: relaunch `run_individual_resilient.sh
+    <lo> <hi> <KEY>` for any range with missing pids (idempotent — skips done).
+14. **Monitor pattern was too broad (2026-07-18).** Benign numpy
     `RuntimeWarning: invalid value encountered in divide` / `overflow
     encountered in exp` (unstable softmax in an LLM-proposed model during
     fitting) tripped the monitor's `invalid` grep — false alarm; chunk 100:125
