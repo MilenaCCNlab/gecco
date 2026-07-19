@@ -120,7 +120,7 @@ def main_with_individual_composed():
     indiv = pd.read_csv(ANALYSIS_DIR / "individual_bics.csv")["bic"].to_numpy()
 
     models = [
-        ("Baseline", pd.read_csv(ANALYSIS_DIR / "baseline_bics.csv")["bic"].to_numpy(), TEAL),
+        ("RLWM", pd.read_csv(ANALYSIS_DIR / "baseline_bics.csv")["bic"].to_numpy(), TEAL),
         ("GeCCo\n(group)", pd.read_csv(ANALYSIS_DIR / "group_bics.csv")["bic"].to_numpy(), GRAY),
         ("Composed\nlibrary\n(shared)", pd.read_csv(CSV)["bic"].to_numpy(), DBLUE),
         ("Composed\nlibrary\n(individual)", pp, BLUE),
@@ -139,7 +139,7 @@ def main_with_individual_composed():
     # GeCCo individual as a reference line
     im = float(indiv.mean())
     ax.axhline(im, color=INK, lw=1.4, ls=(0, (5, 3)), zorder=4)
-    ax.text(len(models) - 0.55, im, "GeCCo individual", va="bottom", ha="right",
+    ax.text(-0.5, im, "GeCCo individual", va="bottom", ha="left",
             fontsize=9, color=INK, style="italic")
     ax.set_xlim(-0.6, len(models) - 0.4)
     lo = np.floor((min(means + [im]) - max(errs)) / 20) * 20 - 20
