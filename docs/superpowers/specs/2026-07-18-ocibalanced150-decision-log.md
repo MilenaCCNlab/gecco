@@ -121,7 +121,19 @@ rationale.
     base, param_cap 9 = 22 candidates) so the shared `hybrid.py` stays intact for
     the old run. Task 9 arm-2 eval reads the frozen `hybrid_base/composed_model.txt`
     and needs no remap.
-16. **Compose fitting must run on `gecco-env` (scipy 1.13.1), not `gecco-env313`
+16. **Code review (xhigh) of library_learning + analysis, 2026-07-19.** No bug
+    affected the run's results. Fixed (safe, no result change): ledger backbone
+    `next()` default; shared y-axis across the by-OCI BIC panels; report date
+    derived not hardcoded. Documented as latent/inherited, NOT changed (would
+    desync from committed results or is verbatim-from-original): fitting.py
+    all-starts-fail `1e10` sentinel (never triggered; can't drop the pid without
+    breaking downstream mean/wilcoxon); `preprocess_data_150.hybrid_model` counts
+    −1 trials so baseline_bic diverges from the guarded eval hybrid (→ the 19
+    benign cross-check warnings); `clean_raw_file` missing-marker guard dropped
+    (latent, 0/150). Cross-figure note: the ledger's leave-one-out reference is
+    the 5-module hybrid base (~375.8), not the report's HYBRID_SOURCE baseline
+    (~371.4) — the ledger shows deltas so no absolute is displayed.
+17. **Compose fitting must run on `gecco-env` (scipy 1.13.1), not `gecco-env313`
     (scipy 1.18) (2026-07-19).** First launched the composition arms + coverage on
     gecco-env313; the hybrid-base search crashed with scipy's
     `ValueError: x0 violates bound constraints` — scipy 1.18 strictly rejects an
@@ -134,7 +146,7 @@ rationale.
     on gecco-env. (Import on gecco-env is fine; an earlier 2-min "hang" was my probe
     calling `enumerate_candidates` on all ~55k combos — the real jobs use greedy /
     enumerate_from_base.)
-17. **Monitor pattern was too broad (2026-07-18).** Benign numpy
+18. **Monitor pattern was too broad (2026-07-18).** Benign numpy
     `RuntimeWarning: invalid value encountered in divide` / `overflow
     encountered in exp` (unstable softmax in an LLM-proposed model during
     fitting) tripped the monitor's `invalid` grep — false alarm; chunk 100:125
