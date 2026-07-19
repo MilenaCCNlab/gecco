@@ -43,7 +43,31 @@ log it and continue"; deliverable is the full HTML report. Spec:
    rule and the report-by-morning deadline. Greedy forward selection
    (~90-130 candidate fits ≈ 1.5-2.5 h) mirrors the two-step precedent
    (exhaustive ≈ 21 h there → greedy, pre-authorized).
-8. **Extraction run 1 failed on a harness bug, not Gemini** (this run's
+8. **Within-trial outcome leakage found and quarantined from the shared-
+   program arm.** The first greedy winner was dominated by
+   `outcome_gated_wm_reliance` (validation BIC 482→299), which updates a
+   gate with the CURRENT trial's reward before the current choice's
+   likelihood. In RLWM reward is deterministic given the choice, so this is
+   within-trial outcome leakage — and it is FAITHFUL to the source: seed 3's
+   original GPT-5-evolved program does the same (lines 66-76), while the
+   group program does not. Audit of all 22 modules found 3 leaky
+   (`outcome_gated_wm_reliance`, `set_size_dependent_wm_lapse`,
+   `load_dependent_wm_arbitration` — the latter two via `abs(r - q[s,a])`
+   in mix_weight). Resolution:
+   - Shared-program arm (headline, vs group/canonical): re-searched over the
+     19 leak-free modules (`module_inventory_leakfree.json`); fair rivals.
+   - The unconstrained (leak-permitting) search artifacts moved to
+     `unconstrained_search/` and reported only as a disclosed confound.
+   - Reconstruction arm: the full-22-module run confirmed total leak
+     dominance (all 7 pids picked `outcome_gated_wm_reliance` and "beat"
+     their individual ceiling by 130-290 BIC — spurious, since not every
+     individual program leaks). REVISED: the leak-free library is the
+     primary reconstruction arm too; the full-library run is archived as
+     `reconstruction_results_fulllib.json` / `reconstruction_fulllib/` and
+     reported only as a leak-dominance demonstration.
+   - The individual-gecco "ceiling" BICs are themselves inflated wherever
+     source programs leak; flagged in the report.
+9. **Extraction run 1 failed on a harness bug, not Gemini** (this run's
    analog of the two-step int/str lesson): the renderer substituted
    `rl_update`/`wm_update` overrides inline, so multi-line if/else WM
    updates — which Gemini produced for most WM modules — lost their
