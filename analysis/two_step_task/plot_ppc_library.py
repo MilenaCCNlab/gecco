@@ -32,7 +32,11 @@ from library_learning.config import resolve_target
 from library_learning.loading import exec_model
 # reuse helpers from the OCI-split PPC script
 from analysis.two_step_task.plot_ppc_oci_split import (
-    stay_probs, sim_stay, load_simulate, _daw_simulate, _draw)
+    stay_probs, sim_stay, load_simulate, _daw_simulate)
+
+LIGHT = {"#1a1a1a": "#b3b3b3", "#008181": "#9dcece",
+         "#708190": "#bfc7ce", "#40baec": "#a9e0f6"}
+GRID = "#e1e0d9"
 
 ROOT = Path(__file__).resolve().parents[2]
 IND = ROOT / "results/two_step_psychiatry_individual_function_ocibalanced150_maxsetting_individual"
@@ -124,6 +128,31 @@ def render_simulate(inventory, module_ids):
     return "\n".join(l for l in src.splitlines() if l.strip() != EMPTY_SLOT_SENTINEL) + "\n"
 
 
+def _draw_compact(ax, means, errs, color, show_ylabel=True, show_xlabel=True,
+                  annotate_shades=False):
+    """Compact stay-probability panel matching plot_clean_figures.draw_stay_probability.
+    means order: common/r, rare/r, common/nr, rare/nr."""
+    dark, light = color, LIGHT.get(color, color)
+    positions = [-0.2, 0.2, 0.8, 1.2]
+    ax.bar(positions, means, width=0.38, color=[dark, light, dark, light], zorder=2)
+    ax.errorbar(positions, means, yerr=errs, fmt="none", ecolor="#444444",
+                elinewidth=1.5, capsize=0, zorder=3)
+    if annotate_shades:
+        ax.text(positions[0], 0.05, "common", rotation=90, ha="center",
+                va="bottom", fontsize=11, color="white", zorder=4)
+        ax.text(positions[1], 0.05, "rare", rotation=90, ha="center",
+                va="bottom", fontsize=11, color="#0b0b0b", zorder=4)
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["yes", "no"])
+    if show_xlabel:
+        ax.set_xlabel("rewarded")
+    ax.set_xlim(-0.55, 1.55); ax.set_ylim(0, 1.0)
+    ax.set_yticks(np.arange(0, 1.01, 0.25))
+    if show_ylabel:
+        ax.set_ylabel("Stay probability")
+    ax.tick_params(axis="x", length=0)
+    ax.grid(axis="y", color=GRID, linewidth=0.6, zorder=0); ax.set_axisbelow(True)
+
+
 def main():
     df = pd.read_csv(DATA)
     manifest = {p["participant"]: p for p in
@@ -161,18 +190,16 @@ def main():
         library[p] = sim_stay(sim, par, drift[p], ntr[p], 9500 + p)
 
     models = [("Humans", human, BLACK), ("Hybrid", hybrid, TEAL),
-              ("GeCCo (group)", group, GRAY), ("Library (individual)", library, BLUE)]
-    fig, axes = plt.subplots(1, 4, figsize=(12.5, 3.2), sharey=True)
-    for ax, (name, data, color) in zip(axes, models):
+              ("GeCCo\n(group)", group, GRAY), ("Library\n(individual)", library, BLUE)]
+    fig, axes = plt.subplots(1, 4, figsize=(8.5, 3.2), sharey=True)
+    for i, (ax, (name, data, color)) in enumerate(zip(axes, models)):
         vals = np.array([data[p] for p in test if not np.all(np.isnan(data[p]))])
         m = np.nanmean(vals, axis=0)
         e = np.nanstd(vals, axis=0, ddof=1) / np.sqrt(len(vals))
-        _draw(ax, m, e, color)
-        ax.set_title(name, fontsize=12)
-        if ax is not axes[0]:
-            ax.set_ylabel("")
-    fig.suptitle("Two-step stay probability: models vs humans (test participants)", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+        _draw_compact(ax, m, e, color, show_ylabel=(i == 0),
+                      show_xlabel=(i == 0), annotate_shades=(i == 0))
+        ax.set_title(name)
+    fig.subplots_adjust(wspace=0.15)
     fig.savefig(FIG / "ppc_humans_vs_gecco_library.png")
     fig.savefig(FIG / "ppc_humans_vs_gecco_library.pdf")
     plt.close(fig)
