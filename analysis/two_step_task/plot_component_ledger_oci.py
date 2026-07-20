@@ -102,38 +102,40 @@ def main():
     have_rem = ABL.exists()
     rem = load_removals() if have_rem else {}
 
-    # pick top-N added modules by pooled mean gain
+    # pick top-N added modules by pooled mean gain (v1 poster: raw modules)
     pooled_gain = {m: grp_mean(g, pids) for m, g in gains.items()}
     top_add = sorted(pooled_gain, key=pooled_gain.get, reverse=True)[:N_ADD]
 
-    # v2 selection: modules where Low vs High OCI differ most, with a floor so
-    # at least one group shows a reasonable improvement (else a big % difference
-    # between two tiny gains would dominate).
-    FLOOR = 8.0
     add_low = {m: grp_mean(gains[m], by_t["Low"]) for m in gains}
     add_high = {m: grp_mean(gains[m], by_t["High"]) for m in gains}
-    reasonable = [m for m in gains if max(add_low[m], add_high[m]) >= FLOOR]
-    diff_add = sorted(reasonable, key=lambda m: abs(add_high[m] - add_low[m]),
-                      reverse=True)[:N_ADD]
+    FLOOR = 8.0
 
-    # de-duplicated selection: collapse each excludes-substitute family to its
-    # single best-gaining representative (+ keep singletons), so each DISTINCT
-    # mechanism idea appears once.
+    # collapse each excludes-substitute family to its single best-gaining
+    # representative (+ keep singletons), so each DISTINCT mechanism appears once.
     inv_path = LC / "module_inventory.json"
-    dedup_add, dedup_labels = [], {}
+    reps, dedup_labels = [], {}
     if inv_path.exists():
         for fam in excludes_families(inv_path):
             fam_g = [m for m in fam if m in gains]
             if not fam_g:
                 continue
             rep = max(fam_g, key=lambda m: pooled_gain.get(m, -1e9))
-            if pooled_gain.get(rep, 0) <= 0:
-                continue
-            dedup_add.append(rep)
+            reps.append(rep)
             lbl = family_label(fam)
             if lbl:
                 dedup_labels[rep] = "ADD " + lbl
-        dedup_add = sorted(dedup_add, key=lambda m: pooled_gain[m], reverse=True)[:N_ADD]
+    else:
+        reps = list(gains)
+
+    # dedup poster: representatives ranked by pooled gain (positive only)
+    dedup_add = sorted([r for r in reps if pooled_gain.get(r, 0) > 0],
+                       key=lambda m: pooled_gain[m], reverse=True)[:N_ADD]
+
+    # ocidiff poster: representatives (families merged) ranked by |High-Low|,
+    # with a floor so at least one group shows a reasonable improvement.
+    diff_reasonable = [r for r in reps if max(add_low[r], add_high[r]) >= FLOOR]
+    diff_add = sorted(diff_reasonable, key=lambda m: abs(add_high[m] - add_low[m]),
+                      reverse=True)[:N_ADD]
 
     # removals: keep only components whose removal IMPROVES fit (pooled full-abl > 0)
     rm_modules = [m for m in BASE if have_rem and grp_mean(rem[m], pids) > 0]
@@ -205,7 +207,8 @@ def main():
             "Library component ledger, by OCI group (test participants)")
     _poster(rm_modules, diff_add, rem, gains, by_t,
             "library_component_ledger_poster_ocidiff",
-            "Mechanisms most different between Low and High OCI")
+            "Mechanisms most different between Low and High OCI",
+            add_label=dedup_labels)
     if dedup_add:
         _poster(rm_modules, dedup_add, rem, gains, by_t,
                 "library_component_ledger_dedup",
