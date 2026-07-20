@@ -1,0 +1,257 @@
+Here are three new cognitive models to explain the participant's decision-making behavior. They build upon the best model so far by introducing new learning and evaluation mechanisms while maintaining a strict 8-parameter limit.
+
+### Model 1: Transition Matrix Learning
+While the standard model assumes participants maintain a fixed 70/30 internal representation of the transition probabilities between spaceships and planets, this model relaxes that assumption. It introduces `alpha_trans`, allowing the participant to dynamically update their internal transition matrix based on the transitions they actually experience.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Hybrid MB/MF with stage 1 and stage 2 stickiness, and transition matrix learning.
+    This model allows the participant to update their internal model of the transition probabilities
+    between spaceships and planets, rather than assuming a fixed 70/30 split.
+    
+    Parameters:
+    alpha: learning rate for Q-values [0,1]
+    beta_1: inverse temperature for stage 1 [0,10]
+    beta_2: inverse temperature for stage 2 [0,10]
+    w: model-based weight [0,1]
+    lam: eligibility trace [0,1]
+    st_1: choice stickiness for stage 1 [0,10]
+    st_2: choice stickiness for stage 2 [0,10]
+    alpha_trans: learning rate for transitions [0,1]
+    """
+    alpha, beta_1, beta_2, w, lam, st_1, st_2, alpha_trans = model_parameters
+    n_trials = len(action_1)
+    
+    tm = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    last_a1 = -1
+    last_a2 = np.full(2, -1)
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            continue
+            
+        state_idx = state[trial]
+        a1 = action_1[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = tm @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if last_a1 != -1:
+            rep1[last_a1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + st_1 * rep1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        rep2 = np.zeros(2)
+        if last_a2[state_idx] != -1:
+            rep2[last_a2[state_idx]] = 1.0
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx, :] + st_2 * rep2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Q-value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        # Transition matrix updating
+        tm[a1, state_idx] += alpha_trans * (1.0 - tm[a1, state_idx])
+        tm[a1, 1 - state_idx] += alpha_trans * (0.0 - tm[a1, 1 - state_idx])
+        
+        last_a1 = a1
+        last_a2[state_idx] = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Counterfactual Stage 2 Learning
+This model assumes that participants might infer the value of the unchosen alien at the second stage based on the reward received from the chosen alien. If they believe the reward probabilities of the two aliens are anti-correlated, they will update the unchosen option in the opposite direction using the parameter `w_cf`.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid MB/MF with stage 1 and stage 2 stickiness, and counterfactual learning at stage 2.
+    This model assumes participants might update the value of the unchosen alien at the second stage
+    based on the reward received from the chosen alien, assuming anti-correlated reward probabilities.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta_1: inverse temperature for stage 1 [0,10]
+    beta_2: inverse temperature for stage 2 [0,10]
+    w: model-based weight [0,1]
+    lam: eligibility trace [0,1]
+    st_1: choice stickiness for stage 1 [0,10]
+    st_2: choice stickiness for stage 2 [0,10]
+    w_cf: counterfactual learning weight for unchosen stage 2 option [0,1]
+    """
+    alpha, beta_1, beta_2, w, lam, st_1, st_2, w_cf = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    last_a1 = -1
+    last_a2 = np.full(2, -1)
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            continue
+            
+        state_idx = state[trial]
+        a1 = action_1[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if last_a1 != -1:
+            rep1[last_a1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + st_1 * rep1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        rep2 = np.zeros(2)
+        if last_a2[state_idx] != -1:
+            rep2[last_a2[state_idx]] = 1.0
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx, :] + st_2 * rep2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Q-value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        # Counterfactual update for the unchosen action at stage 2
+        unchosen_a2 = 1 - a2
+        cf_reward = 1.0 - reward[trial]
+        delta_cf = cf_reward - q_stage2_mf[state_idx, unchosen_a2]
+        q_stage2_mf[state_idx, unchosen_a2] += alpha * w_cf * delta_cf
+        
+        last_a1 = a1
+        last_a2[state_idx] = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Variable Initial Q-Values
+Instead of hardcoding the initial Q-values to 0.5, this model parameterizes them via `q0`. This allows the model to capture whether the participant starts with optimistic (e.g., ~1.0, driving intense early exploration) or pessimistic (e.g., ~0.0) expectations about the environment's reward rates.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid MB/MF with stage 1 and stage 2 stickiness, and a variable initial Q-value.
+    This model tests if learning starts from an optimistic or pessimistic baseline (q0), 
+    which affects early exploration before Q-values converge to true expected rewards.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta_1: inverse temperature for stage 1 [0,10]
+    beta_2: inverse temperature for stage 2 [0,10]
+    w: model-based weight [0,1]
+    lam: eligibility trace [0,1]
+    st_1: choice stickiness for stage 1 [0,10]
+    st_2: choice stickiness for stage 2 [0,10]
+    q0: initial Q-value [0,1]
+    """
+    alpha, beta_1, beta_2, w, lam, st_1, st_2, q0 = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+
+    q_stage1_mf = np.full(2, q0, dtype=float)
+    q_stage2_mf = np.full((2, 2), q0, dtype=float)
+    last_a1 = -1
+    last_a2 = np.full(2, -1)
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            continue
+            
+        state_idx = state[trial]
+        a1 = action_1[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if last_a1 != -1:
+            rep1[last_a1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + st_1 * rep1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        rep2 = np.zeros(2)
+        if last_a2[state_idx] != -1:
+            rep2[last_a2[state_idx]] = 1.0
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx, :] + st_2 * rep2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Q-value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        last_a1 = a1
+        last_a2[state_idx] = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

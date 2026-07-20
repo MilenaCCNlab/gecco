@@ -1,0 +1,219 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """Hybrid model with decay and separate stage stickiness (perseveration).
+    Bounds:
+    alpha: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    w: [0,1]
+    lmbda: [0,1]
+    decay: [0,1]
+    p1: [-5,5]
+    p2: [-5,5]
+    """
+    alpha, beta1, beta2, w, lmbda, decay, p1, p2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2 = -1
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Add stickiness for stage 1
+        stickiness_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1[last_action_1] = p1
+            
+        v1 = beta1 * q_net + stickiness_1
+        v1_max = np.max(v1)
+        exp_q1 = np.exp(v1 - v1_max)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        stickiness_2 = np.zeros(2)
+        if last_action_2 != -1:
+            stickiness_2[last_action_2] = p2
+            
+        v2 = beta2 * q_stage2_mf[state_idx] + stickiness_2
+        v2_max = np.max(v2)
+        exp_q2 = np.exp(v2 - v2_max)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1 + alpha * lmbda * delta_stage2
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # decay for unchosen actions
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+                    
+        last_action_1 = action_1[trial]
+        last_action_2 = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """Hybrid model with positive/negative learning rates, separate betas, and decay.
+    Bounds:
+    alpha_pos: [0,1]
+    alpha_neg: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    w: [0,1]
+    lmbda: [0,1]
+    decay: [0,1]
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lmbda, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        v1 = beta1 * q_net
+        v1_max = np.max(v1)
+        exp_q1 = np.exp(v1 - v1_max)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        v2 = beta2 * q_stage2_mf[state_idx]
+        v2_max = np.max(v2)
+        exp_q2 = np.exp(v2 - v2_max)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+
+        # asymmetric learning rates based on sign of prediction error
+        alpha1 = alpha_pos if delta_stage1 >= 0 else alpha_neg
+        alpha2 = alpha_pos if delta_stage2 >= 0 else alpha_neg
+
+        q_stage1_mf[action_1[trial]] += alpha1 * delta_stage1 + alpha1 * lmbda * delta_stage2
+        q_stage2_mf[state_idx, action_2[trial]] += alpha2 * delta_stage2
+
+        # decay for unchosen actions
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """Hybrid model with value decay and an exponential choice trace (continuous perseveration).
+    Bounds:
+    alpha: [0,1]
+    beta: [0,10]
+    w: [0,1]
+    lmbda: [0,1]
+    decay: [0,1]
+    trace_decay: [0,1]
+    trace_weight: [-5,5]
+    """
+    alpha, beta, w, lmbda, decay, trace_decay, trace_weight = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    choice_trace_1 = np.zeros(2)
+    choice_trace_2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        v1 = beta * q_net + trace_weight * choice_trace_1
+        v1_max = np.max(v1)
+        exp_q1 = np.exp(v1 - v1_max)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        v2 = beta * q_stage2_mf[state_idx] + trace_weight * choice_trace_2[state_idx]
+        v2_max = np.max(v2)
+        exp_q2 = np.exp(v2 - v2_max)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1 + alpha * lmbda * delta_stage2
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # decay for unchosen actions
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+                    
+        # Update choice traces
+        choice_trace_1 *= (1 - trace_decay)
+        choice_trace_1[action_1[trial]] += 1
+        
+        choice_trace_2 *= (1 - trace_decay)
+        choice_trace_2[state_idx, action_2[trial]] += 1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

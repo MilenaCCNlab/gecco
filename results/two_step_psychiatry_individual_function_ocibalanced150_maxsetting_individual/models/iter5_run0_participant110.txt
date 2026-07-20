@@ -1,0 +1,246 @@
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Common vs Rare Transition Eligibility Trace.
+    Different eligibility traces (lambda_c and lambda_r) are used depending on whether
+    the transition from stage 1 to stage 2 was common or rare, allowing for different
+    rates of credit assignment based on the expectedness of the state transition.
+    
+    Parameters:
+    alpha: learning rate [0, 1]
+    beta1: inverse temperature for stage 1 [0, 10]
+    beta2: inverse temperature for stage 2 [0, 10]
+    w: model-based weight [0, 1]
+    lambda_c: eligibility trace for common transitions [0, 1]
+    lambda_r: eligibility trace for rare transitions [0, 1]
+    p: perseveration bonus for stage 1 [0, 5]
+    decay_rate: rate at which unchosen options decay to 0.5 [0, 1]
+    """
+    alpha, beta1, beta2, w, lambda_c, lambda_r, p, decay_rate = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    last_action = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action = -1
+            continue
+
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers = np.zeros(2)
+        if last_action != -1:
+            pers[last_action] = 1.0
+            
+        q_net_scaled = beta1 * q_net + p * pers
+        q_net_scaled -= np.max(q_net_scaled)
+        exp_q1 = np.exp(q_net_scaled)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        q2_scaled = beta2 * q_stage2_mf[s]
+        q2_scaled -= np.max(q2_scaled)
+        exp_q2 = np.exp(q2_scaled)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+        
+        # Determine if transition was common (a1 == s) or rare (a1 != s)
+        current_lambda = lambda_c if a1 == s else lambda_r
+        q_stage1_mf[a1] += alpha * current_lambda * delta_stage2
+
+        q_stage1_mf[1 - a1] += decay_rate * (0.5 - q_stage1_mf[1 - a1])
+        for state_idx in range(2):
+            for action_idx in range(2):
+                if not (state_idx == s and action_idx == a2):
+                    q_stage2_mf[state_idx, action_idx] += decay_rate * (0.5 - q_stage2_mf[state_idx, action_idx])
+        
+        last_action = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Habit Choice Kernel for Stage 1.
+    Replaces the simple previous-trial perseveration with a choice kernel (habit trace)
+    that updates continuously, capturing longer-term choice autocorrelation instead of
+    just a 1-trial lookback.
+    
+    Parameters:
+    alpha: learning rate [0, 1]
+    beta1: inverse temperature for stage 1 [0, 10]
+    beta2: inverse temperature for stage 2 [0, 10]
+    w: model-based weight [0, 1]
+    lambda_: eligibility trace [0, 1]
+    p: habit weight for stage 1 [0, 5]
+    choice_lr: learning rate for the choice kernel [0, 1]
+    decay_rate: rate at which unchosen options decay to 0.5 [0, 1]
+    """
+    alpha, beta1, beta2, w, lambda_, p, choice_lr, decay_rate = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    choice_kernel = np.zeros(2)
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        q_net_scaled = beta1 * q_net + p * choice_kernel
+        q_net_scaled -= np.max(q_net_scaled)
+        exp_q1 = np.exp(q_net_scaled)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        q2_scaled = beta2 * q_stage2_mf[s]
+        q2_scaled -= np.max(q2_scaled)
+        exp_q2 = np.exp(q2_scaled)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+        
+        q_stage1_mf[a1] += alpha * lambda_ * delta_stage2
+
+        q_stage1_mf[1 - a1] += decay_rate * (0.5 - q_stage1_mf[1 - a1])
+        for state_idx in range(2):
+            for action_idx in range(2):
+                if not (state_idx == s and action_idx == a2):
+                    q_stage2_mf[state_idx, action_idx] += decay_rate * (0.5 - q_stage2_mf[state_idx, action_idx])
+        
+        # Update choice kernel
+        choice_kernel[a1] += choice_lr * (1.0 - choice_kernel[a1])
+        choice_kernel[1 - a1] += choice_lr * (0.0 - choice_kernel[1 - a1])
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Reward-dependent Eligibility Trace.
+    The eligibility trace parameter differs depending on whether the trial was rewarded
+    or not, allowing for asymmetric credit assignment to stage 1. This captures tendencies 
+    where positive prediction errors reinforce earlier steps differently than negative ones.
+    
+    Parameters:
+    alpha: learning rate [0, 1]
+    beta1: inverse temperature for stage 1 [0, 10]
+    beta2: inverse temperature for stage 2 [0, 10]
+    w: model-based weight [0, 1]
+    lambda_pos: eligibility trace for rewarded trials [0, 1]
+    lambda_neg: eligibility trace for unrewarded trials [0, 1]
+    p: perseveration bonus for stage 1 [0, 5]
+    decay_rate: rate at which unchosen options decay to 0.5 [0, 1]
+    """
+    alpha, beta1, beta2, w, lambda_pos, lambda_neg, p, decay_rate = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    last_action = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action = -1
+            continue
+
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers = np.zeros(2)
+        if last_action != -1:
+            pers[last_action] = 1.0
+            
+        q_net_scaled = beta1 * q_net + p * pers
+        q_net_scaled -= np.max(q_net_scaled)
+        exp_q1 = np.exp(q_net_scaled)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        q2_scaled = beta2 * q_stage2_mf[s]
+        q2_scaled -= np.max(q2_scaled)
+        exp_q2 = np.exp(q2_scaled)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+        
+        # Apply different eligibility trace based on reward outcome
+        current_lambda = lambda_pos if r == 1 else lambda_neg
+        q_stage1_mf[a1] += alpha * current_lambda * delta_stage2
+
+        q_stage1_mf[1 - a1] += decay_rate * (0.5 - q_stage1_mf[1 - a1])
+        for state_idx in range(2):
+            for action_idx in range(2):
+                if not (state_idx == s and action_idx == a2):
+                    q_stage2_mf[state_idx, action_idx] += decay_rate * (0.5 - q_stage2_mf[state_idx, action_idx])
+        
+        last_action = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

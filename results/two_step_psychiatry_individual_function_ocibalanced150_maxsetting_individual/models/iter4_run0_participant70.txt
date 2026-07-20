@@ -1,0 +1,193 @@
+Here are 3 new cognitive models that explore different theoretical mechanisms for how participants might learn and make decisions in the two-step task. 
+
+### Model 1: Asymmetric Eligibility Trace (Positive vs. Negative Reward)
+This model hypothesizes that participants may propagate positive outcomes (wins) back to their Stage 1 choices differently than negative outcomes (losses). By splitting the eligibility trace `lambd` into `lambd_pos` and `lambd_neg`, we can capture asymmetric credit assignment (e.g., strongly reinforcing a Stage 1 choice after a win, but not penalizing it as much after a loss).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with asymmetric eligibility traces for positive and negative rewards.
+    Bounds:
+    alpha: [0,1] (learning rate)
+    beta_1: [0,10] (inverse temperature for stage 1)
+    beta_2: [0,10] (inverse temperature for stage 2)
+    w: [0,1] (model-based weight)
+    lambd_pos: [0,1] (eligibility trace for rewarded trials)
+    lambd_neg: [0,1] (eligibility trace for unrewarded trials)
+    pers: [0,10] (perseveration bonus for stage 1)
+    """
+    alpha, beta_1, beta_2, w, lambd_pos, lambd_neg, pers = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net
+        if trial > 0:
+            logits_1[action_1[trial - 1]] += pers
+            
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        # Asymmetric eligibility trace based on reward
+        lambd = lambd_pos if reward[trial] == 1 else lambd_neg
+        q_stage1_mf[action_1[trial]] += alpha * lambd * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Dual Learning Rates (Model-Free vs. Model-Based System)
+This model tests the hypothesis that the model-free and model-based systems operate at different learning speeds. It maintains two separate sets of Stage 2 Q-values: one updated via `alpha_mf` (used for the model-free cached values) and one updated via `alpha_mb` (used exclusively for calculating the model-based prospective values).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with separate learning rates for model-based and model-free systems.
+    Bounds:
+    alpha_mf: [0,1] (learning rate for model-free values)
+    alpha_mb: [0,1] (learning rate for model-based state values)
+    beta_1: [0,10] (inverse temperature for stage 1)
+    beta_2: [0,10] (inverse temperature for stage 2)
+    w: [0,1] (model-based weight)
+    lambd: [0,1] (eligibility trace)
+    pers: [0,10] (perseveration bonus for stage 1)
+    """
+    alpha_mf, alpha_mb, beta_1, beta_2, w, lambd, pers = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    q_stage2_mb = np.ones((2, 2)) * 0.5
+
+    for trial in range(n_trials):
+        # policy for the first choice (using q_stage2_mb for prospective calculation)
+        max_q_stage2_mb = np.max(q_stage2_mb, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2_mb
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net
+        if trial > 0:
+            logits_1[action_1[trial - 1]] += pers
+            
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # policy for the second choice (using q_stage2_mf)
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha_mf * delta_stage1
+        
+        delta_stage2_mf = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_mf * delta_stage2_mf
+        
+        # Separate update for the model-based system's values
+        delta_stage2_mb = reward[trial] - q_stage2_mb[state_idx, action_2[trial]]
+        q_stage2_mb[state_idx, action_2[trial]] += alpha_mb * delta_stage2_mb
+        
+        q_stage1_mf[action_1[trial]] += alpha_mf * lambd * delta_stage2_mf
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Reward Sensitivity / Scaling Parameter (`rho`)
+This model introduces a reward sensitivity parameter `rho`. Because Q-values are initialized to 0.5, scaling the reward (e.g., treating a 1 coin reward as a magnitude of 3) alters the asymptote that the Q-values converge toward. This can capture individual differences in how strongly rewards pull behavior away from the initial uninformative prior (0.5).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with a reward sensitivity scaling parameter (rho).
+    Bounds:
+    alpha: [0,1] (learning rate)
+    beta_1: [0,10] (inverse temperature for stage 1)
+    beta_2: [0,10] (inverse temperature for stage 2)
+    w: [0,1] (model-based weight)
+    lambd: [0,1] (eligibility trace)
+    pers: [0,10] (perseveration bonus for stage 1)
+    rho: [0,10] (reward sensitivity multiplier)
+    """
+    alpha, beta_1, beta_2, w, lambd, pers, rho = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net
+        if trial > 0:
+            logits_1[action_1[trial - 1]] += pers
+            
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        # Incorporate reward sensitivity
+        scaled_reward = reward[trial] * rho
+        delta_stage2 = scaled_reward - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lambd * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

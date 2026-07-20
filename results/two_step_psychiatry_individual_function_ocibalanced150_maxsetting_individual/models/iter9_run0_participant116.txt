@@ -1,0 +1,273 @@
+Here are 3 new cognitive models that build upon the successful mechanisms of your best model (Exploration Bonus + Value Forgetting) but introduce novel elements while strictly adhering to the 8-parameter limit. To accommodate new parameters without exceeding the limit, the baseline Q-value `q0` (which unchosen actions decay towards) is fixed at 0.5, a standard assumption since rewards are binary (0 or 1).
+
+### Model 1: Decaying Choice Trace + Exploration Bonus + Value Forgetting
+Instead of a simple "last-action" stickiness, this model implements a **decaying choice trace**. This captures long-term perseveration, where participants might build up a habit for a specific stage 1 action over multiple trials, which slowly decays when they switch.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Decaying Choice Trace + Exploration Bonus + Value Forgetting
+    Replaces simple last-action stickiness with a decaying choice trace to capture 
+    longer-term habits/perseveration. Includes exploration bonus and value forgetting.
+    
+    Bounds:
+    learning_rate: [0,1] - Learning rate for Q-value updates
+    beta: [0,10] - Inverse temperature for softmax action selection
+    w: [0,1] - Model-based weight
+    lam: [0,1] - Eligibility trace parameter
+    st_trace: [-5,5] - Weight of the decaying choice trace
+    trace_decay: [0,1] - Decay rate of the choice trace (1 = no decay, 0 = instant decay)
+    expl_bonus: [0,1] - Weight of the exploration bonus for unchosen actions
+    decay: [0,1] - Forgetting rate for unchosen actions (towards fixed q0=0.5)
+    """
+    import numpy as np
+    learning_rate, beta, w, lam, st_trace, trace_decay, expl_bonus, decay = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q0 = 0.5
+    q_stage1_mf = np.zeros(2) + q0
+    q_stage2_mf = np.zeros((2, 2)) + q0
+    
+    trials_since_1 = np.zeros(2)
+    trials_since_2 = np.zeros((2, 2))
+    
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        q1_total = q_net + expl_bonus * np.sqrt(trials_since_1) + st_trace * choice_trace
+        # Safe softmax
+        exp_q1 = np.exp(beta * q1_total - np.max(beta * q1_total)) 
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_total = q_stage2_mf[state_idx] + expl_bonus * np.sqrt(trials_since_2[state_idx])
+        exp_q2 = np.exp(beta * q2_total - np.max(beta * q2_total))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+        # Forgetting
+        unchosen_action_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_action_1] = q_stage1_mf[unchosen_action_1] * (1 - decay) + q0 * decay
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] = q_stage2_mf[s, a] * (1 - decay) + q0 * decay
+
+        # Update exploration counters
+        trials_since_1 += 1
+        trials_since_1[action_1[trial]] = 0
+        
+        trials_since_2 += 1
+        trials_since_2[state_idx, action_2[trial]] = 0
+                    
+        # Update choice trace
+        choice_trace *= trace_decay
+        choice_trace[action_1[trial]] += 1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Transition Learning + Exploration Bonus + Value Forgetting
+Instead of assuming the participant rigidly believes the transition matrix is fixed at 70%/30%, this model allows the participant to **dynamically update their internal transition matrix** based on the transitions they actually experience. 
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Transition Learning + Exploration Bonus + Value Forgetting
+    The participant dynamically updates their internal transition matrix based on 
+    experienced transitions. Includes exploration bonus and value forgetting.
+    
+    Bounds:
+    learning_rate: [0,1] - Learning rate for Q-value updates
+    beta: [0,10] - Inverse temperature for softmax action selection
+    w: [0,1] - Model-based weight
+    lam: [0,1] - Eligibility trace parameter
+    st: [-5,5] - Choice stickiness for the immediately preceding action
+    lr_trans: [0,1] - Learning rate for updating the internal transition matrix
+    expl_bonus: [0,1] - Weight of the exploration bonus for unchosen actions
+    decay: [0,1] - Forgetting rate for unchosen actions (towards fixed q0=0.5)
+    """
+    import numpy as np
+    learning_rate, beta, w, lam, st, lr_trans, expl_bonus, decay = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q0 = 0.5
+    q_stage1_mf = np.zeros(2) + q0
+    q_stage2_mf = np.zeros((2, 2)) + q0
+    
+    trials_since_1 = np.zeros(2)
+    trials_since_2 = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        stickiness = np.zeros(2)
+        if last_action != -1:
+            stickiness[last_action] = 1.0
+            
+        q1_total = q_net + expl_bonus * np.sqrt(trials_since_1) + st * stickiness
+        exp_q1 = np.exp(beta * q1_total - np.max(beta * q1_total))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_total = q_stage2_mf[state_idx] + expl_bonus * np.sqrt(trials_since_2[state_idx])
+        exp_q2 = np.exp(beta * q2_total - np.max(beta * q2_total))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+        # Update Transition Matrix (maintains normalization)
+        transition_matrix[action_1[trial], state_idx] += lr_trans * (1 - transition_matrix[action_1[trial], state_idx])
+        transition_matrix[action_1[trial], 1 - state_idx] -= lr_trans * transition_matrix[action_1[trial], 1 - state_idx]
+
+        # Forgetting
+        unchosen_action_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_action_1] = q_stage1_mf[unchosen_action_1] * (1 - decay) + q0 * decay
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] = q_stage2_mf[s, a] * (1 - decay) + q0 * decay
+
+        trials_since_1 += 1
+        trials_since_1[action_1[trial]] = 0
+        
+        trials_since_2 += 1
+        trials_since_2[state_idx, action_2[trial]] = 0
+                    
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Eligibility Trace + Exploration Bonus + Value Forgetting
+This model tests the hypothesis that the participant updates Stage 1 actions differently depending on whether the prediction error at Stage 2 was positive or negative. It uses **two separate eligibility traces**.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Asymmetric Eligibility Trace + Exploration Bonus + Value Forgetting
+    Uses different eligibility traces for positive and negative reward prediction errors 
+    at stage 2. Includes exploration bonus and value forgetting towards fixed q0=0.5.
+    
+    Bounds:
+    learning_rate: [0,1] - Learning rate for Q-value updates
+    beta: [0,10] - Inverse temperature for softmax action selection
+    w: [0,1] - Model-based weight
+    lam_pos: [0,1] - Eligibility trace for positive stage 2 RPE
+    lam_neg: [0,1] - Eligibility trace for negative stage 2 RPE
+    st: [-5,5] - Choice stickiness for the immediately preceding action
+    expl_bonus: [0,1] - Weight of the exploration bonus for unchosen actions
+    decay: [0,1] - Forgetting rate for unchosen actions (towards fixed q0=0.5)
+    """
+    import numpy as np
+    learning_rate, beta, w, lam_pos, lam_neg, st, expl_bonus, decay = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q0 = 0.5
+    q_stage1_mf = np.zeros(2) + q0
+    q_stage2_mf = np.zeros((2, 2)) + q0
+    
+    trials_since_1 = np.zeros(2)
+    trials_since_2 = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        stickiness = np.zeros(2)
+        if last_action != -1:
+            stickiness[last_action] = 1.0
+            
+        q1_total = q_net + expl_bonus * np.sqrt(trials_since_1) + st * stickiness
+        exp_q1 = np.exp(beta * q1_total - np.max(beta * q1_total))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_total = q_stage2_mf[state_idx] + expl_bonus * np.sqrt(trials_since_2[state_idx])
+        exp_q2 = np.exp(beta * q2_total - np.max(beta * q2_total))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Asymmetric eligibility trace
+        current_lam = lam_pos if delta_stage2 > 0 else lam_neg
+        q_stage1_mf[action_1[trial]] += learning_rate * current_lam * delta_stage2
+
+        # Forgetting
+        unchosen_action_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_action_1] = q_stage1_mf[unchosen_action_1] * (1 - decay) + q0 * decay
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] = q_stage2_mf[s, a] * (1 - decay) + q0 * decay
+
+        trials_since_1 += 1
+        trials_since_1[action_1[trial]] = 0
+        
+        trials_since_2 += 1
+        trials_since_2[state_idx, action_2[trial]] = 0
+                    
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

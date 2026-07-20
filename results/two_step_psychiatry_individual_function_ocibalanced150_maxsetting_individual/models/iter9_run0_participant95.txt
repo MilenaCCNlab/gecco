@@ -1,0 +1,229 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixed MF-MB RL model with value decay, action stickiness, and a free parameter for initial Q-values.
+    Instead of assuming Q-values start and decay toward 0.5, this model fits the baseline Q-value (q_init) 
+    that participants naturally revert to over time.
+    
+    Bounds:
+    alpha: [0,1]
+    decay: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    lam: [0,1]
+    w: [0,1]
+    stickiness: [-5,5]
+    q_init: [0,1]
+    """
+    alpha, decay, beta1, beta2, lam, w, stickiness, q_init = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, q_init)
+    q_stage2_mf = np.full((2, 2), q_init)
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # Stage 1 Model-Based values
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        # Net Stage 1 values
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Action stickiness
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1
+            
+        # Stage 1 choice probabilities
+        logits1 = beta1 * q_net + stickiness * rep
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Stage 2 choice probabilities
+        logits2 = beta2 * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Decay step (pulling towards q_init)
+        q_stage1_mf = q_stage1_mf * (1 - decay) + q_init * decay
+        q_stage2_mf = q_stage2_mf * (1 - decay) + q_init * decay
+
+        # Action value updating for Choice 1 (MF)
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        # Action value updating for Choice 2 (MF)
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Eligibility trace update for Choice 1
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixed MF-MB RL model with value decay and transition-dependent learning rates.
+    The learning rate applied to updates depends on whether the transition experienced 
+    was expected (common) or unexpected (rare), reflecting altered attention or surprise.
+    
+    Bounds:
+    alpha_common: [0,1]
+    alpha_rare: [0,1]
+    decay: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    lam: [0,1]
+    w: [0,1]
+    stickiness: [-5,5]
+    """
+    alpha_common, alpha_rare, decay, beta1, beta2, lam, w, stickiness = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1
+            
+        logits1 = beta1 * q_net + stickiness * rep
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        logits2 = beta2 * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        q_stage1_mf = q_stage1_mf * (1 - decay) + 0.5 * decay
+        q_stage2_mf = q_stage2_mf * (1 - decay) + 0.5 * decay
+        
+        # Determine learning rate based on transition type
+        is_common = transition_matrix[action_1[trial], state_idx] > 0.5
+        alpha = alpha_common if is_common else alpha_rare
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixed MF-MB RL model with value decay, action stickiness, and state-transition stickiness.
+    st_trans captures the heuristic tendency to choose the stage 1 action that commonly 
+    leads to the state visited on the previous trial, irrespective of reward.
+    
+    Bounds:
+    alpha: [0,1]
+    decay: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    lam: [0,1]
+    w: [0,1]
+    stickiness: [-5,5]
+    st_trans: [-5,5]
+    """
+    alpha, decay, beta1, beta2, lam, w, stickiness, st_trans = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action = -1
+    last_state = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1
+            
+        # State-transition stickiness: tendency to pick the action that leads to last_state
+        trans_rep = np.zeros(2)
+        if last_state != -1:
+            # Action 0 commonly leads to State 0, Action 1 commonly leads to State 1
+            trans_rep[last_state] = 1
+            
+        logits1 = beta1 * q_net + stickiness * rep + st_trans * trans_rep
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        logits2 = beta2 * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        q_stage1_mf = q_stage1_mf * (1 - decay) + 0.5 * decay
+        q_stage2_mf = q_stage2_mf * (1 - decay) + 0.5 * decay
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+        last_state = state_idx
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

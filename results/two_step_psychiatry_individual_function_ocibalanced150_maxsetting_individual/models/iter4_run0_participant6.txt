@@ -1,0 +1,256 @@
+Here are 3 new cognitive models that explore different mechanisms for evaluating participant behavior in the two-step task. These models avoid the parameter combinations previously tried while introducing well-motivated cognitive mechanisms based on the data.
+
+### Model 1: State-Specific Win-Stay/Lose-Shift
+While general stage 2 stickiness (or win/lose stickiness) has been explored, participants often form habits tied to the specific state (planet) they are on. This model implements **state-specific** stage 2 stickiness modulated by reward. It tracks the last action taken on *each specific planet* and the reward received there, applying `p_2_state_win` or `p_2_state_lose` accordingly.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid model with state-specific win-stay/lose-shift at stage 2.
+    Tracks the last action and reward for each state separately to determine stage 2 stickiness.
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate.
+    beta_1: [0, 10] - Inverse temperature for stage 1.
+    beta_2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    p_1: [-5, 5] - Choice stickiness for stage 1.
+    p_2_state_win: [-5, 5] - State-specific stage 2 stickiness after a rewarded trial in that state.
+    p_2_state_lose: [-5, 5] - State-specific stage 2 stickiness after an unrewarded trial in that state.
+    lam: [0, 1] - Eligibility trace.
+    """
+    alpha, beta_1, beta_2, w, p_1, p_2_state_win, p_2_state_lose, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2_state = {-1: -1, 0: -1, 1: -1}
+    last_reward_state = {-1: -1, 0: -1, 1: -1}
+
+    for trial in range(n_trials):
+        a1 = int(action_1[trial])
+        s = int(state[trial])
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # Stage 1 Policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1[last_action_1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + p_1 * stickiness_1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 Policy
+        stickiness_2 = np.zeros(2)
+        last_a2_s = last_action_2_state[s]
+        last_r_s = last_reward_state[s]
+        
+        if last_a2_s != -1:
+            if last_r_s == 1:
+                stickiness_2[last_a2_s] = p_2_state_win
+            elif last_r_s == 0:
+                stickiness_2[last_a2_s] = p_2_state_lose
+            
+        logits_2 = beta_2 * q_stage2_mf[s] + stickiness_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Action Value Updating
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+        
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        last_action_1 = a1
+        last_action_2_state[s] = a2
+        last_reward_state[s] = r
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Transition-Dependent Model-Based Weighting
+In this model, the reliance on the model-based system (`w`) fluctuates depending on whether the previous trial's transition was common or rare. Experiencing a rare transition (e.g., getting sent to Planet X when Planet Y was expected) can surprise the participant, leading them to temporarily drop or increase their model-based planning strategy.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid model where the model-based weight depends on whether the previous trial's transition was common or rare.
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate.
+    beta_1: [0, 10] - Inverse temperature for stage 1.
+    beta_2: [0, 10] - Inverse temperature for stage 2.
+    w_common: [0, 1] - Model-based weight after a common transition.
+    w_rare: [0, 1] - Model-based weight after a rare transition.
+    p_1: [-5, 5] - Choice stickiness for stage 1.
+    p_2: [-5, 5] - Choice stickiness for stage 2.
+    lam: [0, 1] - Eligibility trace.
+    """
+    alpha, beta_1, beta_2, w_common, w_rare, p_1, p_2, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2 = -1
+    last_transition_rare = False
+
+    for trial in range(n_trials):
+        a1 = int(action_1[trial])
+        s = int(state[trial])
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # Determine w based on last transition
+        w = w_rare if last_transition_rare else w_common
+
+        # Stage 1 Policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1[last_action_1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + p_1 * stickiness_1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 Policy
+        stickiness_2 = np.zeros(2)
+        if last_action_2 != -1:
+            stickiness_2[last_action_2] = 1.0
+            
+        logits_2 = beta_2 * q_stage2_mf[s] + p_2 * stickiness_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Action Value Updating
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+        
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        last_action_1 = a1
+        last_action_2 = a2
+        # Transition is rare if chosen spaceship doesn't match the commonly associated planet (0->0, 1->1)
+        last_transition_rare = (a1 != s)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Learning Rates with Separate Choice Stickiness
+Participants tend to learn at different speeds depending on whether the outcome was better or worse than expected. This model uses asymmetric learning rates for positive vs. negative prediction errors (`alpha_pos` and `alpha_neg`) while maintaining distinct choice stickiness preferences for both stages (`p_1` and `p_2`).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid model with asymmetric learning rates for positive and negative prediction errors,
+    and separate choice stickiness parameters for stage 1 and stage 2.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta_1: [0, 10] - Inverse temperature for stage 1.
+    beta_2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    p_1: [-5, 5] - Choice stickiness for stage 1.
+    p_2: [-5, 5] - Choice stickiness for stage 2.
+    lam: [0, 1] - Eligibility trace.
+    """
+    alpha_pos, alpha_neg, beta_1, beta_2, w, p_1, p_2, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2 = -1
+
+    for trial in range(n_trials):
+        a1 = int(action_1[trial])
+        s = int(state[trial])
+        a2 = int(action_2[trial])
+        r = reward[trial]
+
+        # Stage 1 Policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1[last_action_1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + p_1 * stickiness_1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 Policy
+        stickiness_2 = np.zeros(2)
+        if last_action_2 != -1:
+            stickiness_2[last_action_2] = 1.0
+            
+        logits_2 = beta_2 * q_stage2_mf[s] + p_2 * stickiness_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Action Value Updating
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha_stage1 = alpha_pos if delta_stage1 >= 0 else alpha_neg
+        q_stage1_mf[a1] += alpha_stage1 * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha_stage2 = alpha_pos if delta_stage2 >= 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha_stage2 * delta_stage2
+        
+        q_stage1_mf[a1] += alpha_stage2 * lam * delta_stage2
+        
+        last_action_1 = a1
+        last_action_2 = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

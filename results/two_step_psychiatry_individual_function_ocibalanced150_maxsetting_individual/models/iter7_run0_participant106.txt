@@ -1,0 +1,223 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with choice traces for both stage 1 and stage 2 choices (exponentially decaying perseveration).
+    This captures the long streaks of identical choices observed in the participant data.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for updating Q-values.
+    beta1: [0, 10] - Inverse temperature for stage 1 choice.
+    beta2: [0, 10] - Inverse temperature for stage 2 choice.
+    w: [0, 1] - Weighting of model-based vs model-free values.
+    lam: [0, 1] - Eligibility trace for updating stage 1 based on stage 2 reward.
+    rho1: [0, 10] - Weight of the stage 1 choice trace.
+    rho2: [0, 10] - Weight of the stage 2 choice trace.
+    tau_trace: [0, 1] - Decay factor for the choice traces.
+    """
+    learning_rate, beta1, beta2, w, lam, rho1, rho2, tau_trace = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    trace1 = np.zeros(2)
+    trace2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+            
+        logits1 = beta1 * q_stage1_net + rho1 * trace1
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits2 = beta2 * q_stage2_mf[state_idx] + rho2 * trace2[state_idx]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        # Update choice traces
+        trace1 *= tau_trace
+        trace1[action_1[trial]] += 1.0
+        
+        trace2 *= tau_trace
+        trace2[state_idx, action_2[trial]] += 1.0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model where stage 1 perseveration depends on whether the previous transition was common or rare.
+    This captures transition-dependent stickiness in stage 1 choices.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for updating Q-values.
+    beta1: [0, 10] - Inverse temperature for stage 1 choice.
+    beta2: [0, 10] - Inverse temperature for stage 2 choice.
+    w: [0, 1] - Weighting of model-based vs model-free values.
+    lam: [0, 1] - Eligibility trace for updating stage 1 based on stage 2 reward.
+    rho_common: [0, 10] - Perseveration bonus if the last transition was common.
+    rho_rare: [0, 10] - Perseveration bonus if the last transition was rare.
+    rho2: [0, 10] - Perseveration bonus for repeating the previous stage 2 choice in the same state.
+    """
+    learning_rate, beta1, beta2, w, lam, rho_common, rho_rare, rho2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_transition_common = False
+    last_action_2 = np.full(2, -1)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers1 = np.zeros(2)
+        if last_action_1 != -1:
+            if last_transition_common:
+                pers1[last_action_1] = rho_common
+            else:
+                pers1[last_action_1] = rho_rare
+            
+        logits1 = beta1 * q_stage1_net + pers1
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # policy for the second choice
+        pers2 = np.zeros(2)
+        if last_action_2[state_idx] != -1:
+            pers2[last_action_2[state_idx]] = 1
+            
+        logits2 = beta2 * q_stage2_mf[state_idx] + rho2 * pers2
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+        last_action_1 = action_1[trial]
+        last_transition_common = (action_1[trial] == state_idx)
+        last_action_2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with global motor perseveration at stage 2.
+    This captures a general tendency to press the same button at stage 2, regardless of the planet visited.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for updating Q-values.
+    decay: [0, 1] - Decay rate for unchosen Q-values towards 0.
+    beta1: [0, 10] - Inverse temperature for stage 1 choice.
+    beta2: [0, 10] - Inverse temperature for stage 2 choice.
+    w: [0, 1] - Weighting of model-based vs model-free values.
+    lam: [0, 1] - Eligibility trace for updating stage 1 based on stage 2 reward.
+    rho1: [0, 10] - Perseveration bonus for repeating the previous stage 1 choice.
+    rho2_global: [0, 10] - Global stage 2 perseveration (repeating the same action, regardless of state).
+    """
+    learning_rate, decay, beta1, beta2, w, lam, rho1, rho2_global = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2_global = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers1 = np.zeros(2)
+        if last_action_1 != -1:
+            pers1[last_action_1] = 1
+            
+        logits1 = beta1 * q_stage1_net + rho1 * pers1
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # policy for the second choice
+        pers2_global = np.zeros(2)
+        if last_action_2_global != -1:
+            pers2_global[last_action_2_global] = 1
+            
+        logits2 = beta2 * q_stage2_mf[state_idx] + rho2_global * pers2_global
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+        # Q-value decay
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+
+        last_action_1 = action_1[trial]
+        last_action_2_global = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

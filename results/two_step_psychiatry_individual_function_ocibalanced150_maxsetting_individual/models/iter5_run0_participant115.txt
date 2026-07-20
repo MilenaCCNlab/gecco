@@ -1,0 +1,249 @@
+Here are 3 new cognitive models that introduce fundamentally different cognitive mechanisms to capture the participant's behavior, while avoiding the parameter combinations previously tested.
+
+### Model 1: Mixture of Policies Model
+Instead of mixing the model-based (MB) and model-free (MF) Q-values (as in the standard Daw et al. model), this model assumes the participant maintains two separate policies (one MB and one MF) and probabilistically mixes their action probabilities. This is a theoretically distinct way of arbitrating between MB and MF systems.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixture of Policies Model with Choice Stickiness and Action Bias.
+    Instead of mixing Q-values (as in the standard Daw model), this model mixes 
+    the probabilities of model-based and model-free policies.
+    
+    Bounds:
+    alpha: [0, 1] - Learning rate for updating Q-values.
+    beta1: [0, 10] - Inverse temperature for stage 1 choices.
+    beta2: [0, 10] - Inverse temperature for stage 2 choices.
+    w: [0, 1] - Weight for the model-based policy probability.
+    lam: [0, 1] - Eligibility trace parameter for stage 1 Q-value update.
+    p: [-5, 5] - Perseveration (choice stickiness) parameter for stage 1.
+    bias: [-5, 5] - Intrinsic bias for choosing Action 1 at stage 1.
+    """
+    alpha, beta1, beta2, w, lam, p, bias = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1.0
+            
+        # MB Policy Calculation
+        logits_mb = beta1 * q_stage1_mb + p * rep
+        logits_mb[1] += bias
+        logits_mb -= np.max(logits_mb)
+        probs_mb = np.exp(logits_mb) / np.sum(np.exp(logits_mb))
+        
+        # MF Policy Calculation
+        logits_mf = beta1 * q_stage1_mf + p * rep
+        logits_mf[1] += bias
+        logits_mf -= np.max(logits_mf)
+        probs_mf = np.exp(logits_mf) / np.sum(np.exp(logits_mf))
+        
+        # Mix policies at the probability level
+        probs_1 = w * probs_mb + (1 - w) * probs_mf
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 policy
+        logits_2 = beta2 * q_stage2_mf[s]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Action Value Updates
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        last_action = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Learned Transition Matrix Model
+Instead of assuming the participant inherently knows and trusts the fixed `0.7/0.3` transition structure, this model posits that the participant dynamically learns the transition matrix on a trial-by-trial basis, allowing their model-based system to adapt if they perceive changes in the environment.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Learned Transition Matrix, Choice Stickiness, and Action Bias.
+    Instead of assuming a fixed transition matrix, the participant learns the 
+    transition probabilities from stage 1 to stage 2 states.
+    
+    Bounds:
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    p: [-5, 5] - Perseveration parameter.
+    bias: [-5, 5] - Bias for Action 1.
+    alpha_trans: [0, 1] - Learning rate for the transition matrix.
+    """
+    alpha, beta1, beta2, w, lam, p, bias, alpha_trans = model_parameters
+    n_trials = len(action_1)
+  
+    # Initialize transition matrix at 0.5 (maximum uncertainty)
+    transition_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1.0
+            
+        logits_1 = beta1 * q_stage1_net + p * rep
+        logits_1[1] += bias
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        logits_2 = beta2 * q_stage2_mf[s]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Action Value Updates
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        # Transition Matrix Update
+        transition_matrix[a1, s] += alpha_trans * (1.0 - transition_matrix[a1, s])
+        transition_matrix[a1, 1-s] += alpha_trans * (0.0 - transition_matrix[a1, 1-s])
+        
+        last_action = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Choice Trace Model
+Rather than simply looking at the $t-1$ action to determine choice stickiness, this model implements a continuous "choice trace". This captures long-term perseveration over multiple preceding choices, serving as a better representation for participants with highly rigid choice sequences.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Choice Trace (exponentially decaying perseveration) and Action Bias.
+    Captures long-term perseveration using a decaying choice trace rather than 
+    just the most recent action.
+    
+    Bounds:
+    alpha: [0, 1] - Learning rate.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    p_trace: [-5, 5] - Weight of the choice trace on stage 1 logits.
+    bias: [-5, 5] - Bias for Action 1.
+    tau_c: [0, 1] - Retention rate of the choice trace (1 = no decay, 0 = full decay).
+    """
+    alpha, beta1, beta2, w, lam, p_trace, bias, tau_c = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+            
+        logits_1 = beta1 * q_stage1_net + p_trace * choice_trace
+        logits_1[1] += bias
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        logits_2 = beta2 * q_stage2_mf[s]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Action Value Updates
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        q_stage2_mf[s, a2] += alpha * delta_stage2
+
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        # Update exponential choice trace
+        choice_trace *= tau_c
+        choice_trace[a1] += 1.0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

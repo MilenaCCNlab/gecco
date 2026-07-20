@@ -1,0 +1,253 @@
+Here are 3 new cognitive models that explore alternative mechanisms for how participants might learn and make decisions in this two-step task. 
+
+### Model 1: Transition Matrix Learning
+Instead of assuming the participant relies on a fixed `0.7 / 0.3` transition probability from the start, this model assumes the participant learns the transition matrix dynamically based on their observations. This is particularly relevant if the participant is uncertain about the transition structure or believes it might change over time.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Transition Matrix Learning.
+    The participant dynamically updates their internal model of the transition probabilities 
+    between stage 1 actions and stage 2 states based on experienced transitions.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-values
+    beta: [0,10] - inverse temperature for softmax choice stochasticity
+    w: [0,1] - weight of model-based values (1 = pure MB, 0 = pure MF)
+    lambda_: [0,1] - eligibility trace parameter 
+    p: [-5,5] - perseverance bonus for repeating the previous stage 1 action
+    alpha_tr: [0,1] - learning rate for the transition matrix
+    """
+    import numpy as np
+    learning_rate, beta, w, lambda_, p, alpha_tr = model_parameters
+    n_trials = len(action_1)
+  
+    # Initialize transition matrix as uniform (learning from scratch)
+    transition_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action_1 != -1:
+            rep[last_action_1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + p * rep
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # Update transition matrix based on the observed transition
+        transition_matrix[action_1[trial], state_idx] += alpha_tr * (1.0 - transition_matrix[action_1[trial], state_idx])
+        transition_matrix[action_1[trial], 1 - state_idx] += alpha_tr * (0.0 - transition_matrix[action_1[trial], 1 - state_idx])
+        # Normalize to prevent floating point drift
+        transition_matrix[action_1[trial]] /= np.sum(transition_matrix[action_1[trial]])
+
+        if action_2[trial] == -1:
+            p_choice_2[trial] = 1.0
+            last_action_1 = action_1[trial]
+            continue
+            
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += learning_rate * lambda_ * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Eligibility Traces
+Instead of using asymmetric learning rates for direct updating, this model applies asymmetry exclusively to the eligibility trace (`lambda_pos` vs `lambda_neg`). This proposes that positive vs negative prediction errors at stage 2 have differential abilities to reinforce or punish the earlier stage 1 choice.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Asymmetric Eligibility Traces.
+    The eligibility trace parameter lambda differs based on whether the reward prediction error
+    at stage 2 is positive or negative, allowing for different stage 1 credit assignment.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-values
+    beta: [0,10] - inverse temperature for softmax choice stochasticity
+    w: [0,1] - weight of model-based values (1 = pure MB, 0 = pure MF)
+    lambda_pos: [0,1] - eligibility trace for positive RPEs
+    lambda_neg: [0,1] - eligibility trace for negative RPEs
+    p: [-5,5] - perseverance bonus for repeating the previous stage 1 action
+    """
+    import numpy as np
+    learning_rate, beta, w, lambda_pos, lambda_neg, p = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action_1 != -1:
+            rep[last_action_1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + p * rep
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        if action_2[trial] == -1:
+            p_choice_2[trial] = 1.0
+            last_action_1 = action_1[trial]
+            continue
+            
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        # Apply asymmetric eligibility trace based on the sign of the Stage 2 RPE
+        current_lambda = lambda_pos if delta_stage2 > 0 else lambda_neg
+        q_stage1_mf[action_1[trial]] += learning_rate * current_lambda * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Counterfactual Updating
+This model introduces knowledge of task structure at stage 2. If a participant gets a reward from an alien, they might assume the other alien on the same planet is less likely to give a reward (anti-correlated assumption). They counterfactually update the unchosen alien on the visited planet in the opposite direction of the reward received.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Counterfactual Updating at Stage 2.
+    When an alien is chosen and returns a reward, the unchosen alien on the same planet
+    is updated in the opposite direction (assuming anti-correlated reward probabilities).
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-values
+    beta: [0,10] - inverse temperature for softmax choice stochasticity
+    w: [0,1] - weight of model-based values (1 = pure MB, 0 = pure MF)
+    lambda_: [0,1] - eligibility trace parameter 
+    p: [-5,5] - perseverance bonus for repeating the previous stage 1 action
+    alpha_cf: [0,1] - learning rate for counterfactual updating of the unchosen alien
+    """
+    import numpy as np
+    learning_rate, beta, w, lambda_, p, alpha_cf = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action_1 != -1:
+            rep[last_action_1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + p * rep
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        if action_2[trial] == -1:
+            p_choice_2[trial] = 1.0
+            last_action_1 = action_1[trial]
+            continue
+            
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Counterfactual update for the unchosen alien on the same planet
+        unchosen_action_2 = 1 - action_2[trial]
+        cf_reward = 1.0 - reward[trial]
+        delta_cf = cf_reward - q_stage2_mf[state_idx, unchosen_action_2]
+        q_stage2_mf[state_idx, unchosen_action_2] += alpha_cf * delta_cf
+
+        q_stage1_mf[action_1[trial]] += learning_rate * lambda_ * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

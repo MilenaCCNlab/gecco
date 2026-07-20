@@ -1,0 +1,213 @@
+Here are three new cognitive models that build upon the best-performing model by introducing distinct, psychologically grounded mechanisms. Each model is parameterized parsimoniously and explores a different facet of how participants might be making their decisions.
+
+### Model 1: Transition-Dependent Stickiness
+Participants often react differently depending on whether the previous trial's transition was expected (common) or unexpected (rare). This model splits the choice perseveration (`stickiness`) parameter into two separate parameters (`stick_com` and `stick_rare`). This allows the model to capture behaviors where, for example, a participant might stick to their choice if the spaceship went to the expected planet, but switch if a rare transition occurred, independent of the reward outcome.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: MB/MF mixture model with transition-dependent stickiness.
+    This model splits the stickiness parameter into two based on whether the 
+    previous trial's transition was common or rare.
+    
+    Bounds:
+    learning_rate: [0,1]
+    beta: [0,10]
+    w: [0,1]
+    lam: [0,1]
+    stick_com: [-5,5]
+    stick_rare: [-5,5]
+    """
+    learning_rate, beta, w, lam, stick_com, stick_rare = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action = -1
+    last_transition_common = False
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply transition-dependent stickiness
+        if last_action != -1:
+            if last_transition_common:
+                q_stage1_net[last_action] += stick_com
+            else:
+                q_stage1_net[last_action] += stick_rare
+                
+        logits_1 = beta * q_stage1_net
+        exp_q1 = np.exp(logits_1 - np.max(logits_1)) # numerical stability
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        # Update history for next trial
+        last_action = action_1[trial]
+        # In this task, action 0 -> state 0 and action 1 -> state 1 are the common transitions
+        last_transition_common = (action_1[trial] == state[trial])
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Subjective Transition Probability
+Instead of assuming participants possess perfect knowledge of the 70%/30% transition matrix, this model treats the perceived transition probability as a free parameter (`tr_prob`). This captures individual differences in how deterministic or stochastic a participant believes the environment to be, directly altering their model-based value computations.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: MB/MF mixture model with subjective transition probability.
+    Instead of assuming a fixed 0.7/0.3 transition matrix, this model estimates 
+    the subjective transition probability `tr_prob` used by the participant 
+    for model-based value computation.
+    
+    Bounds:
+    learning_rate: [0,1]
+    beta: [0,10]
+    w: [0,1]
+    lam: [0,1]
+    stickiness: [-5,5]
+    tr_prob: [0.5, 1.0]
+    """
+    learning_rate, beta, w, lam, stickiness, tr_prob = model_parameters
+    n_trials = len(action_1)
+  
+    # Participant's subjective transition matrix
+    transition_matrix = np.array([[tr_prob, 1.0 - tr_prob], [1.0 - tr_prob, tr_prob]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action = -1
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        if last_action != -1:
+            q_stage1_net[last_action] += stickiness
+            
+        logits_1 = beta * q_stage1_net
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Reward Valuation (Fictive Punishment)
+This model posits that participants might not treat unrewarded trials neutrally (as exactly 0). Instead, an unrewarded trial might be perceived as a loss. By introducing a `punishment` parameter, a reward of 0 is substituted with `-punishment`. This scales the prediction error downward after unrewarded trials, effectively making the unchosen alternatives look much better by comparison, capturing varying degrees of "lose-shift" behavior.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: MB/MF mixture model with asymmetric reward valuation (punishment).
+    This model introduces a `punishment` parameter. While a reward of 1 is 
+    valued at 1, a reward of 0 is valued at `-punishment`, allowing the model 
+    to capture varying degrees of aversion to unrewarded outcomes.
+    
+    Bounds:
+    learning_rate: [0,1]
+    beta: [0,10]
+    w: [0,1]
+    lam: [0,1]
+    stickiness: [-5,5]
+    punishment: [0,5]
+    """
+    learning_rate, beta, w, lam, stickiness, punishment = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action = -1
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        if last_action != -1:
+            q_stage1_net[last_action] += stickiness
+            
+        logits_1 = beta * q_stage1_net
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # Determine the subjective value of the outcome
+        effective_reward = 1.0 if reward[trial] == 1 else -punishment
+        
+        delta_stage2 = effective_reward - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

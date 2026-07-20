@@ -1,0 +1,247 @@
+Here are 3 new cognitive models that explore alternative mechanisms for learning and choice behavior in the two-step task. They are designed to capture nuanced patterns in how participants react to transition types and rewards without exceeding the 8-parameter limit.
+
+### Model 1: Transition-dependent Learning Rates
+This model tests the hypothesis that participants update their values differently depending on whether the transition they just experienced was expected (common) or unexpected (rare). An unexpected transition might command more attention and lead to a higher learning rate, or conversely, be treated as an anomaly with a lower learning rate.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Transition-dependent Learning Rates.
+    The learning rate for updating Q-values depends on whether the transition 
+    from Stage 1 to Stage 2 on the current trial was common or rare.
+    
+    Bounds:
+    alpha_common: [0,1] - Learning rate for common transitions
+    alpha_rare: [0,1] - Learning rate for rare transitions
+    beta1: [0,10] - Inverse temperature for Stage 1
+    beta2: [0,10] - Inverse temperature for Stage 2
+    lam: [0,1] - Eligibility trace
+    w: [0,1] - Model-based vs model-free weight
+    p1: [-5,5] - Stage 1 choice stickiness (perseveration)
+    p2: [-5,5] - Stage 2 choice stickiness (perseveration)
+    """
+    import numpy as np
+    alpha_common, alpha_rare, beta1, beta2, lam, w, p1, p2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    prev_a2 = -1
+    prev_s2 = -1
+
+    for trial in range(n_trials):
+        # Stage 1 choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if prev_a1 != -1:
+            rep1[prev_a1] = 1
+            
+        logits_1 = beta1 * q_net + p1 * rep1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # Stage 2 choice
+        rep2 = np.zeros(2)
+        if prev_s2 == state_idx and prev_a2 != -1:
+            rep2[prev_a2] = 1
+            
+        logits_2 = beta2 * q_stage2_mf[state_idx] + p2 * rep2
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Learning updates
+        trans_common = (action_1[trial] == state_idx)
+        alpha = alpha_common if trans_common else alpha_rare
+        
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        prev_a1 = action_1[trial]
+        prev_a2 = action_2[trial]
+        prev_s2 = state_idx
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: State-targeted Stickiness based on Reward
+This model explores a heuristic where participants might directly try to return to the *planet* (Stage 2 state) they visited on the previous trial if it was rewarding, or avoid it if it wasn't. They do this by boosting the Stage 1 action that commonly leads to that specific planet, serving as a computationally cheap "model-based" win-stay/lose-shift mechanism.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: State-targeted Stickiness based on Reward.
+    Participants may heuristically try to return to the previous state if rewarded, 
+    or avoid it if unrewarded, by adjusting the probability of the Stage 1 action 
+    that commonly leads there.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate
+    beta1: [0,10] - Inverse temperature for Stage 1
+    beta2: [0,10] - Inverse temperature for Stage 2
+    lam: [0,1] - Eligibility trace
+    w: [0,1] - Model-based vs model-free weight
+    p1: [-5,5] - Stage 1 choice stickiness (action perseveration)
+    p_state_rew: [-5,5] - Stickiness for the action leading to previous state, if rewarded
+    p_state_unrew: [-5,5] - Stickiness for the action leading to previous state, if unrewarded
+    """
+    import numpy as np
+    alpha, beta1, beta2, lam, w, p1, p_state_rew, p_state_unrew = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    prev_state = -1
+    prev_reward = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if prev_a1 != -1:
+            rep1[prev_a1] = 1
+            
+        rep_state = np.zeros(2)
+        p_state = 0
+        if prev_state != -1:
+            # Action 0 commonly leads to State 0, Action 1 to State 1.
+            target_action = prev_state
+            rep_state[target_action] = 1
+            if prev_reward == 1:
+                p_state = p_state_rew
+            else:
+                p_state = p_state_unrew
+                
+        logits_1 = beta1 * q_net + p1 * rep1 + p_state * rep_state
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        prev_a1 = action_1[trial]
+        prev_state = state_idx
+        prev_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Transition and Reward Dependent Stickiness
+This model builds on the success of the best model provided in the feedback by splitting the Stage 1 stickiness after a common transition into two parameters depending on whether the previous trial resulted in a reward or not. 
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Transition and Reward Dependent Stickiness.
+    Expands on the best model by splitting the stickiness for common transitions 
+    based on whether the previous trial was rewarded or unrewarded.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate
+    beta1: [0,10] - Inverse temperature for Stage 1
+    beta2: [0,10] - Inverse temperature for Stage 2
+    lam: [0,1] - Eligibility trace
+    w: [0,1] - Model-based vs model-free weight
+    p_common_rew: [-5,5] - Stage 1 stickiness after a common rewarded transition
+    p_common_unrew: [-5,5] - Stage 1 stickiness after a common unrewarded transition
+    p_rare: [-5,5] - Stage 1 stickiness after a rare transition
+    """
+    import numpy as np
+    alpha, beta1, beta2, lam, w, p_common_rew, p_common_unrew, p_rare = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    prev_trans_common = True
+    prev_reward = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        p1 = 0
+        if prev_a1 != -1:
+            rep1[prev_a1] = 1
+            if prev_trans_common:
+                p1 = p_common_rew if prev_reward == 1 else p_common_unrew
+            else:
+                p1 = p_rare
+
+        logits_1 = beta1 * q_net + p1 * rep1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        prev_a1 = action_1[trial]
+        prev_trans_common = (action_1[trial] == state_idx)
+        prev_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

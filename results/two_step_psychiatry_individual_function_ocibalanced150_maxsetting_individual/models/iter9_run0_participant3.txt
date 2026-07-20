@@ -1,0 +1,262 @@
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Q-learning with Win-Stay/Lose-Shift Perseveration at Both Stages
+    
+    This model distinguishes choice perseveration based on whether the previous trial
+    (or previous visit to a second-stage state) was rewarded or unrewarded. This captures
+    win-stay/lose-shift heuristics directly in the action selection policy.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for Q-value updates.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w: [0, 1] - Weighting parameter mixing model-based (1) and model-free (0) values.
+    lam: [0, 1] - Eligibility trace parameter for stage 1 model-free update.
+    p1_rew: [-5, 5] - Perseveration bonus for stage 1 if the previous trial was rewarded.
+    p1_unrew: [-5, 5] - Perseveration bonus for stage 1 if the previous trial was unrewarded.
+    p2_rew: [-5, 5] - Perseveration bonus for stage 2 if the last visit to the state was rewarded.
+    p2_unrew: [-5, 5] - Perseveration bonus for stage 2 if the last visit to the state was unrewarded.
+    """
+    learning_rate, beta, w, lam, p1_rew, p1_unrew, p2_rew, p2_unrew = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_a1 = -1
+    last_reward = -1
+    
+    last_a2 = np.array([-1, -1])
+    last_reward_state = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        state_idx = state[trial]
+        a2 = action_2[trial]
+
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        pers1 = np.zeros(2)
+        if last_a1 != -1:
+            if last_reward == 1:
+                pers1[last_a1] = p1_rew
+            else:
+                pers1[last_a1] = p1_unrew
+            
+        logits_1 = beta * q_stage1_net + pers1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 policy
+        pers2 = np.zeros(2)
+        if last_a2[state_idx] != -1:
+            if last_reward_state[state_idx] == 1:
+                pers2[last_a2[state_idx]] = p2_rew
+            else:
+                pers2[last_a2[state_idx]] = p2_unrew
+
+        logits_2 = beta * q_stage2_mf[state_idx] + pers2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        q_stage1_mf[a1] += learning_rate * lam * delta_stage2
+        
+        last_a1 = a1
+        last_reward = reward[trial]
+        last_a2[state_idx] = a2
+        last_reward_state[state_idx] = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid RL with Forgetting (Drift towards Initial Expectation)
+    
+    This model assumes that Q-values for all actions (chosen and unchosen) drift 
+    towards a neutral expectation of 0.5 over time. This captures the phenomenon 
+    where participants might explore unchosen options after a while because they 
+    forget their specific values.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for Q-value updates.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w: [0, 1] - Weighting parameter mixing model-based (1) and model-free (0) values.
+    lam: [0, 1] - Eligibility trace parameter for stage 1 model-free update.
+    p1: [-5, 5] - Perseveration parameter for stage 1 choice.
+    p2: [-5, 5] - Perseveration parameter for stage 2 choice.
+    drift_rate: [0, 1] - Rate at which all Q-values drift towards 0.5 on each trial.
+    """
+    learning_rate, beta, w, lam, p1, p2, drift_rate = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Initialize Q-values at 0.5
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_a1 = -1
+    last_a2 = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        state_idx = state[trial]
+        a2 = action_2[trial]
+
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        pers1 = np.zeros(2)
+        if last_a1 != -1:
+            pers1[last_a1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + p1 * pers1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 policy
+        pers2 = np.zeros(2)
+        if last_a2[state_idx] != -1:
+            pers2[last_a2[state_idx]] = 1.0
+
+        logits_2 = beta * q_stage2_mf[state_idx] + p2 * pers2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Standard RL Updates
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        q_stage1_mf[a1] += learning_rate * lam * delta_stage2
+        
+        # Drift all Q-values towards 0.5
+        q_stage1_mf += drift_rate * (0.5 - q_stage1_mf)
+        q_stage2_mf += drift_rate * (0.5 - q_stage2_mf)
+        
+        last_a1 = a1
+        last_a2[state_idx] = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid RL with Action and Planet Perseveration
+    
+    This model includes standard action perseveration but adds a model-based 
+    planet (state) perseveration component. If a participant visited a planet on the 
+    previous trial, they might be biased to select the stage 1 action that is 
+    most likely to lead to that same planet again, regardless of motor history.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for Q-value updates.
+    beta: [0, 10] - Inverse temperature for softmax action selection.
+    w: [0, 1] - Weighting parameter mixing model-based (1) and model-free (0) values.
+    lam: [0, 1] - Eligibility trace parameter for stage 1 model-free update.
+    p1: [-5, 5] - Motor perseveration parameter for stage 1 choice.
+    p2: [-5, 5] - Perseveration parameter for stage 2 choice.
+    p_planet: [-5, 5] - Planet (state) perseveration parameter at stage 1.
+    """
+    learning_rate, beta, w, lam, p1, p2, p_planet = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_a1 = -1
+    last_a2 = np.array([-1, -1])
+    last_planet = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        state_idx = state[trial]
+        a2 = action_2[trial]
+
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        pers1 = np.zeros(2)
+        if last_a1 != -1:
+            pers1[last_a1] = 1.0
+            
+        planet_pers = np.zeros(2)
+        if last_planet != -1:
+            # Add bonus proportional to the probability of reaching the last_planet
+            planet_pers[0] = transition_matrix[0, last_planet]
+            planet_pers[1] = transition_matrix[1, last_planet]
+            
+        logits_1 = beta * q_stage1_net + p1 * pers1 + p_planet * planet_pers
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # Stage 2 policy
+        pers2 = np.zeros(2)
+        if last_a2[state_idx] != -1:
+            pers2[last_a2[state_idx]] = 1.0
+
+        logits_2 = beta * q_stage2_mf[state_idx] + p2 * pers2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        q_stage1_mf[a1] += learning_rate * lam * delta_stage2
+        
+        last_a1 = a1
+        last_a2[state_idx] = a2
+        last_planet = state_idx
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

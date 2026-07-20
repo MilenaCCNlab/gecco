@@ -1,0 +1,193 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with separate learning rates and inverse temperatures for stage 1 and stage 2.
+    
+    Parameters:
+    lr1: [0, 1] - Learning rate for stage 1.
+    lr2: [0, 1] - Learning rate for stage 2.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Weighting parameter for Model-Based (w) vs Model-Free (1-w) control at stage 1.
+    lam: [0, 1] - Eligibility trace parameter.
+    """
+    lr1, lr2, beta1, beta2, w, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta1 * q_stage1_net
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # action value updating for choice 1
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # action value updating for choice 2
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+        
+        # eligibility trace update for stage 1
+        q_stage1_mf[action_1[trial]] += lr1 * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with asymmetric learning rates for positive and negative RPEs, 
+    and a perseveration parameter for stage 1 to capture stickiness or alternation.
+    
+    Parameters:
+    lr_pos: [0, 1] - Learning rate for positive prediction errors.
+    lr_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta: [0, 10] - Inverse temperature for both stages.
+    w: [0, 1] - Weighting parameter for MB vs MF control.
+    lam: [0, 1] - Eligibility trace parameter.
+    pers: [-5, 5] - Perseveration (stickiness) parameter for stage 1 choices.
+    """
+    lr_pos, lr_neg, beta, w, lam, pers = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            pers_bonus[last_action_1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + pers * pers_bonus
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # action value updating for choice 1
+        lr1 = lr_pos if delta_stage1 >= 0 else lr_neg
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # action value updating for choice 2
+        lr2 = lr_pos if delta_stage2 >= 0 else lr_neg
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+        
+        # eligibility trace update for stage 1
+        q_stage1_mf[action_1[trial]] += lr2 * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with separate learning rates and inverse temperatures for stage 1 and stage 2,
+    and a perseveration parameter for stage 1.
+    
+    Parameters:
+    lr1: [0, 1] - Learning rate for stage 1.
+    lr2: [0, 1] - Learning rate for stage 2.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Weighting parameter for MB vs MF control.
+    lam: [0, 1] - Eligibility trace parameter.
+    pers: [-5, 5] - Perseveration (stickiness) parameter for stage 1 choices.
+    """
+    lr1, lr2, beta1, beta2, w, lam, pers = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            pers_bonus[last_action_1] = 1.0
+            
+        logits_1 = beta1 * q_stage1_net + pers * pers_bonus
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # action value updating for choice 1
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # action value updating for choice 2
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+        
+        # eligibility trace update for stage 1
+        q_stage1_mf[action_1[trial]] += lr1 * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

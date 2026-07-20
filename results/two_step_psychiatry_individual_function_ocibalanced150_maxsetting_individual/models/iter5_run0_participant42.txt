@@ -1,0 +1,226 @@
+Here are 3 new cognitive models that explore alternative mechanisms and parameter configurations, building upon the best-performing models while introducing new ways to capture participant behavior (e.g., subjective transition probabilities, multi-stage perseveration, and stage-specific learning rates).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Hybrid MB/MF with Subjective Transition Probability
+    Instead of assuming the fixed 0.7/0.3 transition probabilities, this model 
+    fits a subjective transition probability parameter (tau) representing the 
+    participant's internal belief about the common transition likelihood.
+    
+    Bounds:
+    alpha: [0, 1] - Learning rate
+    beta1: [0, 10] - Inverse temperature for stage 1
+    beta2: [0, 10] - Inverse temperature for stage 2
+    w: [0, 1] - Model-based weight (1 = pure MB, 0 = pure MF)
+    lam: [0, 1] - Eligibility trace parameter
+    p: [-5, 5] - Choice perseveration (stickiness) parameter for stage 1
+    tau: [0.5, 1.0] - Subjective probability of the common transition
+    """
+    alpha, beta1, beta2, w, lam, p, tau = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[tau, 1 - tau], [1 - tau, tau]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        state_idx = state[trial]
+
+        # Stage 1 Policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        logits_1 = beta1 * q_stage1_net
+        if last_action != -1:
+            logits_1[last_action] += p
+            
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # Stage 2 Policy
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action Value Updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid MB/MF with Stage 1 & Stage 2 Perseveration and Decay
+    This model includes separate perseveration (stickiness) parameters for 
+    both the first-stage and second-stage choices, capturing habitual repeating 
+    of actions at both levels. Unchosen Q-values decay towards 0.5.
+    
+    Bounds:
+    alpha: [0, 1] - Learning rate
+    beta1: [0, 10] - Inverse temperature for stage 1
+    beta2: [0, 10] - Inverse temperature for stage 2
+    w: [0, 1] - Model-based weight (1 = pure MB, 0 = pure MF)
+    lam: [0, 1] - Eligibility trace parameter
+    p1: [-5, 5] - Choice perseveration for stage 1
+    p2: [-5, 5] - Choice perseveration for stage 2
+    decay: [0, 1] - Decay rate for unchosen Q-values towards 0.5
+    """
+    alpha, beta1, beta2, w, lam, p1, p2, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    
+    last_action_1 = -1
+    last_action_2 = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        state_idx = state[trial]
+
+        # Stage 1 Policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        logits_1 = beta1 * q_stage1_net
+        if last_action_1 != -1:
+            logits_1[last_action_1] += p1
+            
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # Stage 2 Policy
+        logits_2 = beta2 * q_stage2_mf[state_idx].copy()
+        if last_action_2[state_idx] != -1:
+            logits_2[last_action_2[state_idx]] += p2
+            
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action Value Updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        # Decay unchosen items
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+        
+        last_action_1 = action_1[trial]
+        last_action_2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid MB/MF with Separate Stage Learning Rates and Decay
+    This model assumes that learning might occur at different speeds for the 
+    first-stage transition vs the second-stage reward. Unchosen actions decay 
+    towards 0.5.
+    
+    Bounds:
+    alpha1: [0, 1] - Learning rate for stage 1
+    alpha2: [0, 1] - Learning rate for stage 2
+    beta1: [0, 10] - Inverse temperature for stage 1
+    beta2: [0, 10] - Inverse temperature for stage 2
+    w: [0, 1] - Model-based weight (1 = pure MB, 0 = pure MF)
+    lam: [0, 1] - Eligibility trace parameter
+    p: [-5, 5] - Choice perseveration for stage 1
+    decay: [0, 1] - Decay rate for unchosen Q-values towards 0.5
+    """
+    alpha1, alpha2, beta1, beta2, w, lam, p, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        state_idx = state[trial]
+
+        # Stage 1 Policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        logits_1 = beta1 * q_stage1_net
+        if last_action != -1:
+            logits_1[last_action] += p
+            
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # Stage 2 Policy
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action Value Updating with separate alphas
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha1 * lam * delta_stage2
+
+        # Decay unchosen items
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

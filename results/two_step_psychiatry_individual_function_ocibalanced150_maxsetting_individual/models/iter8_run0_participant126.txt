@@ -1,0 +1,245 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Includes an exponential choice trace for Stage 1 to capture long-term perseveration,
+    along with decay for unchosen options. Instead of only depending on the immediate past trial,
+    the stickiness bonus is applied based on a choice trace that accumulates over time.
+    
+    Bounds:
+    alpha: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    lam: [0, 1]
+    stickiness_1: [-5, 5]
+    stickiness_2: [-5, 5]
+    decay: [0, 1]
+    choice_alpha: [0, 1]
+    """
+    alpha, beta, w, lam, stickiness_1, stickiness_2, decay, choice_alpha = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action_stage2 = {0: None, 1: None}
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_net + stickiness_1 * choice_trace
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        stickiness_bonus_2 = np.zeros(2)
+        if last_action_stage2[state_idx] is not None:
+            stickiness_bonus_2[last_action_stage2[state_idx]] = stickiness_2
+
+        logits_2 = beta * q_stage2_mf[state_idx] + stickiness_bonus_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+        
+        last_action_stage2[state_idx] = action_2[trial]
+        
+        # Choice trace update
+        choice_trace *= (1 - choice_alpha)
+        choice_trace[action_1[trial]] += choice_alpha
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Stage 1 stickiness is modulated by the transition type of the previous trial.
+    A parameter 'trans_stickiness' is added to 'stickiness_1' if the previous transition was common.
+    This captures differential perseveration depending on whether the transition was expected or not.
+    
+    Bounds:
+    alpha: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    lam: [0, 1]
+    stickiness_1: [-5, 5]
+    stickiness_2: [-5, 5]
+    decay: [0, 1]
+    trans_stickiness: [-5, 5]
+    """
+    alpha, beta, w, lam, stickiness_1, stickiness_2, decay, trans_stickiness = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action_stage2 = {0: None, 1: None}
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_bonus_1 = np.zeros(2)
+        if trial > 0:
+            prev_a = action_1[trial-1]
+            prev_s = state[trial-1]
+            # Action 0 -> State 0 and Action 1 -> State 1 are the common transitions
+            is_common = (prev_a == prev_s)
+            bonus = stickiness_1 + (trans_stickiness if is_common else 0)
+            stickiness_bonus_1[prev_a] = bonus
+            
+        logits_1 = beta * q_net + stickiness_bonus_1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        stickiness_bonus_2 = np.zeros(2)
+        if last_action_stage2[state_idx] is not None:
+            stickiness_bonus_2[last_action_stage2[state_idx]] = stickiness_2
+
+        logits_2 = beta * q_stage2_mf[state_idx] + stickiness_bonus_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+        
+        last_action_stage2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Incorporates a state-win-stay heuristic. If the previous trial was rewarded,
+    this adds a bonus to the first-stage action that commonly leads to the second-stage 
+    state visited on the previous trial, acting as a heuristic form of model-based control.
+    
+    Bounds:
+    alpha: [0, 1]
+    beta: [0, 10]
+    w: [0, 1]
+    lam: [0, 1]
+    stickiness_1: [-5, 5]
+    stickiness_2: [-5, 5]
+    decay: [0, 1]
+    state_win_stay: [-5, 5]
+    """
+    alpha, beta, w, lam, stickiness_1, stickiness_2, decay, state_win_stay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action_stage2 = {0: None, 1: None}
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_bonus_1 = np.zeros(2)
+        state_win_stay_bonus = np.zeros(2)
+        if trial > 0:
+            stickiness_bonus_1[action_1[trial-1]] = stickiness_1
+            if reward[trial-1] == 1:
+                prev_s = state[trial-1]
+                # Action 0 commonly leads to State 0, Action 1 to State 1
+                state_win_stay_bonus[prev_s] = state_win_stay
+            
+        logits_1 = beta * q_net + stickiness_bonus_1 + state_win_stay_bonus
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        stickiness_bonus_2 = np.zeros(2)
+        if last_action_stage2[state_idx] is not None:
+            stickiness_bonus_2[last_action_stage2[state_idx]] = stickiness_2
+
+        logits_2 = beta * q_stage2_mf[state_idx] + stickiness_bonus_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+        
+        last_action_stage2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

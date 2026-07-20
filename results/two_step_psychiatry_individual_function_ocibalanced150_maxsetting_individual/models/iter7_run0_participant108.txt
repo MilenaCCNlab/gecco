@@ -1,0 +1,288 @@
+Here are 3 new cognitive models that introduce novel mechanisms to explain the participant's choice behavior. 
+
+### Model 1: Choice Momentum (Choice Trace)
+Instead of a simple "stickiness" that only considers the immediately preceding trial, this model keeps an exponentially weighted moving average of past stage 1 choices (`choice_trace`). The participant's tendency to perseverate is proportional to this trace, capturing a longer-term momentum or habit toward specific spaceships.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Two-Step Task Model with Choice Momentum (Choice Trace).
+    
+    Parameters:
+    alpha_pos: learning rate for positive prediction errors [0,1]
+    alpha_neg: learning rate for negative prediction errors [0,1]
+    beta: inverse temperature [0,10]
+    w: model-based weight [0,1]
+    lam: eligibility trace [0,1]
+    p: choice momentum weight [-5,5]
+    alpha_c: learning rate for the choice trace [0,1]
+    decay: decay rate for unchosen options [0,1]
+    """
+    import numpy as np
+    alpha_pos, alpha_neg, beta, w, lam, p, alpha_c, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net + p * choice_trace
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        if a2 == -1:
+            p_choice_2[trial] = 1.0
+            choice_trace = (1 - alpha_c) * choice_trace
+            choice_trace[a1] += alpha_c
+            continue
+
+        logits_2 = beta * q_stage2_mf[s]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        delta_stage2 = r - q_stage2_mf[s, a2]
+
+        # Decay unchosen
+        for state_idx in range(2):
+            for action_idx in range(2):
+                if not (state_idx == s and action_idx == a2):
+                    q_stage2_mf[state_idx, action_idx] += decay * (0.5 - q_stage2_mf[state_idx, action_idx])
+
+        for action_idx in range(2):
+            if action_idx != a1:
+                q_stage1_mf[action_idx] += decay * (0.5 - q_stage1_mf[action_idx])
+
+        alpha_1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        alpha_2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+
+        q_stage1_mf[a1] += alpha_1 * delta_stage1
+        q_stage2_mf[s, a2] += alpha_2 * delta_stage2
+        q_stage1_mf[a1] += alpha_2 * lam * delta_stage2
+        
+        # Update choice trace
+        choice_trace = (1 - alpha_c) * choice_trace
+        choice_trace[a1] += alpha_c
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Subjective Penalty for Unrewarded Trials (Omega)
+Sometimes participants perceive an unrewarded trial (0 coins) not just as a neutral outcome, but as a subjective punishment or loss. This model introduces an `omega` parameter that scales the 0 reward to a negative value `-omega`, altering the prediction error calculations.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Two-Step Task Model with Subjective Penalty for Unrewarded Trials.
+    
+    Parameters:
+    alpha_pos: learning rate for positive prediction errors [0,1]
+    alpha_neg: learning rate for negative prediction errors [0,1]
+    beta: inverse temperature [0,10]
+    w: model-based weight [0,1]
+    lam: eligibility trace [0,1]
+    p: stickiness (perseveration) [-5,5]
+    decay: decay rate for unchosen options [0,1]
+    omega: subjective penalty for zero reward [0,1]
+    """
+    import numpy as np
+    alpha_pos, alpha_neg, beta, w, lam, p, decay, omega = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + p * stickiness
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        if a2 == -1:
+            p_choice_2[trial] = 1.0
+            last_action_1 = a1
+            continue
+
+        logits_2 = beta * q_stage2_mf[s]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Subjective effective reward
+        r_eff = r if r > 0 else -omega
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        delta_stage2 = r_eff - q_stage2_mf[s, a2]
+
+        for state_idx in range(2):
+            for action_idx in range(2):
+                if not (state_idx == s and action_idx == a2):
+                    q_stage2_mf[state_idx, action_idx] += decay * (0.5 - q_stage2_mf[state_idx, action_idx])
+
+        for action_idx in range(2):
+            if action_idx != a1:
+                q_stage1_mf[action_idx] += decay * (0.5 - q_stage1_mf[action_idx])
+
+        alpha_1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        alpha_2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+
+        q_stage1_mf[a1] += alpha_1 * delta_stage1
+        q_stage2_mf[s, a2] += alpha_2 * delta_stage2
+        q_stage1_mf[a1] += alpha_2 * lam * delta_stage2
+        
+        last_action_1 = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Transition-Dependent Eligibility Trace
+This model assumes that the extent to which the participant credits the first-stage choice for the second-stage reward depends on the type of transition. If the transition was common, the eligibility trace is `lam_common`; if it was rare, the participant may attribute the outcome less to the first-stage choice using `lam_rare`.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Two-Step Task Model with Transition-Dependent Eligibility Trace.
+    
+    Parameters:
+    alpha_pos: learning rate for positive prediction errors [0,1]
+    alpha_neg: learning rate for negative prediction errors [0,1]
+    beta: inverse temperature [0,10]
+    w: model-based weight [0,1]
+    lam_common: eligibility trace for common transitions [0,1]
+    lam_rare: eligibility trace for rare transitions [0,1]
+    p: stickiness (perseveration) [-5,5]
+    decay: decay rate for unchosen options [0,1]
+    """
+    import numpy as np
+    alpha_pos, alpha_neg, beta, w, lam_common, lam_rare, p, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits_1 = beta * q_stage1_net + p * stickiness
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        if a2 == -1:
+            p_choice_2[trial] = 1.0
+            last_action_1 = a1
+            continue
+
+        logits_2 = beta * q_stage2_mf[s]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        delta_stage2 = r - q_stage2_mf[s, a2]
+
+        for state_idx in range(2):
+            for action_idx in range(2):
+                if not (state_idx == s and action_idx == a2):
+                    q_stage2_mf[state_idx, action_idx] += decay * (0.5 - q_stage2_mf[state_idx, action_idx])
+
+        for action_idx in range(2):
+            if action_idx != a1:
+                q_stage1_mf[action_idx] += decay * (0.5 - q_stage1_mf[action_idx])
+
+        alpha_1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        alpha_2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+
+        q_stage1_mf[a1] += alpha_1 * delta_stage1
+        q_stage2_mf[s, a2] += alpha_2 * delta_stage2
+        
+        # Determine if transition was common or rare
+        is_common = (a1 == 0 and s == 0) or (a1 == 1 and s == 1)
+        lam_current = lam_common if is_common else lam_rare
+        
+        q_stage1_mf[a1] += alpha_2 * lam_current * delta_stage2
+        
+        last_action_1 = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

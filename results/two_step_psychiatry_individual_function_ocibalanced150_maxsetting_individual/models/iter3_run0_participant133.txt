@@ -1,0 +1,233 @@
+Here are 3 new cognitive models that capture different potential mechanisms for the participant's behavior, which is characterized by very long streaks of the same Stage 1 choice and sudden switches.
+
+### Model 1: Win-Stay / Lose-Shift Stickiness
+This model posits that the participant's tendency to repeat a choice depends on whether the previous trial was rewarded. It splits the stickiness parameter into two: one applied after receiving a coin, and another after receiving nothing.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with outcome-dependent stickiness (Win-Stay / Lose-Shift) at Stage 1.
+    Includes separate stickiness parameters for when the previous trial was rewarded vs unrewarded.
+    
+    Parameters/Bounds:
+    alpha: [0, 1] - learning rate
+    beta: [0, 10] - inverse temperature
+    w: [0, 1] - model-based weight
+    stick_win: [-5, 5] - stickiness after a reward
+    stick_lose: [-5, 5] - stickiness after no reward
+    lambda_trace: [0, 1] - eligibility trace
+    """
+    alpha, beta, w, stick_win, stick_lose, lambda_trace = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1.0 - w) * q_stage1_mf
+        
+        stick_bonus = np.zeros(2)
+        if last_action != -1:
+            if last_reward == 1:
+                stick_bonus[last_action] = stick_win
+            else:
+                stick_bonus[last_action] = stick_lose
+                
+        q_vals_1 = beta * q_net + stick_bonus
+        q_vals_1 -= np.max(q_vals_1)
+        exp_q1 = np.exp(q_vals_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q_vals_2 = beta * q_stage2_mf[state_idx]
+        q_vals_2 -= np.max(q_vals_2)
+        exp_q2 = np.exp(q_vals_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lambda_trace * delta_stage2
+        
+        last_action = action_1[trial]
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Choice Trace on Both Stages
+Given the participant's extreme perseveration (e.g., repeating spaceship 0 for ~140 trials), this model tracks a decaying "choice trace" of past actions instead of just the immediate previous choice. This trace accumulates over time, capturing long streaks, and is applied to both Stage 1 and Stage 2 decisions.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with accumulated choice traces for both Stage 1 and Stage 2.
+    Maintains an exponentially decaying trace of past choices, capturing long streaks.
+    
+    Parameters/Bounds:
+    alpha: [0, 1] - learning rate
+    beta_1: [0, 10] - inverse temperature for Stage 1
+    beta_2: [0, 10] - inverse temperature for Stage 2
+    w: [0, 1] - model-based weight
+    choice_trace_decay: [0, 1] - decay factor for the choice trace (1 = no decay)
+    weight_trace_1: [-5, 5] - effect of choice trace on Stage 1
+    weight_trace_2: [-5, 5] - effect of choice trace on Stage 2
+    """
+    alpha, beta_1, beta_2, w, choice_trace_decay, weight_trace_1, weight_trace_2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    trace_1 = np.zeros(2)
+    trace_2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1.0 - w) * q_stage1_mf
+        
+        q_vals_1 = beta_1 * q_net + weight_trace_1 * trace_1
+        q_vals_1 -= np.max(q_vals_1)
+        exp_q1 = np.exp(q_vals_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q_vals_2 = beta_2 * q_stage2_mf[state_idx] + weight_trace_2 * trace_2[state_idx]
+        q_vals_2 -= np.max(q_vals_2)
+        exp_q2 = np.exp(q_vals_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Standard eligibility trace of 1.0 for simplicity
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage2
+
+        # Updating traces
+        trace_1 = trace_1 * choice_trace_decay
+        trace_1[action_1[trial]] += 1.0
+        
+        trace_2[state_idx] = trace_2[state_idx] * choice_trace_decay
+        trace_2[state_idx, action_2[trial]] += 1.0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Uncertainty/Exploration Bonus
+This model explains the sudden switch to the alternative spaceship late in the game by implementing a novelty bonus. The longer an option goes unchosen, the more its apparent value grows (logarithmically), eventually triggering exploration.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with an uncertainty/exploration bonus based on the time since an action was last chosen.
+    The bonus grows logarithmically with the number of trials since the action was last selected.
+    This explains sudden switches to previously unexplored options after long streaks.
+    
+    Parameters/Bounds:
+    alpha: [0, 1] - learning rate
+    beta: [0, 10] - inverse temperature
+    w: [0, 1] - model-based weight
+    stickiness: [-5, 5] - bonus for repeating the immediate previous stage 1 action
+    lambda_trace: [0, 1] - eligibility trace
+    exploration_bonus: [0, 5] - weight for the logarithmic time-since-chosen bonus
+    """
+    alpha, beta, w, stickiness, lambda_trace, exploration_bonus = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+    time_since_chosen_1 = np.ones(2)
+    time_since_chosen_2 = np.ones((2, 2))
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1.0 - w) * q_stage1_mf
+        
+        stick_bonus = np.zeros(2)
+        if last_action != -1:
+            stick_bonus[last_action] = stickiness
+            
+        q_vals_1 = beta * q_net + stick_bonus + exploration_bonus * np.log(time_since_chosen_1)
+        q_vals_1 -= np.max(q_vals_1)
+        exp_q1 = np.exp(q_vals_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q_vals_2 = beta * q_stage2_mf[state_idx] + exploration_bonus * np.log(time_since_chosen_2[state_idx])
+        q_vals_2 -= np.max(q_vals_2)
+        exp_q2 = np.exp(q_vals_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lambda_trace * delta_stage2
+        
+        last_action = action_1[trial]
+        
+        # Update time since chosen
+        time_since_chosen_1 += 1
+        time_since_chosen_1[action_1[trial]] = 1
+        
+        time_since_chosen_2 += 1
+        time_since_chosen_2[state_idx, action_2[trial]] = 1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

@@ -1,0 +1,250 @@
+Here are 3 new cognitive models that explore different theoretical mechanisms for the two-step task. They build upon the baseline hybrid Model-Based/Model-Free (MB/MF) architecture while introducing unique mechanisms such as Win-Stay-Lose-Shift (WSLS) biases, Action Traces (Choice Kernels) for both stages, and a Novelty/Exploration bonus.
+
+### Model 1: Hybrid Model with Perseveration, Loss Aversion, and Win-Stay-Lose-Shift (WSLS)
+This model introduces a `wsls` parameter. While perseveration (`pers`) captures a baseline habit to repeat the previous action regardless of the outcome, the `wsls` parameter adds a conditional bonus to the previous action if it was rewarded, and a penalty if it resulted in a loss (0 reward). This mimics a well-known heuristic strategy.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with separate temperatures, perseveration, loss aversion, and a win-stay-lose-shift (WSLS) bias.
+    Loss aversion parameter penalizes 0-reward outcomes as negative rewards.
+    WSLS adds a bonus to the previous stage 1 action if it was rewarded, or a penalty if unrewarded.
+    
+    Bounds:
+    alpha: [0,1] - learning rate
+    beta_1: [0,10] - inverse temperature for stage 1
+    beta_2: [0,10] - inverse temperature for stage 2
+    w: [0,1] - model-based weight
+    lambda_: [0,1] - eligibility trace
+    pers: [-5,5] - perseveration (stickiness) bonus for previous stage 1 choice
+    loss_aversion: [0,5] - penalty applied when reward is 0
+    wsls: [-5,5] - Win-stay-lose-shift bonus/penalty
+    """
+    alpha, beta_1, beta_2, w, lambda_, pers, loss_aversion, wsls = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_action_1 = -1
+    prev_reward = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        bonus_1 = np.zeros(2)
+        if prev_action_1 != -1:
+            bonus_1[prev_action_1] += pers
+            if prev_reward == 1:
+                bonus_1[prev_action_1] += wsls
+            else:
+                bonus_1[prev_action_1] -= wsls
+                
+        logits_1 = beta_1 * q_net + bonus_1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        r = 1.0 if reward[trial] == 1 else -loss_aversion
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+        
+        prev_action_1 = action_1[trial]
+        prev_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Dual Action Trace (Choice Kernel) Model
+Instead of merely looking at the single previous action, this model maintains an exponentially decaying "Action Trace" that captures a participant's broader choice history (habit). It applies these traces to both Stage 1 and Stage 2 decisions independently via separate weight parameters.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with an exponential action trace (choice kernel) for both stage 1 and stage 2.
+    The action trace tracks the frequency of recent choices and adds a bias to the logits.
+    
+    Bounds:
+    alpha: [0,1] - learning rate
+    beta_1: [0,10] - inverse temperature for stage 1
+    beta_2: [0,10] - inverse temperature for stage 2
+    w: [0,1] - model-based weight
+    lambda_: [0,1] - eligibility trace
+    alpha_trace: [0,1] - update rate for the action trace
+    weight_trace_1: [-5,5] - weight of the action trace for stage 1
+    weight_trace_2: [-5,5] - weight of the action trace for stage 2
+    """
+    alpha, beta_1, beta_2, w, lambda_, alpha_trace, weight_trace_1, weight_trace_2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    trace_1 = np.zeros(2)
+    trace_2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_net + weight_trace_1 * trace_1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx] + weight_trace_2 * trace_2[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        r = reward[trial]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+        
+        # Update traces
+        for a in range(2):
+            if a == action_1[trial]:
+                trace_1[a] = trace_1[a] + alpha_trace * (1 - trace_1[a])
+            else:
+                trace_1[a] = trace_1[a] * (1 - alpha_trace)
+                
+        for s in range(2):
+            for a in range(2):
+                if s == state_idx and a == action_2[trial]:
+                    trace_2[s, a] = trace_2[s, a] + alpha_trace * (1 - trace_2[s, a])
+                else:
+                    trace_2[s, a] = trace_2[s, a] * (1 - alpha_trace)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Loss Aversion with Exploration/Novelty Bonus
+Instead of decaying unchosen Q-values, this model adds a linear `novelty` bonus to Stage 1 actions that haven't been selected recently. This parameter systematically captures exploratory behavior, driving choice probability up for neglected options over time.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with perseveration, loss aversion, and a novelty bonus.
+    The novelty bonus increases linearly with the number of trials an action has not been chosen,
+    encouraging exploration.
+    
+    Bounds:
+    alpha: [0,1] - learning rate
+    beta_1: [0,10] - inverse temperature for stage 1
+    beta_2: [0,10] - inverse temperature for stage 2
+    w: [0,1] - model-based weight
+    lambda_: [0,1] - eligibility trace
+    pers: [-5,5] - perseveration (stickiness) bonus for previous stage 1 choice
+    loss_aversion: [0,5] - penalty applied when reward is 0
+    novelty: [0,2] - bonus added per trial an action is unchosen
+    """
+    alpha, beta_1, beta_2, w, lambda_, pers, loss_aversion, novelty = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_action_1 = -1
+    
+    # Counter for trials since chosen
+    trials_unchosen_1 = np.zeros(2)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        bonus_1 = np.zeros(2)
+        if prev_action_1 != -1:
+            bonus_1[prev_action_1] = pers
+            
+        logits_1 = beta_1 * q_net + bonus_1 + novelty * trials_unchosen_1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        r = 1.0 if reward[trial] == 1 else -loss_aversion
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+        
+        prev_action_1 = action_1[trial]
+        
+        # update unchosen counter for novelty
+        for a in range(2):
+            if a == action_1[trial]:
+                trials_unchosen_1[a] = 0
+            else:
+                trials_unchosen_1[a] += 1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

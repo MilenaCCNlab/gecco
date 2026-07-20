@@ -1,0 +1,179 @@
+Here are three cognitive models that build upon the provided template. Since the template explicitly defines the first-stage policy as a purely model-based (MB) calculation (using `q_stage1_mb`), the differences between these models focus on the second-stage policy and the learning rules for updating the model-free (MF) Q-values. 
+
+Note: I have added a check to skip missed trials (`action == -1`) to prevent incorrect indexing, which is present in the participant's data (e.g., Trials 1 and 2).
+
+### Model 1: Basic Q-Learning 
+This model implements a standard reinforcement learning update where prediction errors update the Q-values symmetrically. Stage 1 choices are model-based (as specified in the template), and Stage 2 choices are model-free.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Basic Q-learning model with a Model-Based Stage 1 and Model-Free Stage 2.
+    
+    Parameters:
+    model_parameters (tuple):
+        learning_rate: [0, 1] - The rate at which prediction errors update Q-values.
+        beta: [0, 10] - Inverse temperature controlling choice stochasticity (higher = more deterministic).
+    """
+    learning_rate, beta = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Skip missed trials
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        exp_q1 = np.exp(beta * q_stage1_mb)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Learning Rates
+Humans often learn differently from positive versus negative feedback. This model introduces asymmetric learning rates, allowing the agent to update Q-values at different speeds depending on whether the prediction error is positive (better than expected) or negative (worse than expected).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with asymmetric learning rates for positive and negative prediction errors.
+    
+    Parameters:
+    model_parameters (tuple):
+        alpha_pos: [0, 1] - Learning rate for positive reward prediction errors.
+        alpha_neg: [0, 1] - Learning rate for negative reward prediction errors.
+        beta: [0, 10] - Inverse temperature controlling choice stochasticity.
+    """
+    alpha_pos, alpha_neg, beta = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Skip missed trials
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        exp_q1 = np.exp(beta * q_stage1_mb)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        lr1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        lr2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Q-Learning with Forgetting (Decay)
+This model assumes that information about unchosen options gradually decays over time. If a participant ignores a specific alien or planet for a long period, their expected value for that alien slowly decays toward zero.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with value forgetting (decay) for unchosen actions.
+    
+    Parameters:
+    model_parameters (tuple):
+        learning_rate: [0, 1] - The rate at which prediction errors update chosen Q-values.
+        decay_rate: [0, 1] - The rate at which unchosen Q-values decay towards zero.
+        beta: [0, 10] - Inverse temperature controlling choice stochasticity.
+    """
+    learning_rate, decay_rate, beta = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Skip missed trials
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        exp_q1 = np.exp(beta * q_stage1_mb)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        q_stage1_mf[1 - action_1[trial]] *= (1 - decay_rate)
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Decay for unchosen action in the visited state
+        q_stage2_mf[state_idx, 1 - action_2[trial]] *= (1 - decay_rate)
+        # Decay for both actions in the unvisited state
+        q_stage2_mf[1 - state_idx, 0] *= (1 - decay_rate)
+        q_stage2_mf[1 - state_idx, 1] *= (1 - decay_rate)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

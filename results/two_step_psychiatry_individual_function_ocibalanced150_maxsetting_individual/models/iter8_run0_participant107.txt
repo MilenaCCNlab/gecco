@@ -1,0 +1,251 @@
+Here are three novel cognitive models that build upon the best-performing model by introducing different cognitive mechanisms (lapse rate, uncertainty-based exploration, and independent model-based/model-free scaling) to better capture the participant's choice patterns.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with asymmetric learning rates, eligibility trace, choice stickiness, and a lapse rate (epsilon).
+    The lapse rate accounts for random exploration or lapses in attention, which might explain occasional 
+    random choices (like choosing spaceship 0 after a long streak of choosing spaceship 1) independent 
+    of the Q-values.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    pi: [-5, 5] - Choice stickiness for stage 1.
+    epsilon: [0, 1] - Lapse rate (probability of making a completely random choice).
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lam, pi, epsilon = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+        
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits1 = beta1 * q_net_stage1 + pi * stickiness
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        # Incorporate lapse rate
+        probs_1 = (1 - epsilon) * probs_1 + epsilon * 0.5
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        logits2 = beta2 * q_stage2_mf[s]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        # Incorporate lapse rate
+        probs_2 = (1 - epsilon) * probs_2 + epsilon * 0.5
+        p_choice_2[trial] = probs_2[a2]
+
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[a1] += alpha1 * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha2 * delta_stage2
+
+        # Eligibility trace update for stage 1
+        q_stage1_mf[a1] += alpha2 * lam * delta_stage2
+        
+        last_action_1 = a1
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with asymmetric learning rates and an uncertainty-based exploration bonus.
+    The model keeps track of how many trials have passed since each spaceship was last chosen.
+    An exploration bonus is added to the stage 1 logits, controlled by eta_u, encouraging the 
+    participant to occasionally sample the less-frequently chosen spaceship.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    pi: [-5, 5] - Choice stickiness for stage 1.
+    eta_u: [0, 5] - Uncertainty bonus weight for stage 1.
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lam, pi, eta_u = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    unc = np.zeros(2)
+    
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+        
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits1 = beta1 * q_net_stage1 + pi * stickiness + eta_u * unc
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        logits2 = beta2 * q_stage2_mf[s]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[a1] += alpha1 * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha2 * delta_stage2
+
+        # Eligibility trace update for stage 1
+        q_stage1_mf[a1] += alpha2 * lam * delta_stage2
+        
+        last_action_1 = a1
+        
+        # Update uncertainty (trials since last chosen)
+        unc += 1
+        unc[a1] = 0
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with asymmetric learning rates and independent inverse temperatures for model-based 
+    and model-free values (beta_mb and beta_mf) instead of a single relative weighting parameter (w).
+    This allows the participant to scale their reliance on MB and MF systems independently, which 
+    can better capture distinct sensitivities to the two valuation systems.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta_mb: [0, 10] - Inverse temperature for model-based stage 1 values.
+    beta_mf: [0, 10] - Inverse temperature for model-free stage 1 values.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    lam: [0, 1] - Eligibility trace.
+    pi: [-5, 5] - Choice stickiness for stage 1.
+    """
+    alpha_pos, alpha_neg, beta_mb, beta_mf, beta2, lam, pi = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+        
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        # Independent scaling for MB and MF values
+        logits1 = beta_mb * q_stage1_mb + beta_mf * q_stage1_mf + pi * stickiness
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        logits2 = beta2 * q_stage2_mf[s]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[a1] += alpha1 * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha2 * delta_stage2
+
+        # Eligibility trace update for stage 1
+        q_stage1_mf[a1] += alpha2 * lam * delta_stage2
+        
+        last_action_1 = a1
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

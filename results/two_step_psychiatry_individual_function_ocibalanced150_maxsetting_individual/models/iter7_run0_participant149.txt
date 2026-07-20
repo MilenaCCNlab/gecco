@@ -1,0 +1,285 @@
+Here are 3 new cognitive models that build upon your best model by introducing new mechanisms to explain the participant's choices, while keeping the total parameter count at or below 8. 
+
+### Model 1: Separate Learning Rates + Unchosen Decay
+This model modifies the best model by allowing different learning rates for Stage 1 and Stage 2. This accounts for the possibility that the participant updates their expectations of the spaceships (Stage 1) at a different speed than their expectations of the aliens (Stage 2).
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Extends the hybrid model with choice stickiness and unchosen decay 
+    by allowing separate learning rates for Stage 1 and Stage 2.
+    
+    Bounds:
+    learning_rate_1: [0, 1] - Learning rate for Q-value updates at Stage 1
+    learning_rate_2: [0, 1] - Learning rate for Q-value updates at Stage 2
+    beta: [0, 10] - Inverse temperature for softmax action selection
+    w: [0, 1] - Mixing weight for model-based vs model-free (1 = purely MB, 0 = purely MF)
+    lam: [0, 1] - Eligibility trace decay parameter
+    pi_1: [-5, 5] - Stickiness parameter for repeating the previous stage 1 choice
+    pi_2: [-5, 5] - Stickiness parameter for repeating the previous stage 2 choice
+    unchosen_decay: [0, 1] - Rate at which unchosen Q-values decay towards 0.5
+    """
+    learning_rate_1, learning_rate_2, beta, w, lam, pi_1, pi_2, unchosen_decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    last_action_1 = -1
+    last_action_2 = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1 or s == -1 or a2 == -1:
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1[last_action_1] = 1.0
+            
+        logits_1 = beta * q_net + pi_1 * stickiness_1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+        
+        state_idx = s
+
+        # policy for the second choice
+        stickiness_2 = np.zeros(2)
+        if last_action_2[state_idx] != -1:
+            stickiness_2[last_action_2[state_idx]] = 1.0
+            
+        logits_2 = beta * q_stage2_mf[state_idx] + pi_2 * stickiness_2
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+
+        # Use separate learning rates
+        q_stage1_mf[a1] += learning_rate_1 * delta_stage1 + learning_rate_1 * lam * delta_stage2
+        q_stage2_mf[state_idx, a2] += learning_rate_2 * delta_stage2
+
+        # Decay unchosen options
+        unchosen_a1 = 1 - a1
+        q_stage1_mf[unchosen_a1] += unchosen_decay * (0.5 - q_stage1_mf[unchosen_a1])
+        
+        unchosen_a2 = 1 - a2
+        q_stage2_mf[state_idx, unchosen_a2] += unchosen_decay * (0.5 - q_stage2_mf[state_idx, unchosen_a2])
+        
+        unvisited_s = 1 - state_idx
+        q_stage2_mf[unvisited_s, 0] += unchosen_decay * (0.5 - q_stage2_mf[unvisited_s, 0])
+        q_stage2_mf[unvisited_s, 1] += unchosen_decay * (0.5 - q_stage2_mf[unvisited_s, 1])
+
+        last_action_1 = a1
+        last_action_2[state_idx] = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Separate Betas + Unchosen Decay
+This model extends the best model by allowing separate inverse temperatures (`beta_1` and `beta_2`) for the two stages. This allows the model to capture differences in choice stochasticity (e.g., if the participant explores more randomly at Stage 2 compared to Stage 1).
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Extends the hybrid model with choice stickiness and unchosen decay 
+    by allowing separate inverse temperatures (betas) for Stage 1 and Stage 2.
+    
+    Bounds:
+    learning_rate: [0, 1] - Learning rate for Q-value updates
+    beta_1: [0, 10] - Inverse temperature for softmax action selection at Stage 1
+    beta_2: [0, 10] - Inverse temperature for softmax action selection at Stage 2
+    w: [0, 1] - Mixing weight for model-based vs model-free
+    lam: [0, 1] - Eligibility trace decay parameter
+    pi_1: [-5, 5] - Stickiness parameter for repeating the previous stage 1 choice
+    pi_2: [-5, 5] - Stickiness parameter for repeating the previous stage 2 choice
+    unchosen_decay: [0, 1] - Rate at which unchosen Q-values decay towards 0.5
+    """
+    learning_rate, beta_1, beta_2, w, lam, pi_1, pi_2, unchosen_decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    last_action_1 = -1
+    last_action_2 = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1 or s == -1 or a2 == -1:
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1[last_action_1] = 1.0
+            
+        logits_1 = beta_1 * q_net + pi_1 * stickiness_1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+        
+        state_idx = s
+
+        # policy for the second choice
+        stickiness_2 = np.zeros(2)
+        if last_action_2[state_idx] != -1:
+            stickiness_2[last_action_2[state_idx]] = 1.0
+            
+        logits_2 = beta_2 * q_stage2_mf[state_idx] + pi_2 * stickiness_2
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+
+        q_stage1_mf[a1] += learning_rate * delta_stage1 + learning_rate * lam * delta_stage2
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        # Decay unchosen options
+        unchosen_a1 = 1 - a1
+        q_stage1_mf[unchosen_a1] += unchosen_decay * (0.5 - q_stage1_mf[unchosen_a1])
+        
+        unchosen_a2 = 1 - a2
+        q_stage2_mf[state_idx, unchosen_a2] += unchosen_decay * (0.5 - q_stage2_mf[state_idx, unchosen_a2])
+        
+        unvisited_s = 1 - state_idx
+        q_stage2_mf[unvisited_s, 0] += unchosen_decay * (0.5 - q_stage2_mf[unvisited_s, 0])
+        q_stage2_mf[unvisited_s, 1] += unchosen_decay * (0.5 - q_stage2_mf[unvisited_s, 1])
+
+        last_action_1 = a1
+        last_action_2[state_idx] = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Choice Traces + Unchosen Decay
+This model replaces the simple "last-trial stickiness" with a continuous choice trace that acts as a moving average of past decisions. This evaluates if the participant's perseveration is influenced by a longer history of repeated choices rather than just the single preceding trial.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Extends the best model by replacing simple last-trial stickiness 
+    with a choice trace (perseveration trace) that decays over time.
+    
+    Bounds:
+    learning_rate: [0, 1] - Learning rate for Q-value updates
+    beta: [0, 10] - Inverse temperature for softmax action selection
+    w: [0, 1] - Mixing weight for model-based vs model-free
+    lam: [0, 1] - Eligibility trace decay parameter
+    pi_1: [-5, 5] - Weight on the Stage 1 choice trace
+    pi_2: [-5, 5] - Weight on the Stage 2 choice trace
+    unchosen_decay: [0, 1] - Rate at which unchosen Q-values decay towards 0.5
+    alpha_trace: [0, 1] - Learning rate/decay rate for the choice traces
+    """
+    learning_rate, beta, w, lam, pi_1, pi_2, unchosen_decay, alpha_trace = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    # Initialize choice traces
+    trace_1 = np.zeros(2)
+    trace_2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+
+        if a1 == -1 or s == -1 or a2 == -1:
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+            
+        logits_1 = beta * q_net + pi_1 * trace_1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+        
+        state_idx = s
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx] + pi_2 * trace_2[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+
+        q_stage1_mf[a1] += learning_rate * delta_stage1 + learning_rate * lam * delta_stage2
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+
+        # Decay unchosen options
+        unchosen_a1 = 1 - a1
+        q_stage1_mf[unchosen_a1] += unchosen_decay * (0.5 - q_stage1_mf[unchosen_a1])
+        
+        unchosen_a2 = 1 - a2
+        q_stage2_mf[state_idx, unchosen_a2] += unchosen_decay * (0.5 - q_stage2_mf[state_idx, unchosen_a2])
+        
+        unvisited_s = 1 - state_idx
+        q_stage2_mf[unvisited_s, 0] += unchosen_decay * (0.5 - q_stage2_mf[unvisited_s, 0])
+        q_stage2_mf[unvisited_s, 1] += unchosen_decay * (0.5 - q_stage2_mf[unvisited_s, 1])
+
+        # Update choice traces
+        trace_1 = (1 - alpha_trace) * trace_1
+        trace_1[a1] += alpha_trace
+        
+        trace_2[state_idx] = (1 - alpha_trace) * trace_2[state_idx]
+        trace_2[state_idx, a2] += alpha_trace
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

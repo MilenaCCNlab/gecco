@@ -1,0 +1,255 @@
+Here are 3 new cognitive models that build upon the mechanisms of the best model so far while introducing novel parameterization strategies to better capture participant behavior. 
+
+### Model 1: Reward Sensitivity (`rho`) Model
+This model introduces a reward sensitivity parameter (`rho`). Instead of just changing the softmax inverse temperature (`beta`), `rho` scales the magnitude of the rewards directly. Because the Q-values become scaled by `rho`, this parameter dynamically shifts the balance between reward-driven Q-value choices and the unscaled perseveration (`pi`) term. We use a single `decay` parameter to keep the parameter count at 8.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with reward sensitivity (rho) and forgetting (decay).
+    Rho scales the reward, affecting Q-value magnitude relative to perseveration (pi).
+    
+    Bounds:
+    alpha: [0, 1] (Learning rate)
+    beta1: [0, 10] (Inverse temperature for stage 1)
+    beta2: [0, 10] (Inverse temperature for stage 2)
+    w: [0, 1] (Model-based weight)
+    lam: [0, 1] (Eligibility trace)
+    pi: [-5, 5] (Choice perseveration)
+    rho: [0, 10] (Reward sensitivity multiplier)
+    decay: [0, 1] (Forgetting rate for unchosen actions)
+    """
+    alpha, beta1, beta2, w, lam, pi, rho, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        persev = np.zeros(2)
+        if last_action != -1:
+            persev[last_action] = 1
+            
+        logits_1 = beta1 * q_net + pi * persev
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # policy for the second choice
+        state_idx = state[trial]
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Reward scaling
+        r_scaled = reward[trial] * rho
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = r_scaled - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        # Decay unchosen options
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Outcome-Dependent Learning Rates (`alpha_win`, `alpha_lose`)
+This model explores the hypothesis that participants update their expectations differently depending on whether they were rewarded or unrewarded. It splits the learning rate into `alpha_win` and `alpha_lose` rather than relying on prediction error valences.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with outcome-dependent learning rates (alpha_win, alpha_lose) and decay.
+    Learning rate depends on whether the trial was rewarded or not.
+    
+    Bounds:
+    alpha_win: [0, 1] (Learning rate when rewarded)
+    alpha_lose: [0, 1] (Learning rate when unrewarded)
+    beta1: [0, 10] (Inverse temperature for stage 1)
+    beta2: [0, 10] (Inverse temperature for stage 2)
+    w: [0, 1] (Model-based weight)
+    lam: [0, 1] (Eligibility trace)
+    pi: [-5, 5] (Choice perseveration)
+    decay: [0, 1] (Forgetting rate for unchosen actions)
+    """
+    alpha_win, alpha_lose, beta1, beta2, w, lam, pi, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        persev = np.zeros(2)
+        if last_action != -1:
+            persev[last_action] = 1
+            
+        logits_1 = beta1 * q_net + pi * persev
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # policy for the second choice
+        state_idx = state[trial]
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Select learning rate based on outcome
+        alpha = alpha_win if reward[trial] > 0 else alpha_lose
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        # Decay unchosen options
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Side/Action Bias Model
+Participants often exhibit a baseline motor or spatial preference for one of the choices at stage 1 (e.g., favoring the left button over the right button). This model introduces a `bias` parameter that shifts the baseline probability of selecting action 0 at stage 1.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with a side/action bias for stage 1 choice, along with decay.
+    Bias adds a constant to the logits of action 0.
+    
+    Bounds:
+    alpha: [0, 1] (Learning rate)
+    beta1: [0, 10] (Inverse temperature for stage 1)
+    beta2: [0, 10] (Inverse temperature for stage 2)
+    w: [0, 1] (Model-based weight)
+    lam: [0, 1] (Eligibility trace)
+    pi: [-5, 5] (Choice perseveration)
+    bias: [-5, 5] (Baseline preference for action 0 at stage 1)
+    decay: [0, 1] (Forgetting rate for unchosen actions)
+    """
+    alpha, beta1, beta2, w, lam, pi, bias, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        persev = np.zeros(2)
+        if last_action != -1:
+            persev[last_action] = 1
+            
+        bias_term = np.array([bias, 0.0])
+            
+        logits_1 = beta1 * q_net + pi * persev + bias_term
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+
+        # policy for the second choice
+        state_idx = state[trial]
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        # Decay unchosen options
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] *= (1 - decay)
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] *= (1 - decay)
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

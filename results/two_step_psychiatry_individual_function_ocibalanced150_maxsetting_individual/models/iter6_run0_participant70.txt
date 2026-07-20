@@ -1,0 +1,200 @@
+Here are 3 new cognitive models to explain the participant's behavior in the two-step task. 
+
+These models build upon your best model so far by exploring different mechanisms of choice perseveration and learning, while keeping the total number of parameters parsimonious (8 parameters each).
+
+### Model 1: Outcome-Dependent Perseveration (Win-Stay / Lose-Shift)
+Instead of a single perseveration parameter, this model splits perseveration based on whether the previous trial was rewarded or unrewarded. This captures standard win-stay/lose-shift heuristics that often drive Stage 1 choices.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with separate learning rates for Stage 1 and Stage 2, and outcome-dependent perseveration (win-stay/lose-shift).
+    Bounds:
+    alpha_1: [0,1] (learning rate for stage 1)
+    alpha_2: [0,1] (learning rate for stage 2)
+    beta_1: [0,10] (inverse temperature for stage 1)
+    beta_2: [0,10] (inverse temperature for stage 2)
+    w: [0,1] (model-based weight)
+    lambd: [0,1] (eligibility trace)
+    pers_win: [-5,5] (perseveration bonus for stage 1 after a rewarded trial)
+    pers_lose: [-5,5] (perseveration bonus for stage 1 after an unrewarded trial)
+    """
+    alpha_1, alpha_2, beta_1, beta_2, w, lambd, pers_win, pers_lose = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net
+        if trial > 0:
+            if reward[trial - 1] > 0:
+                logits_1[action_1[trial - 1]] += pers_win
+            else:
+                logits_1[action_1[trial - 1]] += pers_lose
+                
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha_1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha_1 * lambd * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Choice Kernel Perseveration
+Instead of only looking at the immediately preceding trial, this model implements a "Choice Kernel" (an exponentially weighted moving average of past choices). This captures participants who have a longer-term autocorrelation in their responses (e.g., a persistent bias toward one spaceship that slowly updates).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with separate learning rates for Stage 1 and Stage 2, and a choice kernel for Stage 1 perseveration.
+    Bounds:
+    alpha_1: [0,1] (learning rate for stage 1)
+    alpha_2: [0,1] (learning rate for stage 2)
+    beta_1: [0,10] (inverse temperature for stage 1)
+    beta_2: [0,10] (inverse temperature for stage 2)
+    w: [0,1] (model-based weight)
+    lambd: [0,1] (eligibility trace)
+    pers: [-5,5] (weight of the choice kernel for stage 1)
+    alpha_k: [0,1] (learning rate for the choice kernel)
+    """
+    alpha_1, alpha_2, beta_1, beta_2, w, lambd, pers, alpha_k = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    choice_kernel = np.zeros(2)
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net + pers * choice_kernel
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha_1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha_1 * lambd * delta_stage2
+
+        # Choice kernel updating
+        choice_kernel *= (1 - alpha_k)
+        choice_kernel[action_1[trial]] += alpha_k
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: State-Dependent Stage 2 Perseveration
+This model adds a perseveration parameter for Stage 2 choices (`pers_2`). Critically, it tracks the last action taken on *that specific planet* (state). If a participant visits Planet X, they might be biased to repeat the specific alien they chose the *last time* they were on Planet X.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model with separate learning rates and perseveration parameters for Stage 1 and Stage 2.
+    Stage 2 perseveration is based on the last action taken in that specific state (planet).
+    Bounds:
+    alpha_1: [0,1] (learning rate for stage 1)
+    alpha_2: [0,1] (learning rate for stage 2)
+    beta_1: [0,10] (inverse temperature for stage 1)
+    beta_2: [0,10] (inverse temperature for stage 2)
+    w: [0,1] (model-based weight)
+    lambd: [0,1] (eligibility trace)
+    pers_1: [-5,5] (perseveration bonus for stage 1)
+    pers_2: [-5,5] (perseveration bonus for stage 2)
+    """
+    alpha_1, alpha_2, beta_1, beta_2, w, lambd, pers_1, pers_2 = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    last_action_in_state = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net
+        if trial > 0:
+            logits_1[action_1[trial - 1]] += pers_1
+            
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        if last_action_in_state[state_idx] != -1:
+            logits_2[last_action_in_state[state_idx]] += pers_2
+            
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha_1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha_1 * lambd * delta_stage2
+        
+        # Record the action taken in this state for future perseveration
+        last_action_in_state[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

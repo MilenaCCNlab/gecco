@@ -1,0 +1,225 @@
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Two-step model with MB/MF control, eligibility trace, stage-specific temperatures, 
+    first-stage stickiness, and a long-term choice trace for stage 1. This model assumes that 
+    participants build a habit or preference over time (choice trace) that influences their stage 1 decisions.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate
+    beta_1: [0,10] - Inverse temperature for stage 1
+    beta_2: [0,10] - Inverse temperature for stage 2
+    w: [0,1] - Weight of model-based vs model-free control
+    lam: [0,1] - Eligibility trace parameter
+    st: [-5,5] - Choice stickiness for stage 1 (last trial)
+    alpha_c: [0,1] - Update rate for long-term choice trace
+    weight_c: [-5,5] - Weight of long-term choice trace in stage 1
+    """
+    alpha, beta_1, beta_2, w, lam, st, alpha_c, weight_c = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_bonus[last_action_1] = st
+            
+        trace_bonus = weight_c * choice_trace
+            
+        q1_val = beta_1 * q_net + stickiness_bonus + trace_bonus
+        q1_val -= np.max(q1_val) # Prevent overflow
+        exp_q1 = np.exp(q1_val)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q2_val = beta_2 * q_stage2_mf[state_idx]
+        q2_val -= np.max(q2_val) # Prevent overflow
+        exp_q2 = np.exp(q2_val)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1 + alpha * lam * delta_stage2
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        # update choice trace
+        choice_trace *= (1 - alpha_c)
+        choice_trace[action_1[trial]] += alpha_c
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Two-step model with asymmetric learning rates for positive and negative prediction errors,
+    MB/MF control, eligibility trace, stage-specific temperatures, stage 1 stickiness, and WSLS behavior.
+    This model captures different sensitivities to receiving versus not receiving a reward.
+    
+    Bounds:
+    alpha_pos: [0,1] - Learning rate for positive prediction errors
+    alpha_neg: [0,1] - Learning rate for negative prediction errors
+    beta_1: [0,10] - Inverse temperature for stage 1
+    beta_2: [0,10] - Inverse temperature for stage 2
+    w: [0,1] - Weight of model-based vs model-free control
+    lam: [0,1] - Eligibility trace parameter
+    st: [-5,5] - Choice stickiness for stage 1
+    wsls: [-5,5] - Win-stay-lose-shift bonus for stage 1
+    """
+    alpha_pos, alpha_neg, beta_1, beta_2, w, lam, st, wsls = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = 0
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_bonus = np.zeros(2)
+        wsls_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_bonus[last_action_1] = st
+            if last_reward > 0:
+                wsls_bonus[last_action_1] = wsls
+            else:
+                wsls_bonus[1 - last_action_1] = wsls
+            
+        q1_val = beta_1 * q_net + stickiness_bonus + wsls_bonus
+        q1_val -= np.max(q1_val) # Prevent overflow
+        exp_q1 = np.exp(q1_val)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q2_val = beta_2 * q_stage2_mf[state_idx]
+        q2_val -= np.max(q2_val) # Prevent overflow
+        exp_q2 = np.exp(q2_val)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating with asymmetric learning rates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        alpha_1 = alpha_pos if delta_stage1 >= 0 else alpha_neg
+        alpha_2 = alpha_pos if delta_stage2 >= 0 else alpha_neg
+        
+        q_stage1_mf[action_1[trial]] += alpha_1 * delta_stage1 + alpha_2 * lam * delta_stage2
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_2 * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Two-step model where the transition matrix is learned over time,
+    along with MB/MF control, eligibility trace, stage-specific temperatures, and stage 1 & 2 stickiness.
+    Participants might update their internal model of the environment transitions based on experience.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate for Q-values
+    beta_1: [0,10] - Inverse temperature for stage 1
+    beta_2: [0,10] - Inverse temperature for stage 2
+    w: [0,1] - Weight of model-based vs model-free control
+    lam: [0,1] - Eligibility trace parameter
+    st_1: [-5,5] - Choice stickiness for stage 1
+    st_2: [-5,5] - Choice stickiness for stage 2
+    alpha_t: [0,1] - Learning rate for transition probabilities
+    """
+    alpha, beta_1, beta_2, w, lam, st_1, st_2, alpha_t = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2 = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness_1_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness_1_bonus[last_action_1] = st_1
+            
+        q1_val = beta_1 * q_net + stickiness_1_bonus
+        q1_val -= np.max(q1_val) # Prevent overflow
+        exp_q1 = np.exp(q1_val)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        stickiness_2_bonus = np.zeros(2)
+        if last_action_2[state_idx] != -1:
+            stickiness_2_bonus[last_action_2[state_idx]] = st_2
+            
+        q2_val = beta_2 * q_stage2_mf[state_idx] + stickiness_2_bonus
+        q2_val -= np.max(q2_val) # Prevent overflow
+        exp_q2 = np.exp(q2_val)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1 + alpha * lam * delta_stage2
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        # update transition matrix based on observed transition
+        transition_matrix[action_1[trial], state_idx] += alpha_t * (1 - transition_matrix[action_1[trial], state_idx])
+        transition_matrix[action_1[trial], 1 - state_idx] += alpha_t * (0 - transition_matrix[action_1[trial], 1 - state_idx])
+        
+        last_action_1 = action_1[trial]
+        last_action_2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

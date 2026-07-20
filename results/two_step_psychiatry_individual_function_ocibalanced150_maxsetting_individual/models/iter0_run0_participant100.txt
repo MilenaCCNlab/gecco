@@ -1,0 +1,195 @@
+Here are three cognitive models of increasing complexity to explain the participant's behavior in the two-step task. They build upon the standard Daw et al. (2011) reinforcement learning framework.
+
+### Model 1: Pure Model-Free RL with Eligibility Trace
+This model assumes the participant ignores the transition structure (the probabilities of spaceships going to planets) and learns purely based on model-free reinforcement learning. It uses an eligibility trace (`lam`) to allow the second-stage reward to directly update the first-stage action value. 
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Pure Model-Free RL with eligibility trace.
+    
+    Parameters:
+    learning_rate: learning rate for updating values [0,1]
+    beta: inverse temperature for softmax choice (exploration vs exploitation) [0,10]
+    lam: eligibility trace connecting stage 2 reward to stage 1 choice [0,1]
+    """
+    learning_rate, beta, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            continue
+            
+        state_idx = state[trial]
+        a1 = action_1[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice (Pure Model-Free)
+        logits_1 = beta * q_stage1_mf
+        logits_1 -= np.max(logits_1) # for numerical stability
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx, :]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        q_stage1_mf[a1] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Hybrid Model-Based and Model-Free RL
+This model introduces a model-based learning mechanism. The participant computes the expected value of each spaceship by multiplying the transition matrix with the best available alien on each planet. The final stage-1 decision integrates both model-based and model-free values, weighted by parameter `w`.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid Model-Based and Model-Free RL.
+    
+    Parameters:
+    learning_rate: learning rate for updating values [0,1]
+    beta: inverse temperature for softmax choice [0,10]
+    w: weight of model-based values vs model-free values [0,1]
+    lam: eligibility trace [0,1]
+    """
+    learning_rate, beta, w, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            continue
+            
+        state_idx = state[trial]
+        a1 = action_1[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx, :]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        q_stage1_mf[a1] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+        q_stage1_mf[a1] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Full Daw et al. Hybrid Model with Choice Perseveration
+Participants often exhibit tendencies to repeat their previous first-stage choice regardless of the outcome. This model captures this behavior with a stickiness parameter (`st`). It also uncouples the learning rates and inverse temperatures across the two stages to better capture the behavioral granularity shown in the participant data.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Full Hybrid Model-Based and Model-Free RL with choice stickiness.
+    
+    Parameters:
+    alpha_1: learning rate for stage 1 [0,1]
+    alpha_2: learning rate for stage 2 [0,1]
+    beta_1: inverse temperature for stage 1 [0,10]
+    beta_2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based values vs model-free values [0,1]
+    lam: eligibility trace [0,1]
+    st: choice stickiness (perseveration) for the first stage [0,10]
+    """
+    alpha_1, alpha_2, beta_1, beta_2, w, lam, st = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.ones(n_trials)
+    p_choice_2 = np.ones(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_a1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            continue
+            
+        state_idx = state[trial]
+        a1 = action_1[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_a1 != -1:
+            rep[last_a1] = 1.0
+            
+        logits_1 = beta_1 * q_stage1_net + st * rep
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx, :]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+  
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        # ACTION VALUE UPDATING FOR CHOICE 1
+        q_stage1_mf[a1] += alpha_1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+        # ACTION VALUE UPDATING FOR CHOICE 2
+        q_stage2_mf[state_idx, a2] += alpha_2 * delta_stage2
+        q_stage1_mf[a1] += alpha_1 * lam * delta_stage2
+        
+        last_a1 = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

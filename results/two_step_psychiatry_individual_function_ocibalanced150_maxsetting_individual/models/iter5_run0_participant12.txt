@@ -1,0 +1,198 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Hybrid MB/MF RL with Choice Trace Perseveration.
+    Instead of only considering the immediate previous choice, this model maintains 
+    an exponentially decaying trace of past stage-1 choices to capture longer-term 
+    "stickiness" or block-like choice patterns observed in the participant data.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-value updates
+    beta: [0,10] - inverse temperature for softmax choice
+    w: [0,1] - weight of model-based vs model-free influence (1 = pure MB, 0 = pure MF)
+    lam: [0,1] - eligibility trace parameter carrying stage 2 reward to stage 1
+    pers_weight: [-5,5] - weight of the choice trace on stage 1 policy
+    pers_lr: [0,1] - update rate for the choice trace (how fast past choices are forgotten)
+    """
+    learning_rate, beta, w, lam, pers_weight, pers_lr = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net + pers_weight * choice_trace
+        exp_q1 = np.exp(logits_1 - np.max(logits_1)) # numerical stability
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # policy for the second choice
+        state_idx = state[trial]
+        logits_2 = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # eligibility trace update for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        # choice trace update
+        choice_trace = (1 - pers_lr) * choice_trace
+        choice_trace[action_1[trial]] += pers_lr
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid MB/MF RL with Subjective Transition Probability.
+    Instead of assuming a fixed objective 0.7/0.3 transition matrix, this model 
+    fits a subjective probability for the common transition, allowing for 
+    overestimation or underestimation of the transition structure by the participant.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-value updates
+    beta: [0,10] - inverse temperature for softmax choice
+    w: [0,1] - weight of model-based vs model-free influence
+    lam: [0,1] - eligibility trace parameter
+    pers: [-5,5] - choice perseveration bonus for repeating the previous stage 1 action
+    trans_prob: [0.5,1.0] - subjective probability of the common transition
+    """
+    learning_rate, beta, w, lam, pers, trans_prob = model_parameters
+    n_trials = len(action_1)
+  
+    # Subjective transition matrix
+    transition_matrix = np.array([[trans_prob, 1 - trans_prob], 
+                                  [1 - trans_prob, trans_prob]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net
+        if trial > 0:
+            logits_1[action_1[trial-1]] += pers
+            
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # policy for the second choice
+        state_idx = state[trial]
+        logits_2 = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # eligibility trace update for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid MB/MF RL with Directional Biases.
+    Includes intrinsic directional biases for choosing spaceship 0 and alien 0. 
+    This accounts for participants who might have arbitrary aesthetic or spatial 
+    preferences for one option over the other that are independent of learned values.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-value updates
+    beta: [0,10] - inverse temperature for softmax choice
+    w: [0,1] - weight of model-based vs model-free influence
+    lam: [0,1] - eligibility trace parameter
+    pers: [-5,5] - choice perseveration bonus for repeating the previous stage 1 action
+    bias_s1: [-5,5] - intrinsic bias for choosing stage 1 action 0 (spaceship 0)
+    bias_s2: [-5,5] - intrinsic bias for choosing stage 2 action 0 (alien 0)
+    """
+    learning_rate, beta, w, lam, pers, bias_s1, bias_s2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net
+        if trial > 0:
+            logits_1[action_1[trial-1]] += pers
+            
+        # apply stage 1 bias for action 0
+        logits_1[0] += bias_s1
+        
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # policy for the second choice
+        state_idx = state[trial]
+        logits_2 = beta * q_stage2_mf[state_idx]
+        
+        # apply stage 2 bias for action 0
+        logits_2[0] += bias_s2
+        
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # eligibility trace update for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

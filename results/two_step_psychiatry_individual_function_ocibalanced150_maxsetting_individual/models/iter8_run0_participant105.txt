@@ -1,0 +1,204 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Separate temperatures for stages, and stage 1 perseverance.
+    This model uses a single learning rate but allows for different exploration/exploitation 
+    trade-offs at stage 1 and stage 2 via separate beta parameters, along with a stickiness 
+    parameter for stage 1 choices.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free control [0,1]
+    lam: eligibility trace for updating stage 1 from stage 2 [0,1]
+    pers: stage 1 choice perseverance (stickiness) [-5,5]
+    """
+    alpha, beta1, beta2, w, lam, pers = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            pers_bonus[last_action_1] = pers
+            
+        q1_total = beta1 * q_stage1_net + pers_bonus
+        q1_max = np.max(q1_total)
+        exp_q1 = np.exp(q1_total - q1_max)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        q2_total = beta2 * q_stage2_mf[state_idx]
+        q2_max = np.max(q2_total)
+        exp_q2 = np.exp(q2_total - q2_max)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Separate learning rates for positive/negative PEs, and separate temperatures for stages.
+    This model captures asymmetric learning from better-than-expected versus worse-than-expected 
+    outcomes, while also allowing different decision noise levels at stage 1 and stage 2.
+    
+    Parameters:
+    alpha_pos: learning rate for positive prediction errors [0,1]
+    alpha_neg: learning rate for negative prediction errors [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free control [0,1]
+    lam: eligibility trace [0,1]
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        q1_total = beta1 * q_stage1_net
+        q1_max = np.max(q1_total)
+        exp_q1 = np.exp(q1_total - q1_max)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        q2_total = beta2 * q_stage2_mf[state_idx]
+        q2_max = np.max(q2_total)
+        exp_q2 = np.exp(q2_total - q2_max)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Stage 1 update
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        alpha_s1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += alpha_s1 * delta_stage1
+
+        # Stage 2 update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        alpha_s2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_s2 * delta_stage2
+
+        # Eligibility trace update
+        alpha_lam = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += alpha_lam * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Model-based and Model-free mixture with counterfactual learning at stage 2.
+    In addition to standard updating, this model updates the unchosen action at stage 2 
+    assuming it would have yielded the opposite reward, scaled by a counterfactual weight.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta: inverse temperature [0,10]
+    w: weight of model-based vs model-free control [0,1]
+    lam: eligibility trace [0,1]
+    pers: stage 1 choice perseverance [-5,5]
+    cf_weight: weight of counterfactual update for unchosen stage 2 action [0,1]
+    """
+    alpha, beta, w, lam, pers, cf_weight = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            pers_bonus[last_action_1] = pers
+            
+        q1_total = beta * q_stage1_net + pers_bonus
+        q1_max = np.max(q1_total)
+        exp_q1 = np.exp(q1_total - q1_max)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        q2_total = beta * q_stage2_mf[state_idx]
+        q2_max = np.max(q2_total)
+        exp_q2 = np.exp(q2_total - q2_max)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        # Counterfactual update for unchosen stage 2 action
+        unchosen_a2 = 1 - action_2[trial]
+        cf_reward = 1 - reward[trial]
+        delta_cf = cf_reward - q_stage2_mf[state_idx, unchosen_a2]
+        q_stage2_mf[state_idx, unchosen_a2] += alpha * cf_weight * delta_cf
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

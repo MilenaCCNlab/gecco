@@ -1,0 +1,183 @@
+Based on the participant's data, we can observe specific patterns in their decision-making. For instance, after rare transitions that result in no reward (e.g., Trial 17: spaceship 0 -> planet 1 -> reward 0), the participant switches their first-stage choice on the subsequent trial (Trial 18: chooses spaceship 1). A pure model-based learner would understand that spaceship 1 commonly leads to planet 1, and since planet 1 just yielded no reward, they should avoid spaceship 1. The fact that the participant switches to spaceship 1 indicates **model-free behavior**, where the negative outcome directly devalues the chosen action (spaceship 0). Additionally, the participant shows a strong tendency to repeat the same first-stage choices, indicating **choice perseveration (stickiness)**.
+
+To formally capture these nuances, I propose three cognitive models:
+1. **Model 1 (Pure Model-Based):** Directly fulfills the provided template, acting as a baseline where Stage 1 is evaluated using pure model-based planning.
+2. **Model 2 (Pure Model-Free SARSA($\lambda$)):** Evaluates choices using pure model-free Q-learning with an eligibility trace ($\lambda$), matching the participant's model-free behavioral signatures. 
+3. **Model 3 (Hybrid MB/MF with Stickiness):** The gold-standard model for the two-step task (Daw et al., 2011). It mixes both model-based and model-free signals and includes a choice stickiness parameter to capture the participant's tendency to repeat actions.
+
+Here are the standalone Python functions for the three models:
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Purely Model-Based Stage 1, Model-Free Stage 2.
+    This model strictly follows the provided template, filling in the 
+    blanks for Stage 2 policy and action value updating. Stage 1 choice 
+    relies entirely on model-based evaluation.
+    
+    Parameters:
+    learning_rate: [0,1] - Learning rate for Q-value updates.
+    beta: [0,10] - Inverse temperature for softmax action selection.
+    """
+    learning_rate, beta = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        exp_q1 = np.exp(beta * q_stage1_mb)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        exp_q2 = np.exp(beta * q_stage2_mf[state_idx])
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        # action value updating for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        # action value updating for choice 2
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Pure Model-Free SARSA(lambda) RL.
+    Based on the participant's data showing model-free behavior (e.g., 
+    switching Stage 1 actions after a rare unrewarded transition), this 
+    model evaluates the first choice using only model-free Q-values.
+    
+    Parameters:
+    learning_rate: [0,1] - Learning rate for Q-value updates.
+    beta: [0,10] - Inverse temperature for softmax action selection.
+    lam: [0,1] - Eligibility trace decay parameter for Stage 1 update.
+    """
+    learning_rate, beta, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        logits1 = beta * q_stage1_mf
+        logits1 -= np.max(logits1) # for numerical stability
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits2 = beta * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Eligibility trace update for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid MB/MF RL with Choice Stickiness.
+    This model comprehensively captures participant behavior by mixing 
+    model-based and model-free values (Daw et al., 2011) and adding a 
+    perseveration parameter to account for repeated Stage 1 choices.
+    
+    Parameters:
+    learning_rate: [0,1] - Learning rate for Q-value updates.
+    beta: [0,10] - Inverse temperature for softmax action selection.
+    w: [0,1] - Weighting parameter for MB (1) vs MF (0) control.
+    lam: [0,1] - Eligibility trace decay parameter.
+    rho: [-5,5] - Choice stickiness (perseveration) parameter.
+    """
+    learning_rate, beta, w, lam, rho = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_a1 = -1
+
+    for trial in range(n_trials):
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # calculate stickiness
+        stickiness = np.zeros(2)
+        if last_a1 != -1:
+            stickiness[last_a1] = 1.0
+            
+        logits1 = beta * q_stage1_net + rho * stickiness
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        last_a1 = action_1[trial]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits2 = beta * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Eligibility trace update for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

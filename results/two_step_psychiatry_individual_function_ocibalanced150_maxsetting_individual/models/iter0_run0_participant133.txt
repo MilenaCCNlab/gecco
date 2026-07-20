@@ -1,0 +1,224 @@
+Here are three cognitive models proposed to explain the participant's behavior. 
+
+Based on the participant data, there is a very strong tendency to persevere with the same first-stage choice (spaceship 0 was chosen consecutively for 146 trials before switching to spaceship 1). However, the participant still updates their values, as the switch to spaceship 1 occurred after a string of unrewarded trials. To capture this, all three models incorporate a choice stickiness (perseveration) parameter while varying the mechanisms of value updating and exploration.
+
+### Model 1: Hybrid Model-Based / Model-Free with Choice Stickiness
+This model uses the Daw et al. (2011) hybrid framework, combining both model-based and model-free reinforcement learning. Crucially, it includes a `stickiness` parameter to capture the participant's strong tendency to repeat the same stage 1 action, and an `eligibility_trace` to allow second-stage rewards to directly update first-stage action values.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Based / Model-Free with Choice Stickiness.
+    This model captures the participant's tendency to repeat the same first-stage 
+    choice (e.g., sticking to spaceship 0 for 146 trials) while still updating values.
+    
+    Parameters/Bounds:
+    learning_rate: [0, 1] - learning rate for value updates
+    beta: [0, 10] - inverse temperature (exploration/exploitation)
+    w: [0, 1] - weight of model-based vs model-free control (1=fully MB, 0=fully MF)
+    stickiness: [-5, 5] - bonus for repeating the previous stage 1 action
+    eligibility_trace: [0, 1] - lambda trace for updating stage 1 from stage 2 reward
+    """
+    learning_rate, beta, w, stickiness, eligibility_trace = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1.0 - w) * q_stage1_mf
+        
+        stick_bonus = np.zeros(2)
+        if last_action != -1:
+            stick_bonus[last_action] = stickiness
+            
+        q_vals_1 = beta * q_net + stick_bonus
+        q_vals_1 -= np.max(q_vals_1) # Prevent overflow
+        exp_q1 = np.exp(q_vals_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q_vals_2 = beta * q_stage2_mf[state_idx]
+        q_vals_2 -= np.max(q_vals_2) # Prevent overflow
+        exp_q2 = np.exp(q_vals_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # eligibility trace update for choice 1
+        q_stage1_mf[action_1[trial]] += learning_rate * eligibility_trace * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Learning Rates + Choice Stickiness
+The participant switched from spaceship 0 to spaceship 1 after a string of negative feedback (0 rewards). This model introduces asymmetric learning rates for positive and negative prediction errors, hypothesizing that the participant might be more sensitive to negative feedback, which eventually degrades the value of spaceship 0 enough to overcome their severe stickiness.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid model with asymmetric learning rates for positive and negative prediction 
+    errors, plus choice stickiness. Explains sensitivity to strings of 0 rewards.
+    
+    Parameters/Bounds:
+    alpha_pos: [0, 1] - learning rate for positive prediction errors
+    alpha_neg: [0, 1] - learning rate for negative prediction errors
+    beta: [0, 10] - inverse temperature
+    w: [0, 1] - model-based weight
+    stickiness: [-5, 5] - bonus for repeating the previous stage 1 action
+    """
+    alpha_pos, alpha_neg, beta, w, stickiness = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1.0 - w) * q_stage1_mf
+        
+        stick_bonus = np.zeros(2)
+        if last_action != -1:
+            stick_bonus[last_action] = stickiness
+            
+        q_vals_1 = beta * q_net + stick_bonus
+        q_vals_1 -= np.max(q_vals_1)
+        exp_q1 = np.exp(q_vals_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q_vals_2 = beta * q_stage2_mf[state_idx]
+        q_vals_2 -= np.max(q_vals_2)
+        exp_q2 = np.exp(q_vals_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        lr1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        lr2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+        
+        # simple eligibility trace update (lambda=1)
+        q_stage1_mf[action_1[trial]] += lr2 * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Decoupled Stage Parameters
+The data shows the participant might behave differently depending on the stage—being highly perseverative in stage 1 (spaceships) but more flexible and exploratory in stage 2 (aliens). This model accounts for these differences by separating the inverse temperature and choice stickiness parameters for each stage.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid model with separate inverse temperatures and choice stickiness parameters 
+    for Stage 1 and Stage 2. Explains different levels of exploration and perseveration 
+    at the spaceship vs. alien levels.
+    
+    Parameters/Bounds:
+    learning_rate: [0, 1] - learning rate for value updates
+    beta_1: [0, 10] - inverse temperature for stage 1
+    beta_2: [0, 10] - inverse temperature for stage 2
+    w: [0, 1] - model-based weight
+    stick_1: [-5, 5] - choice stickiness for stage 1
+    stick_2: [-5, 5] - choice stickiness for stage 2
+    """
+    learning_rate, beta_1, beta_2, w, stick_1, stick_2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2 = np.array([-1, -1])
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1.0 - w) * q_stage1_mf
+        
+        stick_bonus_1 = np.zeros(2)
+        if last_action_1 != -1:
+            stick_bonus_1[last_action_1] = stick_1
+            
+        q_vals_1 = beta_1 * q_net + stick_bonus_1
+        q_vals_1 -= np.max(q_vals_1)
+        exp_q1 = np.exp(q_vals_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        stick_bonus_2 = np.zeros(2)
+        if last_action_2[state_idx] != -1:
+            stick_bonus_2[last_action_2[state_idx]] = stick_2
+            
+        q_vals_2 = beta_2 * q_stage2_mf[state_idx] + stick_bonus_2
+        q_vals_2 -= np.max(q_vals_2)
+        exp_q2 = np.exp(q_vals_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # action value updating for choice 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        # action value updating for choice 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # basic eligibility trace update (lambda=1)
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_action_2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

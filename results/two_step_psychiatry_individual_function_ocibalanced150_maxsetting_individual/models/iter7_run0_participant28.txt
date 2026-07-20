@@ -1,0 +1,208 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Hybrid MB/MF RL with Penalty for Unrewarded Trials.
+    Allows the agent to treat a reward of 0 as a negative outcome (penalty), 
+    which helps explain behavior when participants switch choices after unrewarded trials.
+    
+    Parameters:
+    learning_rate: [0,1] - Learning rate for Q-value updates.
+    beta: [0,10] - Inverse temperature for softmax action selection.
+    w: [0,1] - Weighting parameter for MB (1) vs MF (0) control.
+    lam: [0,1] - Eligibility trace decay parameter.
+    rho: [-5,5] - Choice stickiness (perseveration) parameter.
+    penalty: [-5,5] - Effective reward value when the actual reward is 0.
+    """
+    learning_rate, beta, w, lam, rho, penalty = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_a1 = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        stickiness = np.zeros(2)
+        if last_a1 != -1:
+            stickiness[last_a1] = 1.0
+            
+        logits1 = beta * q_stage1_net + rho * stickiness
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        last_a1 = action_1[trial]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits2 = beta * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Evaluate effective reward
+        eff_reward = reward[trial] if reward[trial] > 0 else penalty
+
+        # ACTION VALUE UPDATING
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = eff_reward - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        # Eligibility trace update for stage 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid MB/MF RL with a Choice Kernel.
+    Instead of simple 1-trial stickiness, this model uses a choice kernel 
+    that exponentially decays over time to capture longer-term perseveration 
+    seen in the participant's prolonged streaks of choosing the same spaceship.
+    
+    Parameters:
+    learning_rate: [0,1] - Learning rate for Q-value updates.
+    beta: [0,10] - Inverse temperature for softmax action selection.
+    w: [0,1] - Weighting parameter for MB (1) vs MF (0) control.
+    lam: [0,1] - Eligibility trace decay parameter.
+    ck_alpha: [0,1] - Learning rate (update step) for the choice kernel.
+    ck_weight: [-5,5] - Weight of the choice kernel on stage 1 choices.
+    """
+    learning_rate, beta, w, lam, ck_alpha, ck_weight = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    choice_kernel = np.zeros(2)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+            
+        logits1 = beta * q_stage1_net + ck_weight * choice_kernel
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # Update choice kernel
+        choice_kernel = choice_kernel * (1 - ck_alpha)
+        choice_kernel[action_1[trial]] += ck_alpha
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits2 = beta * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # ACTION VALUE UPDATING
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        # Eligibility trace update for stage 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid MB/MF RL with Transition-Dependent Eligibility Trace.
+    Applies a different eligibility trace decay depending on whether the 
+    transition from Stage 1 to Stage 2 was common or rare, reflecting 
+    differential credit assignment based on transition predictability.
+    
+    Parameters:
+    learning_rate: [0,1] - Learning rate for Q-value updates.
+    beta: [0,10] - Inverse temperature for softmax action selection.
+    w: [0,1] - Weighting parameter for MB (1) vs MF (0) control.
+    lam_common: [0,1] - Eligibility trace decay for common transitions.
+    lam_rare: [0,1] - Eligibility trace decay for rare transitions.
+    rho: [-5,5] - Choice stickiness (perseveration) parameter.
+    """
+    learning_rate, beta, w, lam_common, lam_rare, rho = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_a1 = -1
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        stickiness = np.zeros(2)
+        if last_a1 != -1:
+            stickiness[last_a1] = 1.0
+            
+        logits1 = beta * q_stage1_net + rho * stickiness
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        last_a1 = action_1[trial]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits2 = beta * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # ACTION VALUE UPDATING
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+
+        # Transition-dependent lambda
+        is_common = (action_1[trial] == state_idx)
+        lam = lam_common if is_common else lam_rare
+        
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

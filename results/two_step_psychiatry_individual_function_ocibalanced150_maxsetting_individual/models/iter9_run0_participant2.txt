@@ -1,0 +1,264 @@
+Here are three new cognitive models that explore alternative mechanisms not previously tested. They all respect the parameter limit (8 parameters) and are tailored to capture distinct behavioral patterns in the two-step task.
+
+### Model 1: Choice Trace Model
+Instead of only perseverating on the immediately preceding trial, this model maintains an exponentially decaying trace of past choices. This is a common mechanism in RL as participant "stickiness" often decays gradually over multiple trials rather than abruptly resetting after one trial. We apply this trace to both Stage 1 choices and state-specific Stage 2 choices.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Daw et al. Hybrid Model with Decaying Choice Traces.
+    Instead of only perseverating on the immediately preceding trial, this model maintains
+    an exponentially decaying trace of past choices for Stage 1 and Stage 2 (state-specific).
+    
+    Bounds:
+    alpha: [0,1] - Learning rate for updating Q-values
+    beta_1: [0,10] - Inverse temperature for stage 1 choices
+    beta_2: [0,10] - Inverse temperature for stage 2 choices
+    w: [0,1] - Model-based vs Model-free weight
+    lam: [0,1] - Eligibility trace parameter
+    pers_1: [-5,5] - Stage 1 trace perseveration weight
+    pers_2_state: [-5,5] - Stage 2 state-specific trace perseveration weight
+    tau_choice: [0,1] - Decay rate for choice traces (1 = no decay, 0 = only last trial)
+    """
+    alpha, beta_1, beta_2, w, lam, pers_1, pers_2_state, tau_choice = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    c_stage1 = np.zeros(2)
+    c_stage2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            c_stage1 = c_stage1 * tau_choice
+            c_stage2 = c_stage2 * tau_choice
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        logits_1 = beta_1 * q_stage1_net + pers_1 * c_stage1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx] + pers_2_state * c_stage2[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Update traces
+        c_stage1 = c_stage1 * tau_choice
+        c_stage1[action_1[trial]] += 1.0
+        
+        c_stage2 = c_stage2 * tau_choice
+        c_stage2[state_idx, action_2[trial]] += 1.0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Transition-Dependent Model-Based Weight
+This model tests whether participants dynamically adjust their reliance on the model-based system depending on the predictability of the environment. Specifically, the weight `w` shifts depending on whether the transition experienced on the *previous* trial was common or rare.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Daw et al. Hybrid Model with Transition-Dependent Model-Based Weight.
+    The model-based weight (w) depends on whether the transition on the *previous* trial 
+    was common or rare. This captures the idea that participants might shift their 
+    reliance on the model-based system after experiencing an unexpected transition.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate for updating Q-values
+    beta_1: [0,10] - Inverse temperature for stage 1 choices
+    beta_2: [0,10] - Inverse temperature for stage 2 choices
+    w_common: [0,1] - Model-based weight after a common transition
+    w_rare: [0,1] - Model-based weight after a rare transition
+    lam: [0,1] - Eligibility trace parameter
+    pers_1: [-5,5] - Stage 1 perseveration bonus
+    pers_2_state: [-5,5] - Stage 2 state-specific perseveration bonus
+    """
+    alpha, beta_1, beta_2, w_common, w_rare, lam, pers_1, pers_2_state = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    last_a2_in_state = np.full(2, -1)
+    prev_transition_common = True
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            prev_a1 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        current_w = w_common if prev_transition_common else w_rare
+        q_stage1_net = current_w * q_stage1_mb + (1 - current_w) * q_stage1_mf
+
+        pers_bonus_1 = np.zeros(2)
+        if prev_a1 != -1:
+            pers_bonus_1[prev_a1] = pers_1
+            
+        logits_1 = beta_1 * q_stage1_net + pers_bonus_1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        pers_bonus_2 = np.zeros(2)
+        if last_a2_in_state[state_idx] != -1:
+            pers_bonus_2[last_a2_in_state[state_idx]] = pers_2_state
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx] + pers_bonus_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        prev_a1 = action_1[trial]
+        last_a2_in_state[state_idx] = action_2[trial]
+        
+        # Determine if the transition was common for the next trial
+        if (action_1[trial] == 0 and state_idx == 0) or (action_1[trial] == 1 and state_idx == 1):
+            prev_transition_common = True
+        else:
+            prev_transition_common = False
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Penalty for Unrewarded Trials
+This model introduces a `penalty` parameter. Instead of treating an unrewarded trial as an outcome of `0`, it assigns it a negative value (`-penalty`). This simulates loss aversion, where a participant actively avoids unrewarded choices, causing unrewarded Q-values to drop below zero (rather than just decaying toward zero).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Daw et al. Hybrid Model with Penalty for Unrewarded Trials.
+    Instead of treating unrewarded trials as a 0 outcome, this model assigns them 
+    a negative value (-penalty). This captures loss aversion or active avoidance 
+    of unrewarded options.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate for updating Q-values
+    beta_1: [0,10] - Inverse temperature for stage 1 choices
+    beta_2: [0,10] - Inverse temperature for stage 2 choices
+    w: [0,1] - Model-based vs Model-free weight
+    lam: [0,1] - Eligibility trace parameter
+    pers_1: [-5,5] - Stage 1 perseveration bonus
+    pers_2_state: [-5,5] - Stage 2 state-specific perseveration bonus
+    penalty: [0,5] - Negative reward value assigned to unrewarded outcomes (0 coins)
+    """
+    alpha, beta_1, beta_2, w, lam, pers_1, pers_2_state, penalty = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    last_a2_in_state = np.full(2, -1)
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            prev_a1 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        pers_bonus_1 = np.zeros(2)
+        if prev_a1 != -1:
+            pers_bonus_1[prev_a1] = pers_1
+            
+        logits_1 = beta_1 * q_stage1_net + pers_bonus_1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        pers_bonus_2 = np.zeros(2)
+        if last_a2_in_state[state_idx] != -1:
+            pers_bonus_2[last_a2_in_state[state_idx]] = pers_2_state
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx] + pers_bonus_2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        # Apply penalty for unrewarded trials
+        r = 1.0 if reward[trial] == 1 else -penalty
+        
+        delta_stage2 = r - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        prev_a1 = action_1[trial]
+        last_a2_in_state[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

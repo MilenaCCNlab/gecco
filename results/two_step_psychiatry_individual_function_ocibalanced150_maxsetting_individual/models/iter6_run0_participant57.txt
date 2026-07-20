@@ -1,0 +1,264 @@
+Here are 3 new cognitive models that explore alternative mechanisms not present in the previously tried combinations. They introduce choice kernels, asymmetric eligibility traces, and counterfactual updating, respectively.
+
+### Model 1: Choice Kernel Model
+This model replaces simple trial-to-trial perseveration with a **Choice Kernel**. A choice kernel accumulates a trace of past actions, providing a mechanism for the participant's tendency to go on long "streaks" of choosing the same spaceship (as seen heavily in the data).
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid RL model with Choice Kernels for both stages to capture accumulating 
+    perseveration (streaks of choices). The choice kernels update exponentially.
+    
+    Bounds:
+    alpha: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    w: [0,1]
+    lam: [0,1]
+    ck_alpha: [0,1]
+    ck_weight1: [-5,5]
+    ck_weight2: [-5,5]
+    """
+    import numpy as np
+    alpha, beta1, beta2, w, lam, ck_alpha, ck_weight1, ck_weight2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    ck1 = np.zeros(2)
+    ck2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1 or state[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        q_stage1_total = beta1 * q_stage1_net + ck_weight1 * ck1
+        
+        exp_q1 = np.exp(q_stage1_total - np.max(q_stage1_total))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        q_stage2_total = beta2 * q_stage2_mf[state_idx] + ck_weight2 * ck2[state_idx]
+        
+        exp_q2 = np.exp(q_stage2_total - np.max(q_stage2_total))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Action value updating for Choice 1 and Choice 2
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Eligibility trace update
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        # Choice kernel updates
+        for a in range(2):
+            if a == action_1[trial]:
+                ck1[a] += ck_alpha * (1 - ck1[a])
+            else:
+                ck1[a] += ck_alpha * (0 - ck1[a])
+                
+        for s in range(2):
+            for a in range(2):
+                if s == state_idx and a == action_2[trial]:
+                    ck2[s, a] += ck_alpha * (1 - ck2[s, a])
+                else:
+                    ck2[s, a] += ck_alpha * (0 - ck2[s, a])
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Eligibility Traces
+Participants often assign credit to their stage 1 choices asymmetrically depending on whether the outcome was unexpectedly good (positive prediction error) or unexpectedly bad (negative prediction error). This model separates the eligibility trace `lam` based on the sign of the stage 2 prediction error.
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid RL model with asymmetric eligibility traces (lam_pos, lam_neg) for positive 
+    and negative stage 2 prediction errors, allowing asymmetric credit assignment.
+    
+    Bounds:
+    alpha: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    w: [0,1]
+    lam_pos: [0,1]
+    lam_neg: [0,1]
+    pers1: [-5,5]
+    pers2: [-5,5]
+    """
+    import numpy as np
+    alpha, beta1, beta2, w, lam_pos, lam_neg, pers1, pers2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action_1 = -1
+    last_action_2 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1 or state[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            last_action_2 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers1_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            pers1_bonus[last_action_1] = pers1
+            
+        q_stage1_total = beta1 * q_stage1_net + pers1_bonus
+        
+        exp_q1 = np.exp(q_stage1_total - np.max(q_stage1_total))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        pers2_bonus = np.zeros(2)
+        if last_action_2 != -1:
+            pers2_bonus[last_action_2] = pers2
+            
+        q_stage2_total = beta2 * q_stage2_mf[state_idx] + pers2_bonus
+        
+        exp_q2 = np.exp(q_stage2_total - np.max(q_stage2_total))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating for Choice 1 and Choice 2
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Asymmetric Eligibility Trace Update
+        if delta_stage2 > 0:
+            q_stage1_mf[action_1[trial]] += alpha * lam_pos * delta_stage2
+        else:
+            q_stage1_mf[action_1[trial]] += alpha * lam_neg * delta_stage2
+
+        last_action_1 = action_1[trial]
+        last_action_2 = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Counterfactual Updating at Stage 2
+It is common for subjects to assume the rewards of the two aliens on a planet are anti-correlated. This model introduces **counterfactual updating**: when updating the value of the chosen alien, the model simultaneously updates the value of the unchosen alien on the *same planet* in the opposite direction.
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid RL model with counterfactual updating at stage 2.
+    When a reward prediction error occurs for the chosen action, the unchosen action
+    in the same state is updated in the opposite direction, scaled by cf_weight.
+    
+    Bounds:
+    alpha: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    w: [0,1]
+    lam: [0,1]
+    pers1: [-5,5]
+    pers2: [-5,5]
+    cf_weight: [0,1]
+    """
+    import numpy as np
+    alpha, beta1, beta2, w, lam, pers1, pers2, cf_weight = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action_1 = -1
+    last_action_2 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1 or state[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            last_action_2 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers1_bonus = np.zeros(2)
+        if last_action_1 != -1:
+            pers1_bonus[last_action_1] = pers1
+            
+        q_stage1_total = beta1 * q_stage1_net + pers1_bonus
+        
+        exp_q1 = np.exp(q_stage1_total - np.max(q_stage1_total))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # policy for the second choice
+        pers2_bonus = np.zeros(2)
+        if last_action_2 != -1:
+            pers2_bonus[last_action_2] = pers2
+            
+        q_stage2_total = beta2 * q_stage2_mf[state_idx] + pers2_bonus
+        
+        exp_q2 = np.exp(q_stage2_total - np.max(q_stage2_total))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating for Choice 1 and Choice 2
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        # Counterfactual update for the unchosen action in the same state
+        unchosen_action_2 = 1 - action_2[trial]
+        q_stage2_mf[state_idx, unchosen_action_2] -= alpha * cf_weight * delta_stage2
+
+        # Eligibility trace update
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+
+        last_action_1 = action_1[trial]
+        last_action_2 = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

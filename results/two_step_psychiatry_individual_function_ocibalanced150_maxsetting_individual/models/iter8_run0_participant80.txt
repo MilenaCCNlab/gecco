@@ -1,0 +1,231 @@
+Here are three new cognitive models proposed as Python functions. They build upon the findings from the previous best models by introducing **Choice Kernels** (which generalize simple 1-trial "stickiness" to an exponentially weighted habit trace capturing longer-term choice autocorrelations) and exploring combinations with asymmetric learning rates and stage-specific parameters.
+
+### Model 1: Choice Kernel (Habit) & Q-Value Decay
+This model replaces the simple single-trial stickiness parameter with a Choice Kernel for Stage 1. The choice kernel acts as a habit trace that updates over time, allowing the model to capture perseveration that spans across multiple past trials rather than just the immediate previous one.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Choice Kernel (Habit) for Stage 1 and Q-value decay.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate for Q-values.
+    beta: [0,10] - Inverse temperature for softmax.
+    w: [0,1] - Weighting of model-based vs model-free values.
+    lambda_: [0,1] - Eligibility trace parameter.
+    decay: [0,1] - Decay rate of unchosen Q-values towards 0.5.
+    ck_lr: [0,1] - Learning rate for the choice kernel (habit).
+    ck_weight: [0,10] - Weight of the choice kernel in Stage 1 action selection.
+    """
+    alpha, beta, w, lambda_, decay, ck_lr, ck_weight = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    ck_1 = np.zeros(2)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net + ck_weight * ck_1
+        max_logit_1 = np.max(logits_1)
+        exp_q1 = np.exp(logits_1 - max_logit_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        max_logit_2 = np.max(logits_2)
+        exp_q2 = np.exp(logits_2 - max_logit_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+
+        # Q-value decay for unchosen actions
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+                    
+        # Choice kernel update
+        ck_1 = (1 - ck_lr) * ck_1
+        ck_1[action_1[trial]] += ck_lr
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Dual Choice Kernels & Stage-Specific Temperatures
+This model expands the Choice Kernel mechanism to both decision stages (Stage 1 and Stage 2) and separates the inverse temperature (`beta_1`, `beta_2`) to account for differing levels of exploration/exploitation between the abstract first choice and the concrete second choice.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Choice Kernel for both stages and separate betas.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate for Q-values.
+    beta_1: [0,10] - Inverse temperature for stage 1.
+    beta_2: [0,10] - Inverse temperature for stage 2.
+    w: [0,1] - Weighting of model-based vs model-free values.
+    lambda_: [0,1] - Eligibility trace parameter.
+    ck_lr: [0,1] - Choice kernel update rate.
+    ck_weight_1: [0,10] - Choice kernel weight for stage 1.
+    ck_weight_2: [0,10] - Choice kernel weight for stage 2.
+    """
+    alpha, beta_1, beta_2, w, lambda_, ck_lr, ck_weight_1, ck_weight_2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    ck_1 = np.zeros(2)
+    ck_2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_stage1_net + ck_weight_1 * ck_1
+        max_logit_1 = np.max(logits_1)
+        exp_q1 = np.exp(logits_1 - max_logit_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta_2 * q_stage2_mf[state_idx] + ck_weight_2 * ck_2[state_idx]
+        max_logit_2 = np.max(logits_2)
+        exp_q2 = np.exp(logits_2 - max_logit_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+                    
+        # Choice kernel update
+        ck_1 = (1 - ck_lr) * ck_1
+        ck_1[action_1[trial]] += ck_lr
+        
+        ck_2[state_idx] = (1 - ck_lr) * ck_2[state_idx]
+        ck_2[state_idx, action_2[trial]] += ck_lr
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Learning Rates & Choice Kernel
+This model tests whether participants learn differently from positive versus negative prediction errors (a hallmark of striatal dopaminergic function). It retains the Q-value decay to baseline and the Stage 1 Choice Kernel to ensure we capture both the forgetting of unchosen options and habituation.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Asymmetric Learning Rates (pos/neg), Q-value decay, and Stage 1 Choice Kernel.
+    
+    Bounds:
+    alpha_pos: [0,1] - Learning rate for positive prediction errors.
+    alpha_neg: [0,1] - Learning rate for negative prediction errors.
+    beta: [0,10] - Inverse temperature for softmax.
+    w: [0,1] - Weighting of model-based vs model-free values.
+    lambda_: [0,1] - Eligibility trace parameter.
+    decay: [0,1] - Decay rate for unchosen Q-values.
+    ck_lr: [0,1] - Learning rate for the choice kernel.
+    ck_weight: [0,10] - Weight of the choice kernel.
+    """
+    alpha_pos, alpha_neg, beta, w, lambda_, decay, ck_lr, ck_weight = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.ones(2) * 0.5
+    q_stage2_mf = np.ones((2, 2)) * 0.5
+    
+    ck_1 = np.zeros(2)
+
+    for trial in range(n_trials):
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta * q_stage1_net + ck_weight * ck_1
+        max_logit_1 = np.max(logits_1)
+        exp_q1 = np.exp(logits_1 - max_logit_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        max_logit_2 = np.max(logits_2)
+        exp_q2 = np.exp(logits_2 - max_logit_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        alpha_s1 = alpha_pos if delta_stage1 >= 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += alpha_s1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        alpha_s2 = alpha_pos if delta_stage2 >= 0 else alpha_neg
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_s2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha_s2 * lambda_ * delta_stage2
+
+        # Q-value decay for unchosen actions
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] += decay * (0.5 - q_stage1_mf[unchosen_1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+                    
+        # Choice kernel update
+        ck_1 = (1 - ck_lr) * ck_1
+        ck_1[action_1[trial]] += ck_lr
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

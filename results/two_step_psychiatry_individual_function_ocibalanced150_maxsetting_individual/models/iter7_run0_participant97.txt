@@ -1,0 +1,292 @@
+Here are 3 new cognitive models that explore alternative mechanisms for choice perseveration, value decay, and asymmetric credit assignment, while keeping the total number of parameters at 8 to remain parsimonious.
+
+### Model 1: Win/Lose Dependent Choice Kernel
+This model introduces a reward-dependent choice kernel. Instead of a fixed perseveration tendency, the model assumes that participants' stickiness to their previous choices depends on whether the previous trial was rewarded or not. This captures the differential impact of positive versus negative feedback on choice repetition.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Cognitive Model 1: Win/Lose Dependent Choice Kernel
+    
+    This model uses a choice kernel for both stages, but its weight depends on whether 
+    the previous trial resulted in a reward or not. This captures the differential 
+    impact of positive vs negative feedback on choice perseveration.
+    
+    Parameters:
+    learning_rate: [0, 1] - Learning rate for Q-values.
+    beta1: [0, 10] - Inverse temperature for softmax action selection at stage 1.
+    beta2: [0, 10] - Inverse temperature for softmax action selection at stage 2.
+    w: [0, 1] - Weighting of model-based vs model-free values.
+    lambda_: [0, 1] - Eligibility trace decay parameter.
+    ck_lr: [0, 1] - Learning rate for updating choice kernels.
+    ck_win: [-5, 5] - Choice kernel weight if the previous trial was rewarded.
+    ck_lose: [-5, 5] - Choice kernel weight if the previous trial was unrewarded.
+    """
+    learning_rate, beta1, beta2, w, lambda_, ck_lr, ck_win, ck_lose = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    ck_1 = np.zeros(2)
+    ck_2 = np.zeros((2, 2))
+    
+    prev_reward = 0.5 # Neutral for the first trial
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            ck_1 = (1 - ck_lr) * ck_1
+            ck_2 = (1 - ck_lr) * ck_2
+            prev_reward = reward[trial]
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        current_ck_weight = ck_win if prev_reward > 0 else ck_lose
+        
+        V1 = beta1 * (w * q_stage1_mb + (1 - w) * q_stage1_mf) + current_ck_weight * ck_1
+        V1 = V1 - np.max(V1)
+        exp_q1 = np.exp(V1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        if action_2[trial] == -1:
+            p_choice_2[trial] = 1.0
+            ck_1 = (1 - ck_lr) * ck_1
+            ck_1[action_1[trial]] += ck_lr
+            ck_2 = (1 - ck_lr) * ck_2
+            prev_reward = reward[trial]
+            continue
+            
+        V2 = beta2 * q_stage2_mf[state_idx] + current_ck_weight * ck_2[state_idx]
+        V2 = V2 - np.max(V2)
+        exp_q2 = np.exp(V2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lambda_ * delta_stage2
+
+        ck_1 = (1 - ck_lr) * ck_1
+        ck_1[action_1[trial]] += ck_lr
+        
+        ck_2[state_idx] = (1 - ck_lr) * ck_2[state_idx]
+        ck_2[state_idx, action_2[trial]] += ck_lr
+        
+        other_state = 1 - state_idx
+        ck_2[other_state] = (1 - ck_lr) * ck_2[other_state]
+        
+        prev_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+
+### Model 2: Q-value Decay and Shared Learning Rate Choice Kernel
+This model introduces a decay mechanism for unchosen alternatives, causing forgotten Q-values to drift towards 0 over time. To stay within the 8 parameter limit, the choice kernel learning rate is tied to the Q-value learning rate, assuming memory for value and memory for choice decay at similar speeds.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Cognitive Model 2: Q-value Decay and Shared Learning Rate Choice Kernel
+    
+    This model includes a decay parameter for unchosen Q-values, pulling them 
+    towards 0. It also includes choice kernels for both stages, but ties the 
+    choice kernel learning rate to the Q-value learning rate to save parameters.
+    
+    Parameters:
+    learning_rate: [0, 1] - Shared learning rate for Q-values and choice kernels.
+    decay: [0, 1] - Decay rate for unchosen Q-values towards 0.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Weighting of model-based vs model-free values.
+    lambda_: [0, 1] - Eligibility trace.
+    ck_weight1: [-5, 5] - Choice kernel weight for stage 1.
+    ck_weight2: [-5, 5] - Choice kernel weight for stage 2.
+    """
+    learning_rate, decay, beta1, beta2, w, lambda_, ck_weight1, ck_weight2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    ck_1 = np.zeros(2)
+    ck_2 = np.zeros((2, 2))
+    
+    ck_lr = learning_rate
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            ck_1 = (1 - ck_lr) * ck_1
+            ck_2 = (1 - ck_lr) * ck_2
+            q_stage1_mf = (1 - decay) * q_stage1_mf
+            q_stage2_mf = (1 - decay) * q_stage2_mf
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        V1 = beta1 * (w * q_stage1_mb + (1 - w) * q_stage1_mf) + ck_weight1 * ck_1
+        V1 = V1 - np.max(V1)
+        exp_q1 = np.exp(V1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        if action_2[trial] == -1:
+            p_choice_2[trial] = 1.0
+            ck_1 = (1 - ck_lr) * ck_1
+            ck_1[action_1[trial]] += ck_lr
+            ck_2 = (1 - ck_lr) * ck_2
+            
+            unchosen_1 = 1 - action_1[trial]
+            q_stage1_mf[unchosen_1] = (1 - decay) * q_stage1_mf[unchosen_1]
+            q_stage2_mf = (1 - decay) * q_stage2_mf
+            continue
+            
+        V2 = beta2 * q_stage2_mf[state_idx] + ck_weight2 * ck_2[state_idx]
+        V2 = V2 - np.max(V2)
+        exp_q2 = np.exp(V2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lambda_ * delta_stage2
+
+        ck_1 = (1 - ck_lr) * ck_1
+        ck_1[action_1[trial]] += ck_lr
+        
+        ck_2[state_idx] = (1 - ck_lr) * ck_2[state_idx]
+        ck_2[state_idx, action_2[trial]] += ck_lr
+        
+        other_state = 1 - state_idx
+        ck_2[other_state] = (1 - ck_lr) * ck_2[other_state]
+        
+        # Decay unchosen Q-values
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] = (1 - decay) * q_stage1_mf[unchosen_1]
+        
+        unchosen_2 = 1 - action_2[trial]
+        q_stage2_mf[state_idx, unchosen_2] = (1 - decay) * q_stage2_mf[state_idx, unchosen_2]
+        q_stage2_mf[other_state, 0] = (1 - decay) * q_stage2_mf[other_state, 0]
+        q_stage2_mf[other_state, 1] = (1 - decay) * q_stage2_mf[other_state, 1]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+
+### Model 3: Asymmetric Eligibility Traces
+This model posits that credit assignment to the first-stage choice depends on the valence of the outcome. By splitting the eligibility trace into positive and negative RPE components, it captures biases where participants might strongly reinforce stage 1 choices after a surprising win, but fail to similarly penalize them after a surprising loss (or vice versa).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Cognitive Model 3: Asymmetric Eligibility Traces
+    
+    This model splits the eligibility trace (lambda) into two separate parameters 
+    for positive and negative reward prediction errors. This allows the model to 
+    differentially update stage 1 actions based on whether the stage 2 outcome 
+    was better or worse than expected. It ties the choice kernel learning rate to 
+    the Q-value learning rate.
+    
+    Parameters:
+    learning_rate: [0, 1] - Shared learning rate for Q-values and choice kernels.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lambda_pos: [0, 1] - Eligibility trace for positive RPEs.
+    lambda_neg: [0, 1] - Eligibility trace for negative RPEs.
+    ck_weight1: [-5, 5] - Choice kernel weight for stage 1.
+    ck_weight2: [-5, 5] - Choice kernel weight for stage 2.
+    """
+    learning_rate, beta1, beta2, w, lambda_pos, lambda_neg, ck_weight1, ck_weight2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    ck_1 = np.zeros(2)
+    ck_2 = np.zeros((2, 2))
+    
+    ck_lr = learning_rate
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            ck_1 = (1 - ck_lr) * ck_1
+            ck_2 = (1 - ck_lr) * ck_2
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        V1 = beta1 * (w * q_stage1_mb + (1 - w) * q_stage1_mf) + ck_weight1 * ck_1
+        V1 = V1 - np.max(V1)
+        exp_q1 = np.exp(V1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        if action_2[trial] == -1:
+            p_choice_2[trial] = 1.0
+            ck_1 = (1 - ck_lr) * ck_1
+            ck_1[action_1[trial]] += ck_lr
+            ck_2 = (1 - ck_lr) * ck_2
+            continue
+            
+        V2 = beta2 * q_stage2_mf[state_idx] + ck_weight2 * ck_2[state_idx]
+        V2 = V2 - np.max(V2)
+        exp_q2 = np.exp(V2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        current_lambda = lambda_pos if delta_stage2 > 0 else lambda_neg
+        q_stage1_mf[action_1[trial]] += learning_rate * current_lambda * delta_stage2
+
+        ck_1 = (1 - ck_lr) * ck_1
+        ck_1[action_1[trial]] += ck_lr
+        
+        ck_2[state_idx] = (1 - ck_lr) * ck_2[state_idx]
+        ck_2[state_idx, action_2[trial]] += ck_lr
+        
+        other_state = 1 - state_idx
+        ck_2[other_state] = (1 - ck_lr) * ck_2[other_state]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

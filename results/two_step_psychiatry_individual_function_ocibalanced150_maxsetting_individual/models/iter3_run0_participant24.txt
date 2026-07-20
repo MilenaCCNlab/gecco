@@ -1,0 +1,241 @@
+Here are 3 new cognitive models that build upon the standard Daw et al. 2011 model by introducing distinct, theoretically grounded mechanisms, while avoiding the parameter combinations that have already been tested.
+
+### Model 1: Transition Matrix Learning
+Instead of assuming that participants have a fixed, perfect understanding of the transition probabilities (0.7 / 0.3), this model assumes they learn the transition matrix dynamically based on their experiences. A Rescorla-Wagner update is applied to the transition probabilities after each stage 1 choice.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Daw et al. 2011 with Transition Matrix Learning.
+    Instead of assuming fixed transition probabilities (0.7/0.3), the agent learns them 
+    over time using a Rescorla-Wagner update based on experienced transitions.
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate for Q-values.
+    alpha_t: [0, 1] - Learning rate for transition probabilities.
+    beta: [0, 10] - Inverse temperature for choices.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace for stage 2 reward updating stage 1 Q-value.
+    rep: [-5, 5] - Choice stickiness (perseveration) for stage 1.
+    """
+    alpha, alpha_t, beta, w, lam, rep = model_parameters
+    n_trials = len(action_1)
+    
+    # Initialize transition matrix to standard probabilities, but allow it to update
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1
+            
+        logits_1 = beta * q_stage1_net + rep * stickiness
+        logits_1 -= np.max(logits_1) # for numerical stability
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        a1 = action_1[trial]
+        p_choice_1[trial] = probs_1[a1]
+
+        state_idx = state[trial]
+        
+        # Policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        a2 = action_2[trial]
+        p_choice_2[trial] = probs_2[a2]
+
+        r = reward[trial]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        # Transition matrix updating
+        delta_t = 1.0 - transition_matrix[a1, state_idx]
+        transition_matrix[a1, state_idx] += alpha_t * delta_t
+        transition_matrix[a1, 1 - state_idx] = 1.0 - transition_matrix[a1, state_idx]
+        
+        last_action_1 = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Choice Kernel for Stage 1
+Rather than just sticking to the immediate last action (n-1 trial), this model posits that participants maintain a "choice kernel" (an exponentially weighted moving average of their choice history). This captures longer-term autocorrelations in behavior where participants might favor a spaceship they have frequently chosen in the recent past.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Daw et al. 2011 with a Choice Kernel for Stage 1.
+    Instead of only perseverating on the immediate last trial, the agent maintains a choice 
+    kernel that tracks the history of chosen actions, updated via a separate learning rate.
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta: [0, 10] - Inverse temperature for choices.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace for stage 2 reward updating stage 1 Q-value.
+    rep: [-5, 5] - Choice kernel weight (stickiness to historical choices).
+    alpha_c: [0, 1] - Learning rate for the choice kernel.
+    """
+    alpha, beta, w, lam, rep, alpha_c = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    choice_kernel = np.zeros(2)
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+            
+        logits_1 = beta * q_stage1_net + rep * choice_kernel
+        logits_1 -= np.max(logits_1) # for numerical stability
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        a1 = action_1[trial]
+        p_choice_1[trial] = probs_1[a1]
+
+        state_idx = state[trial]
+        
+        # Policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        a2 = action_2[trial]
+        p_choice_2[trial] = probs_2[a2]
+
+        r = reward[trial]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        # Choice kernel updating
+        ck_target = np.zeros(2)
+        ck_target[a1] = 1.0
+        choice_kernel = (1.0 - alpha_c) * choice_kernel + alpha_c * ck_target
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Separate Inverse Temperatures & Subjective Transition Probability
+This model addresses two specific biases: First, participants often exhibit different levels of stochasticity (exploration) in stage 1 versus stage 2. Second, rather than objectively believing the transition probability is exactly 0.7, participants might operate under a fixed but subjective transition belief (e.g., 0.9 or 0.6) which scales their model-based calculations.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Daw et al. 2011 with Separate Inverse Temperatures and Subjective Transition Probability.
+    Allows for different choice stochasticity at each stage, and fits the agent's fixed 
+    subjective belief about the probability of the common transition (instead of fixing it to 0.7).
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta1: [0, 10] - Inverse temperature for Stage 1.
+    beta2: [0, 10] - Inverse temperature for Stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace for stage 2 reward updating stage 1 Q-value.
+    rep: [-5, 5] - Choice stickiness (perseveration) for stage 1.
+    p_trans: [0.5, 1.0] - Subjective probability of the common transition.
+    """
+    alpha, beta1, beta2, w, lam, rep, p_trans = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[p_trans, 1.0 - p_trans], [1.0 - p_trans, p_trans]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1
+            
+        logits_1 = beta1 * q_stage1_net + rep * stickiness
+        logits_1 -= np.max(logits_1) # for numerical stability
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        a1 = action_1[trial]
+        p_choice_1[trial] = probs_1[a1]
+
+        state_idx = state[trial]
+        
+        # Policy for the second choice
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        
+        a2 = action_2[trial]
+        p_choice_2[trial] = probs_2[a2]
+
+        r = reward[trial]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+        q_stage1_mf[a1] += alpha * delta_stage1
+
+        delta_stage2 = r - q_stage2_mf[state_idx, a2]
+        q_stage2_mf[state_idx, a2] += alpha * delta_stage2
+
+        q_stage1_mf[a1] += alpha * lam * delta_stage2
+        
+        last_action_1 = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

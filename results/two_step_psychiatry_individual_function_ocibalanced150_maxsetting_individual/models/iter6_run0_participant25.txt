@@ -1,0 +1,215 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Based / Model-Free RL with Choice Trace Perseveration.
+    Instead of only perseverating on the immediately preceding action, this model 
+    maintains an exponentially decaying 'choice trace' of past Stage 1 actions. 
+    This allows the perseveration bonus to reflect a longer history of choices.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free strategy [0,1]
+    lam: eligibility trace parameter for stage 2 rewards [0,1]
+    pers: perseveration bonus weight [0,1]
+    trace_decay: decay rate for the choice trace [0,1]
+    """
+    alpha, beta1, beta2, w, lam, pers, trace_decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        # Apply perseveration bonus based on the accumulated choice trace
+        q_stage1_net += pers * choice_trace
+
+        exp_q1 = np.exp(beta1 * (q_stage1_net - np.max(q_stage1_net)))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] - np.max(q_stage2_mf[state_idx])))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Update choice trace
+        choice_trace *= trace_decay
+        choice_trace[action_1[trial]] += 1.0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Based / Model-Free RL with a Reward Reference Point.
+    Rewards are evaluated relative to a reference point, shifting the prediction errors.
+    This allows zero-rewards to potentially act as negative or positive feedback 
+    depending on the participant's subjective baseline.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free strategy [0,1]
+    lam: eligibility trace parameter for stage 2 rewards [0,1]
+    pers: perseveration bonus for repeating the last stage 1 action [0,1]
+    ref_point: reference point for rewards, scaled to [-1, 1] internally [0,1]
+    """
+    alpha, beta1, beta2, w, lam, pers, ref_point = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+    
+    # Scale ref_point from [0,1] to [-1,1]
+    baseline = (ref_point * 2) - 1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        if last_action != -1:
+            pers_bonus = np.zeros(2)
+            pers_bonus[last_action] = pers
+            q_stage1_net += pers_bonus
+
+        exp_q1 = np.exp(beta1 * (q_stage1_net - np.max(q_stage1_net)))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] - np.max(q_stage2_mf[state_idx])))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Calculate effective reward relative to baseline
+        r_eff = reward[trial] - baseline
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        # Use effective reward for Stage 2 prediction error
+        delta_stage2 = r_eff - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Based / Model-Free RL with Transition-dependent MB Weight.
+    The weight placed on the model-based system (w) depends on whether the transition
+    in the PREVIOUS trial was common or rare. This captures the phenomenon where 
+    participants might trust their internal transition model less after a rare transition.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w_common: MB weight if previous transition was common [0,1]
+    w_rare: MB weight if previous transition was rare [0,1]
+    lam: eligibility trace parameter for stage 2 rewards [0,1]
+    pers: perseveration bonus for repeating the last stage 1 action [0,1]
+    """
+    alpha, beta1, beta2, w_common, w_rare, lam, pers = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+    last_trans_common = True # Default assumption for the first trial
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # Select MB weight based on previous transition type
+        w = w_common if last_trans_common else w_rare
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        if last_action != -1:
+            pers_bonus = np.zeros(2)
+            pers_bonus[last_action] = pers
+            q_stage1_net += pers_bonus
+
+        exp_q1 = np.exp(beta1 * (q_stage1_net - np.max(q_stage1_net)))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] - np.max(q_stage2_mf[state_idx])))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+        
+        # Check if the current transition is common (0->0 or 1->1)
+        last_trans_common = (action_1[trial] == state[trial])
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

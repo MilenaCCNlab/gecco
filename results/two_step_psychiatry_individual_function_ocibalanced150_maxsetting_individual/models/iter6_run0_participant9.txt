@@ -1,0 +1,225 @@
+Here are three new cognitive models that explore alternative mechanisms for how participants might make their decisions. They build upon the best-performing model by introducing transition-dependent stickiness, heuristic model-based/model-free stickiness (inspired by Daw et al., 2011), and reward-dependent learning rates.
+
+### Model 1: Transition-Dependent Stickiness
+This model investigates whether participants' tendency to repeat a Stage 1 choice depends on the nature of the previous transition (common vs. rare), regardless of the reward. This can capture a heuristic where participants trust the common transition and are more likely to repeat their choice if the spaceship behaved as expected, but shift if a rare transition occurred.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Mixed MF/MB with transition-dependent stickiness.
+    Stickiness for the previous stage 1 action depends on whether the previous 
+    transition to stage 2 was common or rare.
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_1: [0, 10] - Inverse temperature for stage 1 choices.
+    beta_2: [0, 10] - Inverse temperature for stage 2 choices.
+    w: [0, 1] - Model-based weight (1 = fully model-based, 0 = fully model-free).
+    lam: [0, 1] - Eligibility trace (how much stage 2 reward updates stage 1 MF value).
+    rep_common: [-5, 5] - Stickiness for stage 1 if the previous transition was common.
+    rep_rare: [-5, 5] - Stickiness for stage 1 if the previous transition was rare.
+    """
+    alpha, beta_1, beta_2, w, lam, rep_common, rep_rare = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_state = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            # In this task, action 0 -> state 0 and action 1 -> state 1 are common
+            is_common = (last_action_1 == last_state)
+            if is_common:
+                stickiness[last_action_1] = rep_common
+            else:
+                stickiness[last_action_1] = rep_rare
+                
+        q1_logits = beta_1 * q_stage1_net + stickiness
+        q1_logits -= np.max(q1_logits)
+        exp_q1 = np.exp(q1_logits)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_logits = beta_2 * q_stage2_mf[state_idx]
+        q2_logits -= np.max(q2_logits)
+        exp_q2 = np.exp(q2_logits)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_state = state_idx
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Heuristic Model-Based and Model-Free Stickiness
+This model incorporates the classic heuristic signatures of Model-Free and Model-Based behavior as direct stickiness terms. The MF heuristic repeats actions simply if rewarded (+1) or unrewarded (-1). The MB heuristic repeats actions if the state transition aligns logically with the reward (+1 if rewarded & common OR unrewarded & rare, else -1).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Mixed MF/MB with heuristic MB and MF stickiness terms.
+    Incorporates Daw et al. (2011) style stay/shift heuristics.
+    stay_mf: +1 if rewarded, -1 if unrewarded.
+    stay_mb: +1 if (rewarded & common) or (unrewarded & rare), else -1.
+    
+    Parameters:
+    alpha: [0, 1] - Learning rate for Q-values.
+    beta_1: [0, 10] - Inverse temperature for stage 1 choices.
+    beta_2: [0, 10] - Inverse temperature for stage 2 choices.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    beta_stick_mf: [-5, 5] - Weight for model-free stickiness heuristic.
+    beta_stick_mb: [-5, 5] - Weight for model-based stickiness heuristic.
+    """
+    alpha, beta_1, beta_2, w, lam, beta_stick_mf, beta_stick_mb = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_state = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            is_common = (last_action_1 == last_state)
+            stay_mf = 1 if last_reward == 1 else -1
+            stay_mb = 1 if ((last_reward == 1 and is_common) or (last_reward == 0 and not is_common)) else -1
+            stickiness[last_action_1] = beta_stick_mf * stay_mf + beta_stick_mb * stay_mb
+                
+        q1_logits = beta_1 * q_stage1_net + stickiness
+        q1_logits -= np.max(q1_logits)
+        exp_q1 = np.exp(q1_logits)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_logits = beta_2 * q_stage2_mf[state_idx]
+        q2_logits -= np.max(q2_logits)
+        exp_q2 = np.exp(q2_logits)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_state = state_idx
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Reward-Dependent Learning Rates
+This model introduces outcome-dependent learning rates (`alpha_win` and `alpha_lose`) alongside reward-dependent stickiness. Participants often exhibit asymmetric plasticity depending on whether a trial resulted in a positive outcome or a negative outcome. This model tests whether the participant updates their internal values faster following a reward compared to a non-reward (or vice-versa).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Mixed MF/MB with reward-dependent learning rates and reward-dependent stickiness.
+    Uses different learning rates depending on whether the trial was rewarded or unrewarded.
+    
+    Parameters:
+    alpha_win: [0, 1] - Learning rate applied when current reward is 1.
+    alpha_lose: [0, 1] - Learning rate applied when current reward is 0.
+    beta_1: [0, 10] - Inverse temperature for stage 1 choices.
+    beta_2: [0, 10] - Inverse temperature for stage 2 choices.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    rep_win: [-5, 5] - Stickiness for stage 1 if the previous trial was rewarded.
+    rep_lose: [-5, 5] - Stickiness for stage 1 if the previous trial was unrewarded.
+    """
+    alpha_win, alpha_lose, beta_1, beta_2, w, lam, rep_win, rep_lose = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_reward = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            if last_reward == 1:
+                stickiness[last_action_1] = rep_win
+            elif last_reward == 0:
+                stickiness[last_action_1] = rep_lose
+                
+        q1_logits = beta_1 * q_stage1_net + stickiness
+        q1_logits -= np.max(q1_logits)
+        exp_q1 = np.exp(q1_logits)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_logits = beta_2 * q_stage2_mf[state_idx]
+        q2_logits -= np.max(q2_logits)
+        exp_q2 = np.exp(q2_logits)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Determine learning rate based on current reward outcome
+        alpha_current = alpha_win if reward[trial] == 1 else alpha_lose
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha_current * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_current * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha_current * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

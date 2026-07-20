@@ -1,0 +1,228 @@
+Here are three new cognitive models that explore alternative configurations and mechanisms for the two-step task. 
+
+### Model 1: Hybrid Model with Decay (Forgetting)
+This model introduces a `decay` parameter. In dynamic environments where reward probabilities drift over time, participants might slowly forget the values of options they haven't chosen recently. We model this by decaying all Q-values towards their initial neutral value (0.5) at the end of each trial.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Free / Model-Based RL with Decay (Forgetting).
+    
+    Parameters:
+    alpha: Learning rate [0, 1]
+    beta1: Inverse temperature for stage 1 [0, 10]
+    beta2: Inverse temperature for stage 2 [0, 10]
+    w: Weight for model-based vs model-free influence [0, 1]
+    pi: Perseveration bonus for repeating the previous stage 1 choice [-5, 5]
+    lam: Eligibility trace parameter [0, 1]
+    decay: Forgetting rate, decaying all Q-values towards 0.5 at each step [0, 1]
+    """
+    alpha, beta1, beta2, w, pi, lam, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Initialize Q-values at 0.5 (neutral) since rewards are 0 or 1
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        pers = np.zeros(2)
+        if last_action_1 != -1:
+            pers[last_action_1] = 1.0
+            
+        logits_1 = beta1 * q_stage1_net + pi * pers
+        logits_1 -= np.max(logits_1) # For numerical stability
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Decay all Q-values towards 0.5
+        q_stage1_mf = (1 - decay) * q_stage1_mf + decay * 0.5
+        q_stage2_mf = (1 - decay) * q_stage2_mf + decay * 0.5
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Hybrid Model with Stage 1 and Stage 2 Perseveration
+Standard models often only account for choice stickiness (perseveration) at the first stage. This model adds a `pi2` parameter to capture perseveration in the second stage, tracking whether the participant has a tendency to repeatedly select the exact same alien once they land on a specific planet, irrespective of the reward values.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Free / Model-Based RL with Stage 1 and Stage 2 Perseveration.
+    
+    Parameters:
+    alpha: Learning rate [0, 1]
+    beta1: Inverse temperature for stage 1 [0, 10]
+    beta2: Inverse temperature for stage 2 [0, 10]
+    w: Weight for model-based vs model-free influence [0, 1]
+    pi1: Perseveration bonus for repeating the previous stage 1 choice [-5, 5]
+    pi2: Perseveration bonus for repeating the previous stage 2 choice in the same state [-5, 5]
+    lam: Eligibility trace parameter [0, 1]
+    """
+    alpha, beta1, beta2, w, pi1, pi2, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    last_action_2 = np.array([-1, -1]) # Track last action for both stage 2 states
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        pers1 = np.zeros(2)
+        if last_action_1 != -1:
+            pers1[last_action_1] = 1.0
+            
+        logits_1 = beta1 * q_stage1_net + pi1 * pers1
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        pers2 = np.zeros(2)
+        if last_action_2[state_idx] != -1:
+            pers2[last_action_2[state_idx]] = 1.0
+
+        logits_2 = beta2 * q_stage2_mf[state_idx] + pi2 * pers2
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+        last_action_2[state_idx] = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Independent Model-Based and Model-Free Temperatures
+Instead of forcing the Model-Based (MB) and Model-Free (MF) influences to trade off against each other using a single weighting parameter `w`, this model parameterizes them with independent inverse temperatures (`beta_mb` and `beta_mf`). This allows for the possibility that a participant might have very strong MB behavior without it strictly squashing their MF behavior, or vice-versa.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model-Free / Model-Based RL with independent MB and MF temperatures.
+    
+    Parameters:
+    alpha: Learning rate [0, 1]
+    beta_mb: Inverse temperature for model-based stage 1 Q-values [0, 10]
+    beta_mf: Inverse temperature for model-free stage 1 Q-values [0, 10]
+    beta2: Inverse temperature for stage 2 [0, 10]
+    pi: Perseveration bonus for repeating the previous stage 1 choice [-5, 5]
+    lam: Eligibility trace parameter [0, 1]
+    """
+    alpha, beta_mb, beta_mf, beta2, pi, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+
+        pers = np.zeros(2)
+        if last_action_1 != -1:
+            pers[last_action_1] = 1.0
+            
+        # Independent scaling of MB and MF values
+        logits_1 = beta_mb * q_stage1_mb + beta_mf * q_stage1_mf + pi * pers
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

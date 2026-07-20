@@ -1,0 +1,234 @@
+Here are 3 new cognitive models that build upon your best model by introducing novel mechanisms to explain the participant's behavior. Each model integrates a new cognitive hypothesis while keeping the parameter count at 8, ensuring parsimony.
+
+### Model 1: Hybrid Model with Baseline Decay and Intra-State Generalization
+**Hypothesis:** When a participant receives feedback from an alien, they might generalize this experience to the other alien on the same planet, assuming that the "planet" itself is currently in a good or bad state. This model updates the unchosen alien on the visited planet by a fraction of the prediction error, while unvisited planets decay to the baseline.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Hybrid Model with Baseline Decay and Intra-State Generalization.
+    When updating the chosen alien's value, the unchosen alien on the same planet
+    is also updated by a fraction (generalization) of the prediction error. 
+    Unvisited states decay towards the baseline.
+    
+    Bounds:
+    learning_rate: [0, 1] - Learning rate for chosen actions
+    decay_rate: [0, 1] - Decay rate for actions in unvisited states
+    baseline: [0, 1] - Baseline value to which unchosen actions decay
+    beta_1: [0, 10] - Inverse temperature for Stage 1
+    beta_2: [0, 10] - Inverse temperature for Stage 2
+    w: [0, 1] - Weight on model-based vs model-free strategy
+    lam: [0, 1] - Eligibility trace parameter
+    generalization: [0, 1] - Fraction of Stage 2 PE applied to the unchosen action in the same state
+    """
+    learning_rate, decay_rate, baseline, beta_1, beta_2, w, lam, generalization = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * baseline
+    q_stage2_mf = np.ones((2, 2)) * baseline
+
+    for trial in range(n_trials):
+        # Stage 1 choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta_1 * q_net - np.max(beta_1 * q_net))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Stage 2 choice
+        exp_q2 = np.exp(beta_2 * q_stage2_mf[state_idx] - np.max(beta_2 * q_stage2_mf[state_idx]))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Stage 1 Update & Decay
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        unchosen_a1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_a1] += decay_rate * (baseline - q_stage1_mf[unchosen_a1])
+
+        # Stage 2 Update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Generalization to unchosen action in the same visited state
+        unchosen_a2 = 1 - action_2[trial]
+        q_stage2_mf[state_idx, unchosen_a2] += learning_rate * generalization * delta_stage2
+        
+        # Decay for the unvisited state
+        unvisited_state = 1 - state_idx
+        for a in range(2):
+            q_stage2_mf[unvisited_state, a] += decay_rate * (baseline - q_stage2_mf[unvisited_state, a])
+
+        # Eligibility trace update for Stage 1
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Hybrid Model with Baseline Decay and UCB Exploration
+**Hypothesis:** The participant may actively explore options they haven't chosen in a while. This model introduces an Upper Confidence Bound (UCB) exploration bonus that increases the probability of choosing an action the longer it has been neglected.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Hybrid Model with Baseline Decay and UCB Exploration.
+    Adds an uncertainty/novelty bonus to actions based on how many trials 
+    have passed since they were last chosen.
+    
+    Bounds:
+    learning_rate: [0, 1] - Learning rate
+    decay_rate: [0, 1] - Decay rate for unchosen actions
+    baseline: [0, 1] - Baseline value to which unchosen actions decay
+    beta_1: [0, 10] - Inverse temperature for Stage 1
+    beta_2: [0, 10] - Inverse temperature for Stage 2
+    w: [0, 1] - Weight on model-based vs model-free strategy
+    lam: [0, 1] - Eligibility trace parameter
+    c_ucb: [0, 5] - UCB exploration bonus weight
+    """
+    learning_rate, decay_rate, baseline, beta_1, beta_2, w, lam, c_ucb = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.ones(2) * baseline
+    q_stage2_mf = np.ones((2, 2)) * baseline
+    
+    # Counters for how long since an action was last chosen
+    u_stage1 = np.zeros(2)
+    u_stage2 = np.zeros((2, 2))
+
+    for trial in range(n_trials):
+        # Stage 1 choice with UCB bonus
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf + c_ucb * u_stage1
+        
+        exp_q1 = np.exp(beta_1 * q_net - np.max(beta_1 * q_net))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Stage 2 choice with UCB bonus
+        q_net2 = q_stage2_mf[state_idx] + c_ucb * u_stage2[state_idx]
+        exp_q2 = np.exp(beta_2 * q_net2 - np.max(beta_2 * q_net2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Stage 1 Update & Decay
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        unchosen_a1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_a1] += decay_rate * (baseline - q_stage1_mf[unchosen_a1])
+
+        # Stage 2 Update & Decay
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay_rate * (baseline - q_stage2_mf[s, a])
+
+        # Eligibility trace
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        # Update UCB counters (increment all, reset chosen to 0)
+        u_stage1 += 1
+        u_stage1[action_1[trial]] = 0
+        u_stage2 += 1
+        u_stage2[state_idx, action_2[trial]] = 0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Hybrid Model with Baseline Decay and Outcome-Dependent Decay
+**Hypothesis:** The participant's memory or valuation of unchosen options may decay back to the baseline at different rates depending on whether they just experienced a success (reward) or a failure (no reward). This model separates the decay rate dynamically based on the trial's outcome.
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Hybrid Model with Baseline Decay and Outcome-Dependent Decay Rate.
+    The rate at which unchosen actions decay to baseline depends on whether 
+    the current trial resulted in a reward or not.
+    
+    Bounds:
+    learning_rate: [0, 1] - Learning rate
+    decay_rew: [0, 1] - Decay rate for unchosen actions after a rewarded trial
+    decay_unrew: [0, 1] - Decay rate for unchosen actions after an unrewarded trial
+    baseline: [0, 1] - Baseline value to which unchosen actions decay
+    beta_1: [0, 10] - Inverse temperature for Stage 1
+    beta_2: [0, 10] - Inverse temperature for Stage 2
+    w: [0, 1] - Weight on model-based vs model-free strategy
+    lam: [0, 1] - Eligibility trace parameter
+    """
+    learning_rate, decay_rew, decay_unrew, baseline, beta_1, beta_2, w, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.ones(2) * baseline
+    q_stage2_mf = np.ones((2, 2)) * baseline
+
+    for trial in range(n_trials):
+        # Stage 1 choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        exp_q1 = np.exp(beta_1 * q_net - np.max(beta_1 * q_net))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Stage 2 choice
+        exp_q2 = np.exp(beta_2 * q_stage2_mf[state_idx] - np.max(beta_2 * q_stage2_mf[state_idx]))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Determine outcome-dependent decay rate
+        current_decay = decay_rew if reward[trial] > 0 else decay_unrew
+
+        # Stage 1 Update & Decay
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        unchosen_a1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_a1] += current_decay * (baseline - q_stage1_mf[unchosen_a1])
+
+        # Stage 2 Update & Decay
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += current_decay * (baseline - q_stage2_mf[s, a])
+
+        # Eligibility trace
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

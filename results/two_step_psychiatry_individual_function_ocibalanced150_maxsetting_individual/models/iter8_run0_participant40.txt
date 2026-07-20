@@ -1,0 +1,238 @@
+Here are 3 new cognitive models that build upon the insights from the best-performing model so far. Since the participant heavily favors spaceship 0 (action 0 at stage 1), a `bias` parameter is crucial. These models introduce alternative learning mechanisms (initial Q-value expectations, asymmetric prediction error updating, and stage-specific learning rates) while avoiding the exact combinations you've already tried.
+
+### Model 1: Hybrid MB/MF with Decay, Perseveration, Bias, and Initial Q-Values
+This model adds an initial Q-value parameter (`q_init`). When decay is present, unchosen options typically decay towards 0. However, humans often have a baseline expectation (e.g., 0.5) that unchosen values revert to. 
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """Model 1: Hybrid MB/MF with decay, perseveration, choice bias at stage 1, and initial Q-value.
+    
+    Bounds:
+    learning_rate: [0,1] - Learning rate for updating values.
+    beta: [0,10] - Inverse temperature for softmax choice.
+    w: [0,1] - Model-based weight (1 = fully model-based, 0 = fully model-free).
+    lam: [0,1] - Eligibility trace for updating stage 1 with stage 2 prediction error.
+    rep: [-5,5] - Perseveration (stickiness) to the previously chosen stage 1 action.
+    decay: [0,1] - Decay rate for unchosen action values towards q_init.
+    bias: [-5,5] - Intrinsic bias for choosing action 0 at stage 1.
+    q_init: [-1,1] - Initial Q-value for all states and actions.
+    """
+    import numpy as np
+    learning_rate, beta, w, lam, rep, decay, bias, q_init = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.full(2, q_init, dtype=float)
+    q_stage2_mf = np.full((2, 2), q_init, dtype=float)
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits_1 = beta * q_net + rep * stickiness
+        logits_1[0] += bias  # Apply bias to choice 0
+        logits_1 -= np.max(logits_1) # For numerical stability
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+
+        # Decay unchosen options towards q_init
+        unchosen_a1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_a1] += decay * (q_init - q_stage1_mf[unchosen_a1])
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] += decay * (q_init - q_stage2_mf[s, a])
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Hybrid MB/MF with Asymmetric Learning Rates and Bias
+Participants often learn differently from positive versus negative prediction errors (e.g. they might update heavily when receiving a reward but ignore zero rewards). This model uses separate learning rates based on the sign of the prediction error, along with perseveration and bias.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """Model 2: Hybrid MB/MF with asymmetric learning rates for positive/negative PEs, perseveration, and stage 1 bias.
+    
+    Bounds:
+    alpha_pos: [0,1] - Learning rate for positive prediction errors.
+    alpha_neg: [0,1] - Learning rate for negative prediction errors.
+    beta: [0,10] - Inverse temperature for softmax choice.
+    w: [0,1] - Model-based weight (1 = fully model-based, 0 = fully model-free).
+    lam: [0,1] - Eligibility trace for updating stage 1 with stage 2 prediction error.
+    rep: [-5,5] - Perseveration (stickiness) to the previously chosen stage 1 action.
+    bias: [-5,5] - Intrinsic bias for choosing action 0 at stage 1.
+    """
+    import numpy as np
+    alpha_pos, alpha_neg, beta, w, lam, rep, bias = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits_1 = beta * q_net + rep * stickiness
+        logits_1[0] += bias
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating with asymmetric learning rates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        lr1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        lr2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += lr1 * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Hybrid MB/MF with Stage-Specific Learning Rates and Bias
+Participants might adapt their values at different speeds depending on the task stage (e.g., updating stage 2 terminal states quickly, but stage 1 transitions slowly). This model allows `learning_rate1` and `learning_rate2` to vary independently.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """Model 3: Hybrid MB/MF with separate learning rates for stage 1 and stage 2, perseveration, and stage 1 bias.
+    
+    Bounds:
+    learning_rate1: [0,1] - Learning rate for stage 1 updating.
+    learning_rate2: [0,1] - Learning rate for stage 2 updating.
+    beta: [0,10] - Inverse temperature for softmax choice.
+    w: [0,1] - Model-based weight (1 = fully model-based, 0 = fully model-free).
+    lam: [0,1] - Eligibility trace for updating stage 1 with stage 2 prediction error.
+    rep: [-5,5] - Perseveration (stickiness) to the previously chosen stage 1 action.
+    bias: [-5,5] - Intrinsic bias for choosing action 0 at stage 1.
+    """
+    import numpy as np
+    learning_rate1, learning_rate2, beta, w, lam, rep, bias = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            last_action_1 = -1
+            continue
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits_1 = beta * q_net + rep * stickiness
+        logits_1[0] += bias
+        logits_1 -= np.max(logits_1)
+        exp_q1 = np.exp(logits_1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # policy for the second choice
+        logits_2 = beta * q_stage2_mf[state_idx]
+        logits_2 -= np.max(logits_2)
+        exp_q2 = np.exp(logits_2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating with stage-specific learning rates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate1 * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate2 * delta_stage2
+        q_stage1_mf[action_1[trial]] += learning_rate1 * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

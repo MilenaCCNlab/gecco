@@ -1,0 +1,232 @@
+Here are 3 new cognitive models that build upon the best model by introducing distinct, cognitively plausible mechanisms. Each model explores a different hypothesis about how participants process rewards, evaluate future states, or generalize learning across states.
+
+### Model 1: Average Reward Baseline (Relative Reward Learning)
+This model introduces an **average reward baseline** (`alpha_r`). Instead of treating absolute rewards (0 or 1) as the target for prediction errors, the participant evaluates the reward relative to their recent average payout. This allows the model to capture negative prediction errors when receiving a reward of 0 if the participant has come to expect a higher average reward.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Average Reward Baseline.
+    This model maintains a running average of the rewards and uses it as a baseline 
+    for calculating prediction errors in stage 2. This captures the idea that participants 
+    might evaluate rewards relative to their recent average payout.
+    
+    Parameters:
+    alpha: learning rate for Q-values [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free strategy [0,1]
+    lam: eligibility trace parameter [0,1]
+    pers: perseveration bonus [0,5]
+    alpha_r: learning rate for the average reward [0,1]
+    """
+    alpha, beta1, beta2, w, lam, pers, alpha_r = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+    avg_reward = 0.5  # Initialize to neutral expectation
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        if last_action != -1:
+            pers_bonus = np.zeros(2)
+            pers_bonus[last_action] = pers
+            q_stage1_net += pers_bonus
+
+        exp_q1 = np.exp(beta1 * (q_stage1_net - np.max(q_stage1_net)))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] - np.max(q_stage2_mf[state_idx])))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        # Calculate stage 2 error relative to the running average baseline
+        effective_reward = reward[trial] - avg_reward
+        delta_stage2 = effective_reward - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Update average reward
+        avg_reward += alpha_r * (reward[trial] - avg_reward)
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Temporal Discounting
+This model introduces a **discount factor** (`gamma`). Standard formulations of the Daw two-step model implicitly assume a discount factor of 1.0. However, participants might heavily discount the expected value of stage 2 when evaluating stage 1 actions. This model applies `gamma` to both the model-based calculation and the model-free TD update.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Temporal Discounting.
+    This model includes a discount factor (gamma) for the model-based calculation 
+    of stage 1 values and the model-free TD update, representing a discounting of 
+    future expected rewards.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free strategy [0,1]
+    lam: eligibility trace parameter [0,1]
+    pers: perseveration bonus [0,5]
+    gamma: discount factor for future rewards [0,1]
+    """
+    alpha, beta1, beta2, w, lam, pers, gamma = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        # Apply discount factor to future expected value in MB system
+        q_stage1_mb = gamma * (transition_matrix @ max_q_stage2)
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        if last_action != -1:
+            pers_bonus = np.zeros(2)
+            pers_bonus[last_action] = pers
+            q_stage1_net += pers_bonus
+
+        exp_q1 = np.exp(beta1 * (q_stage1_net - np.max(q_stage1_net)))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] - np.max(q_stage2_mf[state_idx])))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Updates
+        # Apply discount factor to the MF SARSA update for stage 1
+        delta_stage1 = gamma * q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: State Generalization
+This model introduces **state generalization** (`omega`). Participants may confuse the aliens across planets or assume that an alien on one planet will yield similar rewards to the same alien on the other planet. When a Q-value is updated for an alien on the visited planet, a fraction of that prediction error is generalized to the same alien on the unvisited planet.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with State Generalization in Stage 2.
+    This model assumes participants might generalize the learned value of an alien 
+    (action 2) across the two planets (states). When updating the Q-value for an 
+    alien on the visited planet, the Q-value for the same alien on the unvisited 
+    planet is also updated by a fraction (omega) of the prediction error.
+    
+    Parameters:
+    alpha: learning rate [0,1]
+    beta1: inverse temperature for stage 1 [0,10]
+    beta2: inverse temperature for stage 2 [0,10]
+    w: weight of model-based vs model-free strategy [0,1]
+    lam: eligibility trace parameter [0,1]
+    pers: perseveration bonus [0,5]
+    omega: generalization rate across states for the same action [0,1]
+    """
+    alpha, beta1, beta2, w, lam, pers, omega = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+
+        if last_action != -1:
+            pers_bonus = np.zeros(2)
+            pers_bonus[last_action] = pers
+            q_stage1_net += pers_bonus
+
+        exp_q1 = np.exp(beta1 * (q_stage1_net - np.max(q_stage1_net)))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] - np.max(q_stage2_mf[state_idx])))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        
+        # Update visited state
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        # Generalization to unvisited state
+        other_state = 1 - state_idx
+        q_stage2_mf[other_state, action_2[trial]] += alpha * omega * delta_stage2
+
+        # Trace update uses the original delta
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

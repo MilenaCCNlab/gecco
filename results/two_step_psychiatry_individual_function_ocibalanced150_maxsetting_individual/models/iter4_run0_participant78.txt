@@ -1,0 +1,220 @@
+Here are 3 new cognitive models that explore alternative mechanisms not yet tested, while keeping the total number of parameters at or below 8. 
+
+### Model 1: Choice Trace (Autocorrelation) Model
+Instead of a simple 1-trial stickiness (perseveration) parameter, this model maintains a decaying trace of past choices. This allows the model to capture longer-term autocorrelation in participant behavior—a common phenomenon where participants might have a sticky preference for a side that builds up over multiple recent trials rather than just the immediately preceding one.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with a choice trace for perseveration.
+    Instead of just the last choice, perseveration is based on an exponentially 
+    weighted moving average of past choices (autocorrelation).
+    
+    Bounds:
+    alpha: [0,1] - learning rate
+    beta_1: [0,10] - inverse temperature for stage 1 choices
+    beta_2: [0,10] - inverse temperature for stage 2 choices
+    w: [0,1] - model-based weight
+    lambda_: [0,1] - eligibility trace
+    pers_weight: [-5,5] - weight of the choice trace on stage 1 logits
+    pers_alpha: [0,1] - update rate for the choice trace (1 = 1-trial stickiness)
+    """
+    alpha, beta_1, beta_2, w, lambda_, pers_weight, pers_alpha = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    choice_trace = np.zeros(2)
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits_1 = beta_1 * q_net + pers_weight * choice_trace
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Update choice trace
+        choice_trace *= (1 - pers_alpha)
+        choice_trace[action_1[trial]] += pers_alpha
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Learned Transition Matrix Model
+Participants often do not perfectly know or trust the 70/30 transition probabilities from the start. This model assumes participants dynamically learn the transition structure of the task alongside the reward values, starting from a uniform prior (50/50).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model where the agent dynamically learns the transition matrix over time.
+    
+    Bounds:
+    alpha: [0,1] - learning rate for Q-values
+    beta_1: [0,10] - inverse temperature for stage 1 choices
+    beta_2: [0,10] - inverse temperature for stage 2 choices
+    w: [0,1] - model-based weight
+    lambda_: [0,1] - eligibility trace
+    pers: [-5,5] - perseveration bonus for previous stage 1 choice
+    alpha_trans: [0,1] - learning rate for the transition matrix probabilities
+    """
+    alpha, beta_1, beta_2, w, lambda_, pers, alpha_trans = model_parameters
+    n_trials = len(action_1)
+  
+    # Initialize transition matrix as uniform reflecting initial uncertainty
+    transition_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    prev_action_1 = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_bonus = np.zeros(2)
+        if prev_action_1 != -1:
+            pers_bonus[prev_action_1] = pers
+            
+        logits_1 = beta_1 * q_net + pers_bonus
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Update transition matrix based on observed state transition
+        a1 = action_1[trial]
+        transition_matrix[a1, state_idx] += alpha_trans * (1 - transition_matrix[a1, state_idx])
+        transition_matrix[a1, 1 - state_idx] += alpha_trans * (0 - transition_matrix[a1, 1 - state_idx])
+
+        # Value updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lambda_ * delta_stage2
+        
+        prev_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Learning Rates + Value Decay
+This model combines two highly effective mechanisms evaluated separately before: learning from positive vs. negative prediction errors at different rates, and gradually decaying unchosen Q-values toward the baseline (0.5). This captures participants who might strongly update values when rewarded but forget or ignore unchosen options over time.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid MB/MF model with asymmetric learning rates (positive vs negative 
+    prediction errors), value decay for unchosen options, and separate temperatures.
+    
+    Bounds:
+    alpha_pos: [0,1] - learning rate for positive prediction errors
+    alpha_neg: [0,1] - learning rate for negative prediction errors
+    beta_1: [0,10] - inverse temperature for stage 1 choices
+    beta_2: [0,10] - inverse temperature for stage 2 choices
+    w: [0,1] - model-based weight
+    lambda_: [0,1] - eligibility trace
+    pers: [-5,5] - perseveration bonus for previous stage 1 choice
+    decay: [0,1] - decay rate for unchosen Q-values towards 0.5
+    """
+    alpha_pos, alpha_neg, beta_1, beta_2, w, lambda_, pers, decay = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    prev_action_1 = -1
+
+    for trial in range(n_trials):
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_bonus = np.zeros(2)
+        if prev_action_1 != -1:
+            pers_bonus[prev_action_1] = pers
+            
+        logits_1 = beta_1 * q_net + pers_bonus
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        logits_2 = beta_2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Stage 1 MF update
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        alpha_1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[action_1[trial]] += alpha_1 * delta_stage1
+        
+        # Stage 2 update
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        alpha_2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[state_idx, action_2[trial]] += alpha_2 * delta_stage2
+        
+        # Eligibility trace update
+        q_stage1_mf[action_1[trial]] += alpha_2 * lambda_ * delta_stage2
+
+        # Decay unchosen options towards 0.5
+        unchosen_1 = 1 - action_1[trial]
+        q_stage1_mf[unchosen_1] = (1 - decay) * q_stage1_mf[unchosen_1] + decay * 0.5
+        
+        for s in range(2):
+            for a in range(2):
+                if not (s == state_idx and a == action_2[trial]):
+                    q_stage2_mf[s, a] = (1 - decay) * q_stage2_mf[s, a] + decay * 0.5
+        
+        prev_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

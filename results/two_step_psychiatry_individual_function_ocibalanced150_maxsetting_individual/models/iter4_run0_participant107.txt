@@ -1,0 +1,241 @@
+Here are 3 new cognitive models that build on the success of asymmetric learning rates (positive/negative RPEs) while introducing new mechanisms to explain the participant's specific behavioral patterns. 
+
+A notable pattern in the participant's data is their heavy preference for spaceship 1 during the first 110 trials, which later occasionally shifts to spaceship 0. The proposed models attempt to capture this through dynamic transition learning, long-term choice traces, and inherent action biases.
+
+### Model 1: Asymmetric Learning + Learned Transition Matrix
+This model hypothesizes that the participant does not assume a fixed transition probability (0.7/0.3) but instead learns the transition matrix over time, updating their beliefs about which spaceship leads to which planet.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Asymmetric learning rates (positive/negative RPE) with a learned transition matrix.
+    The participant updates their beliefs about which spaceship leads to which planet.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    pi: [-5, 5] - Choice stickiness for stage 1.
+    alpha_trans: [0, 1] - Learning rate for the transition matrix.
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lam, pi, alpha_trans = model_parameters
+    n_trials = len(action_1)
+    
+    # Initialize transition matrix as uninformative prior
+    transition_matrix = np.array([[0.5, 0.5], [0.5, 0.5]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+        
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        logits1 = beta1 * q_net_stage1 + pi * stickiness
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        logits2 = beta2 * q_stage2_mf[s]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Update transition matrix probabilities
+        transition_matrix[a1, s] += alpha_trans * (1.0 - transition_matrix[a1, s])
+        transition_matrix[a1, 1 - s] += alpha_trans * (0.0 - transition_matrix[a1, 1 - s])
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[a1] += alpha1 * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha2 * delta_stage2
+
+        q_stage1_mf[a1] += alpha2 * lam * delta_stage2
+        
+        last_action_1 = a1
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Learning + Continuous Choice Trace
+Rather than just looking at the single last choice (simple stickiness), this model maintains a continuous decaying trace of past choices. This helps explain long stretches of sticking to the same spaceship (like trials 1-110).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Asymmetric learning rates with a continuous choice trace for stage 1.
+    Maintains a decaying trace of past choices which can capture longer-term perseveration.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    pi: [-5, 5] - Weight of the continuous choice trace.
+    alpha_c: [0, 1] - Update rate (decay) for the choice trace.
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lam, pi, alpha_c = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    choice_trace = np.zeros(2)
+    
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+        
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        logits1 = beta1 * q_net_stage1 + pi * choice_trace
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        logits2 = beta2 * q_stage2_mf[s]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        # Update continuous choice trace
+        choice_trace[a1] += alpha_c * (1.0 - choice_trace[a1])
+        choice_trace[1 - a1] += alpha_c * (0.0 - choice_trace[1 - a1])
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[a1] += alpha1 * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha2 * delta_stage2
+
+        q_stage1_mf[a1] += alpha2 * lam * delta_stage2
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Learning + Action 1 Baseline Bias
+Since the participant overwhelmingly chose spaceship 1 (action index 1) for a vast majority of the task, this model isolates that behavior by evaluating whether they have a constant baseline preference (bias) for spaceship 1, independent of recent choices or values.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Asymmetric learning rates with a constant bias for spaceship 1.
+    Captures a baseline preference for action 1 independent of Q-values 
+    or recent choice stickiness.
+    
+    Parameters:
+    alpha_pos: [0, 1] - Learning rate for positive prediction errors.
+    alpha_neg: [0, 1] - Learning rate for negative prediction errors.
+    beta1: [0, 10] - Inverse temperature for stage 1.
+    beta2: [0, 10] - Inverse temperature for stage 2.
+    w: [0, 1] - Model-based weight.
+    lam: [0, 1] - Eligibility trace.
+    pi: [-5, 5] - Choice stickiness for stage 1.
+    bias: [-5, 5] - Constant bias towards action 1 (spaceship 1).
+    """
+    alpha_pos, alpha_neg, beta1, beta2, w, lam, pi, bias = model_parameters
+    n_trials = len(action_1)
+    
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+    
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        s = state[trial]
+        a2 = action_2[trial]
+        r = reward[trial]
+        
+        if a1 == -1 or s == -1 or a2 == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net_stage1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        stickiness = np.zeros(2)
+        if last_action_1 != -1:
+            stickiness[last_action_1] = 1.0
+            
+        action_bias = np.zeros(2)
+        action_bias[1] = bias  # Static bias specifically for action 1
+        
+        logits1 = beta1 * q_net_stage1 + pi * stickiness + action_bias
+        exp_q1 = np.exp(logits1 - np.max(logits1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[a1]
+
+        logits2 = beta2 * q_stage2_mf[s]
+        exp_q2 = np.exp(logits2 - np.max(logits2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[a2]
+
+        delta_stage1 = q_stage2_mf[s, a2] - q_stage1_mf[a1]
+        alpha1 = alpha_pos if delta_stage1 > 0 else alpha_neg
+        q_stage1_mf[a1] += alpha1 * delta_stage1
+        
+        delta_stage2 = r - q_stage2_mf[s, a2]
+        alpha2 = alpha_pos if delta_stage2 > 0 else alpha_neg
+        q_stage2_mf[s, a2] += alpha2 * delta_stage2
+
+        q_stage1_mf[a1] += alpha2 * lam * delta_stage2
+        
+        last_action_1 = a1
+        
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

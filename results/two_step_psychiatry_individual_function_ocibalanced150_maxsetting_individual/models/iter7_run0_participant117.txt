@@ -1,0 +1,257 @@
+Here are 3 new cognitive models, proposed as Python functions, that explore different theoretical mechanisms for how the participant might be making their decisions. 
+
+### Model 1: Dynamic Model-Based Weight based on Previous Transition
+**Rationale:** The degree to which a participant relies on the model-based system (goal-directed planning) versus the model-free system (habitual responding) might not be static. Experiencing a rare transition (e.g., Spaceship A going to Planet Y) could act as a "surprise" signal that either disrupts model-based planning on the next trial or, conversely, recruits more cognitive resources to process the environment. We can capture this by allowing the model-based weight $w$ to depend on whether the previous transition was common or rare.
+
+```python
+import numpy as np
+
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Dynamic Model-Based Weight based on Previous Transition.
+    The weight given to the model-based system (w) depends on whether the 
+    transition on the previous trial was common or rare. A rare transition 
+    might disrupt model-based planning or engage it more heavily.
+    
+    Bounds:
+    alpha: [0,1] - Learning rate
+    beta1: [0,10] - Inverse temperature for Stage 1
+    beta2: [0,10] - Inverse temperature for Stage 2
+    lam: [0,1] - Eligibility trace
+    w_common: [0,1] - MB weight if previous transition was common
+    w_rare: [0,1] - MB weight if previous transition was rare
+    p1: [-5,5] - Stage 1 stickiness
+    p2: [-5,5] - Stage 2 stickiness
+    """
+    alpha, beta1, beta2, lam, w_common, w_rare, p1, p2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    prev_a2 = -1
+    prev_trans_common = True # default for trial 0
+
+    for trial in range(n_trials):
+        state_idx = state[trial]
+        
+        # Determine w for current trial
+        w = w_common if prev_trans_common else w_rare
+        
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if prev_a1 != -1:
+            rep1[prev_a1] = 1
+            
+        logits_1 = beta1 * q_net + p1 * rep1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # Stage 2 policy
+        rep2 = np.zeros(2)
+        if prev_a2 != -1:
+            rep2[prev_a2] = 1
+            
+        logits_2 = beta2 * q_stage2_mf[state_idx] + p2 * rep2
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Update previous variables
+        prev_a1 = action_1[trial]
+        prev_a2 = action_2[trial]
+        # Action 0 -> State 0 and Action 1 -> State 1 are common transitions
+        prev_trans_common = (action_1[trial] == state_idx)
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: State-Dependent Stage 2 Stickiness
+**Rationale:** Participants often exhibit perseveration (stickiness) in their choices, which is usually modeled globally. However, for Stage 2, a participant's tendency to repeat an action might heavily depend on whether they land on the *same planet* as the previous trial. If they land on a different planet, they might have a different default motor bias. This model splits Stage 2 stickiness into two parameters based on state continuity.
+
+```python
+import numpy as np
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: State-Dependent Stage 2 Stickiness.
+    Participants might show stickiness to their Stage 2 choice only if they 
+    land on the same planet as the previous trial (p2_same). If they land on 
+    a different planet, their tendency to repeat the same motor response 
+    might differ (p2_diff).
+    
+    Bounds:
+    alpha: [0,1] - Learning rate
+    beta1: [0,10] - Inverse temperature for Stage 1
+    beta2: [0,10] - Inverse temperature for Stage 2
+    lam: [0,1] - Eligibility trace
+    w: [0,1] - Model-based weight
+    p1: [-5,5] - Stage 1 stickiness
+    p2_same: [-5,5] - Stage 2 stickiness if current state == previous state
+    p2_diff: [-5,5] - Stage 2 stickiness if current state != previous state
+    """
+    alpha, beta1, beta2, lam, w, p1, p2_same, p2_diff = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    prev_a2 = -1
+    prev_s = -1
+
+    for trial in range(n_trials):
+        state_idx = state[trial]
+        
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if prev_a1 != -1:
+            rep1[prev_a1] = 1
+            
+        logits_1 = beta1 * q_net + p1 * rep1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # Stage 2 policy
+        rep2 = np.zeros(2)
+        if prev_a2 != -1:
+            if state_idx == prev_s:
+                rep2[prev_a2] = p2_same
+            else:
+                rep2[prev_a2] = p2_diff
+            
+        logits_2 = beta2 * q_stage2_mf[state_idx] + rep2
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Update previous variables
+        prev_a1 = action_1[trial]
+        prev_a2 = action_2[trial]
+        prev_s = state_idx
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Reward-Dependent Model-Based Weight
+**Rationale:** Similar to Model 1's approach to modulating the reliance on the model-based system, here we hypothesize that the weight $w$ fluctuates based on the *reward* received on the previous trial. A rewarded trial might encourage a participant to rely more on computationally cheap model-free habits (since things are going well), whereas an unrewarded trial might trigger more effortful model-based planning to find a better strategy. 
+
+```python
+import numpy as np
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Reward-Dependent Model-Based Weight.
+    The reliance on the model-based system (w) depends on whether the 
+    previous trial was rewarded (w_win) or unrewarded (w_lose).
+    
+    Bounds:
+    alpha: [0,1] - Learning rate
+    beta1: [0,10] - Inverse temperature for Stage 1
+    beta2: [0,10] - Inverse temperature for Stage 2
+    lam: [0,1] - Eligibility trace
+    w_win: [0,1] - MB weight if previous trial was rewarded
+    w_lose: [0,1] - MB weight if previous trial was unrewarded
+    p1: [-5,5] - Stage 1 stickiness
+    p2: [-5,5] - Stage 2 stickiness
+    """
+    alpha, beta1, beta2, lam, w_win, w_lose, p1, p2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    prev_a1 = -1
+    prev_a2 = -1
+    prev_reward = 1 # default for trial 0
+
+    for trial in range(n_trials):
+        state_idx = state[trial]
+        
+        # Determine w for current trial
+        w = w_win if prev_reward == 1 else w_lose
+        
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if prev_a1 != -1:
+            rep1[prev_a1] = 1
+            
+        logits_1 = beta1 * q_net + p1 * rep1
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        # Stage 2 policy
+        rep2 = np.zeros(2)
+        if prev_a2 != -1:
+            rep2[prev_a2] = 1
+            
+        logits_2 = beta2 * q_stage2_mf[state_idx] + p2 * rep2
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+        
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        # Update previous variables
+        prev_a1 = action_1[trial]
+        prev_a2 = action_2[trial]
+        prev_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

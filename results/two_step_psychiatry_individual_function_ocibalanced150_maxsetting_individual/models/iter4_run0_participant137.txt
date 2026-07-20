@@ -1,0 +1,219 @@
+Here are 3 new cognitive models that introduce novel mechanisms to explain the participant's choices, avoiding the parameter combinations you have already tested.
+
+### Model 1: Dual-Beta (Independent MB/MF Scaling)
+Instead of a single inverse temperature (`beta1`) and a weighting parameter (`w`) that forces a trade-off between model-based (MB) and model-free (MF) values, this model uses independent inverse temperatures for each (`beta_mb` and `beta_mf`). This is a common reparameterization (e.g., Gillan et al., 2016) that allows the absolute scaling of MB and MF systems to vary independently.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Dual-beta Model-Based and Model-Free hybrid model.
+    Uses separate inverse temperatures for MB and MF values instead of a single beta and a weighting parameter w.
+    
+    Bounds:
+    alpha: [0, 1] - learning rate
+    beta_mb: [0, 10] - model-based inverse temperature
+    beta_mf: [0, 10] - model-free inverse temperature
+    beta2: [0, 10] - stage 2 inverse temperature
+    lam: [0, 1] - eligibility trace
+    p: [-5, 5] - choice perseveration bonus
+    """
+    alpha, beta_mb, beta_mf, beta2, lam, p = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        # Handle missing trials
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # Stage 1 Choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1.0
+            
+        logits_1 = beta_mb * q_stage1_mb + beta_mf * q_stage1_mf + p * rep
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Stage 2 Choice
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Unrewarded Penalty (Loss Aversion)
+This model introduces an `omega` parameter to handle unrewarded outcomes (0 coins). Instead of treating them as a neutral 0, the model treats them as a negative penalty (`-omega`). This accommodates participants who strongly down-weight actions following a failure to get gold, mimicking a form of loss aversion.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Daw et al. (2011) model with unrewarded penalty (omega).
+    When reward is 0, it is treated as a negative outcome (-omega) rather than 0.
+    
+    Bounds:
+    alpha: [0, 1] - learning rate
+    beta1: [0, 10] - stage 1 inverse temperature
+    beta2: [0, 10] - stage 2 inverse temperature
+    lam: [0, 1] - eligibility trace
+    w: [0, 1] - model-based weight
+    p: [-5, 5] - choice perseveration bonus
+    omega: [0, 5] - penalty for receiving 0 reward
+    """
+    alpha, beta1, beta2, lam, w, p, omega = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # Stage 1 Choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1.0
+            
+        logits_1 = beta1 * q_net + p * rep
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Stage 2 Choice
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        # Apply omega penalty for unrewarded trials
+        eff_reward = 1.0 if reward[trial] == 1 else -omega
+        
+        delta_stage2 = eff_reward - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Subjective Transition Probability
+Standard models assume participants perfectly integrate the `0.7/0.3` transition probability. This model adds `pi_trans`, representing the participant's subjective belief in the transition structure. A participant who weakly differentiates common and rare transitions will have a `pi_trans` closer to `0.5`, altering their model-based value computations.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Daw et al. (2011) model with subjective transition probability.
+    The participant's belief in the common transition probability is parameterized by pi_trans.
+    
+    Bounds:
+    alpha: [0, 1] - learning rate
+    beta1: [0, 10] - stage 1 inverse temperature
+    beta2: [0, 10] - stage 2 inverse temperature
+    lam: [0, 1] - eligibility trace
+    w: [0, 1] - model-based weight
+    p: [-5, 5] - choice perseveration bonus
+    pi_trans: [0.0, 1.0] - subjective probability of common transition (typically > 0.5)
+    """
+    alpha, beta1, beta2, lam, w, p, pi_trans = model_parameters
+    n_trials = len(action_1)
+  
+    # Subjective transition matrix based on pi_trans
+    transition_matrix = np.array([[pi_trans, 1.0 - pi_trans], 
+                                  [1.0 - pi_trans, pi_trans]])
+    
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or state[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # Stage 1 Choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1.0
+            
+        logits_1 = beta1 * q_net + p * rep
+        exp_q1 = np.exp(logits_1 - np.max(logits_1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Stage 2 Choice
+        logits_2 = beta2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(logits_2 - np.max(logits_2))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+  
+        # Updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+        
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

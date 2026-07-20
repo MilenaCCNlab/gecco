@@ -1,0 +1,207 @@
+Here are 3 new cognitive models that build upon the insights from the best-performing models so far. Given that adding choice perseveration (`pers`) improved the model significantly, all three models incorporate it but explore new configurations to capture other potential aspects of the participant's decision-making process.
+
+### Model 1: Separate Stage Temperatures & Perseveration
+This model tests whether the participant exhibits different levels of exploration or stochasticity at the two stages of the task by using separate inverse temperatures (`beta1` and `beta2`) alongside the perseveration term.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Choice Perseveration and Separate Stage Temperatures.
+    
+    Parameters:
+    learning_rate: learning rate for updating Q-values [0,1]
+    beta1: inverse temperature for stage 1 softmax choice [0,10]
+    beta2: inverse temperature for stage 2 softmax choice [0,10]
+    w: weight for model-based vs model-free control [0,1]
+    pers: perseveration bonus for repeating the previous stage 1 choice [-5, 5]
+    """
+    learning_rate, beta1, beta2, w, pers = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        # Skip missed trials
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_term = np.zeros(2)
+        if last_action_1 != -1:
+            pers_term[last_action_1] = pers
+            
+        q1_vals = beta1 * q_stage1_net + pers_term
+        exp_q1 = np.exp(q1_vals - np.max(q1_vals))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Stage 2 policy
+        q2_vals = beta2 * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(q2_vals - np.max(q2_vals))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Value updates
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Perseveration & Eligibility Trace (Lambda)
+This model checks if the participant updates their stage 1 model-free values directly from the stage 2 outcomes using an eligibility trace (`lam`), while still accounting for choice stickiness (`pers`).
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Choice Perseveration and Eligibility Trace.
+    
+    Parameters:
+    learning_rate: learning rate for updating Q-values [0,1]
+    beta: inverse temperature for softmax choice [0,10]
+    w: weight for model-based vs model-free control [0,1]
+    pers: perseveration bonus for repeating the previous stage 1 choice [-5, 5]
+    lam: eligibility trace parameter for updating stage 1 with stage 2 prediction error [0,1]
+    """
+    learning_rate, beta, w, pers, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_term = np.zeros(2)
+        if last_action_1 != -1:
+            pers_term[last_action_1] = pers
+            
+        q1_vals = beta * q_stage1_net + pers_term
+        exp_q1 = np.exp(q1_vals - np.max(q1_vals))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_vals = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(q2_vals - np.max(q2_vals))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+        
+        # Eligibility trace update for stage 1 MF value
+        q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Asymmetric Learning Rates & Perseveration
+This model investigates whether the participant learns differently from positive prediction errors (better-than-expected outcomes) versus negative prediction errors (worse-than-expected outcomes).
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Hybrid Model with Asymmetric Learning Rates and Choice Perseveration.
+    
+    Parameters:
+    learning_rate_pos: learning rate for positive prediction errors [0,1]
+    learning_rate_neg: learning rate for negative prediction errors [0,1]
+    beta: inverse temperature for softmax choice [0,10]
+    w: weight for model-based vs model-free control [0,1]
+    pers: perseveration bonus for repeating the previous stage 1 choice [-5, 5]
+    """
+    learning_rate_pos, learning_rate_neg, beta, w, pers = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        if action_1[trial] == -1 or action_2[trial] == -1:
+            p_choice_1[trial] = 1.0
+            p_choice_2[trial] = 1.0
+            continue
+
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers_term = np.zeros(2)
+        if last_action_1 != -1:
+            pers_term[last_action_1] = pers
+            
+        q1_vals = beta * q_stage1_net + pers_term
+        exp_q1 = np.exp(q1_vals - np.max(q1_vals))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        q2_vals = beta * q_stage2_mf[state_idx]
+        exp_q2 = np.exp(q2_vals - np.max(q2_vals))
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Asymmetric learning update for stage 1
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        lr1 = learning_rate_pos if delta_stage1 >= 0 else learning_rate_neg
+        q_stage1_mf[action_1[trial]] += lr1 * delta_stage1
+
+        # Asymmetric learning update for stage 2
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        lr2 = learning_rate_pos if delta_stage2 >= 0 else learning_rate_neg
+        q_stage2_mf[state_idx, action_2[trial]] += lr2 * delta_stage2
+        
+        last_action_1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

@@ -1,0 +1,235 @@
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixed MF-MB RL model with value decay, transition-dependent eligibility trace, 
+    and stickiness at both stages, using a shared beta parameter to keep the 
+    total parameter count to 8.
+    
+    Bounds:
+    alpha: [0,1]
+    decay: [0,1]
+    beta: [0,10]
+    lam_common: [0,1]
+    lam_rare: [0,1]
+    w: [0,1]
+    st1: [-5,5]
+    st2: [-5,5]
+    """
+    import numpy as np
+    alpha, decay, beta, lam_common, lam_rare, w, st1, st2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action1 = -1
+    last_action2 = -1
+
+    for trial in range(n_trials):
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep1 = np.zeros(2)
+        if last_action1 != -1:
+            rep1[last_action1] = 1
+            
+        logits1 = beta * q_net + st1 * rep1
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+        
+        # Stage 2 policy
+        rep2 = np.zeros(2)
+        if last_action2 != -1:
+            rep2[last_action2] = 1
+
+        logits2 = beta * q_stage2_mf[state_idx] + st2 * rep2
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Value decay
+        q_stage1_mf = q_stage1_mf * (1 - decay) + 0.5 * decay
+        q_stage2_mf = q_stage2_mf * (1 - decay) + 0.5 * decay
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Eligibility trace update for Stage 1
+        is_common = transition_matrix[action_1[trial], state_idx] > 0.5
+        lam = lam_common if is_common else lam_rare
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action1 = action_1[trial]
+        last_action2 = action_2[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixed MF-MB RL model with transition-dependent eligibility trace, and separate 
+    stickiness parameters for previously rewarded (st_win) and unrewarded (st_lose) trials.
+    
+    Bounds:
+    alpha: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    lam_common: [0,1]
+    lam_rare: [0,1]
+    w: [0,1]
+    st_win: [-5,5]
+    st_lose: [-5,5]
+    """
+    import numpy as np
+    alpha, beta1, beta2, lam_common, lam_rare, w, st_win, st_lose = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action = -1
+    last_reward = 0
+
+    for trial in range(n_trials):
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1
+            
+        st = st_win if last_reward == 1 else st_lose
+        
+        logits1 = beta1 * q_net + st * rep
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Stage 2 policy
+        logits2 = beta2 * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Eligibility trace update for Stage 1
+        is_common = transition_matrix[action_1[trial], state_idx] > 0.5
+        lam = lam_common if is_common else lam_rare
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Mixed MF-MB RL model with transition-dependent eligibility trace, and separate 
+    model-based weights for previously rewarded (w_pos) and unrewarded (w_neg) trials.
+    
+    Bounds:
+    alpha: [0,1]
+    beta1: [0,10]
+    beta2: [0,10]
+    lam_common: [0,1]
+    lam_rare: [0,1]
+    w_pos: [0,1]
+    w_neg: [0,1]
+    stickiness: [-5,5]
+    """
+    import numpy as np
+    alpha, beta1, beta2, lam_common, lam_rare, w_pos, w_neg, stickiness = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+
+    q_stage1_mf = np.full(2, 0.5)
+    q_stage2_mf = np.full((2, 2), 0.5)
+    
+    last_action = -1
+    last_reward = 0
+
+    for trial in range(n_trials):
+        # Stage 1 policy
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        w = w_pos if last_reward == 1 else w_neg
+        q_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        rep = np.zeros(2)
+        if last_action != -1:
+            rep[last_action] = 1
+            
+        logits1 = beta1 * q_net + stickiness * rep
+        logits1 -= np.max(logits1)
+        exp_q1 = np.exp(logits1)
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        
+        state_idx = state[trial]
+
+        # Stage 2 policy
+        logits2 = beta2 * q_stage2_mf[state_idx]
+        logits2 -= np.max(logits2)
+        exp_q2 = np.exp(logits2)
+        probs_2 = exp_q2 / np.sum(exp_q2)
+        p_choice_2[trial] = probs_2[action_2[trial]]
+
+        # Action value updating
+        delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+        q_stage1_mf[action_1[trial]] += alpha * delta_stage1
+
+        delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+        q_stage2_mf[state_idx, action_2[trial]] += alpha * delta_stage2
+
+        # Eligibility trace update for Stage 1
+        is_common = transition_matrix[action_1[trial], state_idx] > 0.5
+        lam = lam_common if is_common else lam_rare
+        q_stage1_mf[action_1[trial]] += alpha * lam * delta_stage2
+        
+        last_action = action_1[trial]
+        last_reward = reward[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

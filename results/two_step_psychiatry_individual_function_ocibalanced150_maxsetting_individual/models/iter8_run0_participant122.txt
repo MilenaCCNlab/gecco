@@ -1,0 +1,232 @@
+Here are 3 new cognitive models, each implementing a distinct mechanism to explain the participant's behavior.
+
+### Model 1: Dual Perseveration Model
+This model extends the standard hybrid model by including a perseveration bonus not just for the first-stage choice, but also for the second-stage choice. Often, participants exhibit a tendency to repeat their alien choice if they return to the same planet, independent of the reward. We capture this with a state-specific stage 2 perseveration parameter `p2`.
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Dual Perseveration Model
+    Extends the standard hybrid model by adding a perseveration bonus for repeating 
+    the previous stage 2 action in the same state.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for updating Q-values
+    beta: [0,10] - inverse temperature for choice stochasticity
+    w: [0,1] - weight on model-based vs model-free strategy
+    p1: [-5,5] - perseveration bonus for repeating the previous stage 1 action
+    p2: [-5,5] - perseveration bonus for repeating the previous stage 2 action in the same state
+    lam: [0,1] - eligibility trace parameter linking stage 2 reward to stage 1
+    """
+    learning_rate, beta, w, p1, p2, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_a1 = -1
+    last_a2 = np.array([-1, -1]) # Tracks the last action taken in planet 0 and planet 1
+
+    for trial in range(n_trials):
+
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        if last_a1 != -1:
+            q_net1[last_a1] += p1
+            
+        max_q1 = np.max(q_net1)
+        exp_q1 = np.exp(beta * (q_net1 - max_q1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Policy for the second choice
+        if action_2[trial] != -1:
+            q_net2 = q_stage2_mf[state_idx].copy()
+            if last_a2[state_idx] != -1:
+                q_net2[last_a2[state_idx]] += p2
+                
+            max_q2 = np.max(q_net2)
+            exp_q2 = np.exp(beta * (q_net2 - max_q2))
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[action_2[trial]]
+        else:
+            p_choice_2[trial] = 1.0
+  
+        # Action value updating
+        if action_2[trial] != -1:
+            delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+            q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+            
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+            q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+            
+            q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+            
+            last_a2[state_idx] = action_2[trial]
+            
+        last_a1 = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Initial Q-Value Bias Model
+This model introduces `q_init` as a free parameter, which sets the starting values of the Q-tables. An initial value higher than the average reward acts as an optimistic initialization, driving early exploration (since unchosen options remain high while chosen ones drop when unrewarded). A low value drives conservative behavior.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Initial Q-Value Bias Model
+    Includes a parameter for the initial Q-values (q_init). This allows the model to capture 
+    optimistic or pessimistic initialization, which strongly dictates early exploration behavior.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for updating Q-values
+    beta: [0,10] - inverse temperature for choice stochasticity
+    w: [0,1] - weight on model-based vs model-free strategy
+    p: [-5,5] - perseveration bonus for repeating the previous stage 1 action
+    lam: [0,1] - eligibility trace parameter
+    q_init: [0,1] - initial value for all Q-tables
+    """
+    learning_rate, beta, w, p, lam, q_init = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    # Initialize Q-values to q_init instead of 0
+    q_stage1_mf = np.full(2, q_init, dtype=float)
+    q_stage2_mf = np.full((2, 2), q_init, dtype=float)
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+
+        # Policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        
+        q_net1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        if last_action != -1:
+            q_net1[last_action] += p
+            
+        max_q1 = np.max(q_net1)
+        exp_q1 = np.exp(beta * (q_net1 - max_q1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Policy for the second choice
+        if action_2[trial] != -1:
+            max_q2 = np.max(q_stage2_mf[state_idx])
+            exp_q2 = np.exp(beta * (q_stage2_mf[state_idx] - max_q2))
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[action_2[trial]]
+        else:
+            p_choice_2[trial] = 1.0
+  
+        # Action value updating
+        if action_2[trial] != -1:
+            delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+            q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+            
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+            q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+            
+            q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+            
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Expected Value (Soft-max) Model-Based Evaluation
+Standard models assume the model-based system considers only the `max` value of the second stage. This model relaxes that assumption by computing the *Expected Value* of the second stage under the agent's own stochastic (soft-max) policy. It uses separate inverse temperatures for stage 1 and stage 2 to precisely calculate this expectation.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Expected Value Model-Based System
+    Instead of assuming a perfectly greedy future choice (using max Q), the model-based 
+    system computes the expected value of the stage 2 state under the soft-max policy.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for updating Q-values
+    beta_1: [0,10] - inverse temperature for stage 1 choices
+    beta_2: [0,10] - inverse temperature for stage 2 choices (and for MB expected value calculation)
+    w: [0,1] - weight on model-based vs model-free strategy
+    p: [-5,5] - perseveration bonus for repeating the previous stage 1 action
+    lam: [0,1] - eligibility trace parameter
+    """
+    learning_rate, beta_1, beta_2, w, p, lam = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+    
+    last_action = -1
+
+    for trial in range(n_trials):
+
+        # Compute Expected Value of stage 2 states under soft-max policy
+        v_stage2 = np.zeros(2)
+        for s in range(2):
+            max_q2_s = np.max(q_stage2_mf[s])
+            exp_q2_s = np.exp(beta_2 * (q_stage2_mf[s] - max_q2_s))
+            pi2_s = exp_q2_s / np.sum(exp_q2_s)
+            v_stage2[s] = np.sum(pi2_s * q_stage2_mf[s])
+            
+        q_stage1_mb = transition_matrix @ v_stage2
+        
+        # Policy for the first choice
+        q_net1 = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        if last_action != -1:
+            q_net1[last_action] += p
+            
+        max_q1 = np.max(q_net1)
+        exp_q1 = np.exp(beta_1 * (q_net1 - max_q1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        p_choice_1[trial] = probs_1[action_1[trial]]
+        state_idx = state[trial]
+
+        # Policy for the second choice
+        if action_2[trial] != -1:
+            max_q2 = np.max(q_stage2_mf[state_idx])
+            exp_q2 = np.exp(beta_2 * (q_stage2_mf[state_idx] - max_q2))
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[action_2[trial]]
+        else:
+            p_choice_2[trial] = 1.0
+  
+        # Action value updating
+        if action_2[trial] != -1:
+            delta_stage1 = q_stage2_mf[state_idx, action_2[trial]] - q_stage1_mf[action_1[trial]]
+            q_stage1_mf[action_1[trial]] += learning_rate * delta_stage1
+            
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, action_2[trial]]
+            q_stage2_mf[state_idx, action_2[trial]] += learning_rate * delta_stage2
+            
+            q_stage1_mf[action_1[trial]] += learning_rate * lam * delta_stage2
+            
+        last_action = action_1[trial]
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```

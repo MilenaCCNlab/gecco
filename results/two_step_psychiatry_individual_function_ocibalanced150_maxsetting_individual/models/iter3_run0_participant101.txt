@@ -1,0 +1,259 @@
+Here are 3 new cognitive models based on the participant's data and the previously tried models. 
+
+### Model 1: Dual Learning Rates with Unchosen Decay
+This model hypothesizes that the participant might update their expectations at different speeds for the first and second stages of the task. Additionally, to capture forgetting or regression to the mean over time, Q-values for unchosen actions decay toward an uninformative prior (0.5).
+
+```python
+def cognitive_model1(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 1: Dual Learning Rates with Unchosen Decay
+    Features separate learning rates for Stage 1 and Stage 2 updates, along with a 
+    decay parameter that pulls unchosen Q-values towards 0.5.
+    
+    Parameters:
+    lr_stage1: [0,1] - learning rate for stage 1 Q-values
+    lr_stage2: [0,1] - learning rate for stage 2 Q-values
+    decay: [0,1] - decay rate for unchosen Q-values towards 0.5
+    beta1: [0,10] - inverse temperature for stage 1 choices
+    beta2: [0,10] - inverse temperature for stage 2 choices
+    w: [0,1] - mixing weight for model-based vs model-free control
+    lam: [0,1] - eligibility trace parameter
+    p: [-2,2] - choice perseverance bonus for stage 1
+    """
+    lr_stage1, lr_stage2, decay, beta1, beta2, w, lam, p = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2) + 0.5
+    q_stage2_mf = np.zeros((2, 2)) + 0.5
+
+    last_action_1 = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        state_idx = state[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers = np.zeros(2)
+        if last_action_1 != -1:
+            pers[last_action_1] = p
+            
+        exp_q1 = np.exp(beta1 * (q_stage1_net + pers))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        if a1 != -1:
+            p_choice_1[trial] = probs_1[a1]
+        else:
+            p_choice_1[trial] = 1.0
+
+        # policy for the second choice
+        if state_idx != -1 and a2 != -1:
+            exp_q2 = np.exp(beta2 * q_stage2_mf[state_idx])
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[a2]
+        else:
+            p_choice_2[trial] = 1.0
+  
+        if state_idx != -1 and a2 != -1 and a1 != -1:
+            delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+            
+            # Action value updating
+            unchosen_a1 = 1 - a1
+            q_stage1_mf[unchosen_a1] += decay * (0.5 - q_stage1_mf[unchosen_a1])
+            q_stage1_mf[a1] += lr_stage1 * delta_stage1 + lr_stage1 * lam * delta_stage2
+
+            for s in range(2):
+                for a in range(2):
+                    if not (s == state_idx and a == a2):
+                        q_stage2_mf[s, a] += decay * (0.5 - q_stage2_mf[s, a])
+                        
+            q_stage2_mf[state_idx, a2] += lr_stage2 * delta_stage2
+            
+        if a1 != -1:
+            last_action_1 = a1
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 2: Asymmetric Learning with Dual Perseverance
+This model explores the idea that the participant learns differently from positive and negative prediction errors (e.g., updating expectations more heavily when pleasantly surprised). Furthermore, it implements independent "stickiness" for both Stage 1 and Stage 2 decisions.
+
+```python
+def cognitive_model2(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 2: Asymmetric Learning with Dual Perseverance
+    Features different learning rates for positive and negative prediction errors,
+    as well as separate perseverance (stickiness) parameters for both Stage 1 and Stage 2 choices.
+    
+    Parameters:
+    lr_pos: [0,1] - learning rate for positive prediction errors
+    lr_neg: [0,1] - learning rate for negative prediction errors
+    beta1: [0,10] - inverse temperature for stage 1 choices
+    beta2: [0,10] - inverse temperature for stage 2 choices
+    w: [0,1] - mixing weight for model-based vs model-free control
+    lam: [0,1] - eligibility trace parameter
+    p1: [-2,2] - choice perseverance bonus for stage 1
+    p2: [-2,2] - choice perseverance bonus for stage 2
+    """
+    lr_pos, lr_neg, beta1, beta2, w, lam, p1, p2 = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    last_action_1 = -1
+    last_action_2 = -1
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        state_idx = state[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers1 = np.zeros(2)
+        if last_action_1 != -1:
+            pers1[last_action_1] = p1
+            
+        exp_q1 = np.exp(beta1 * (q_stage1_net + pers1))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        if a1 != -1:
+            p_choice_1[trial] = probs_1[a1]
+        else:
+            p_choice_1[trial] = 1.0
+
+        # policy for the second choice
+        if state_idx != -1 and a2 != -1:
+            pers2 = np.zeros(2)
+            if last_action_2 != -1:
+                pers2[last_action_2] = p2
+                
+            exp_q2 = np.exp(beta2 * (q_stage2_mf[state_idx] + pers2))
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[a2]
+        else:
+            p_choice_2[trial] = 1.0
+  
+        if state_idx != -1 and a2 != -1 and a1 != -1:
+            delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+            
+            lr1 = lr_pos if delta_stage1 >= 0 else lr_neg
+            lr2 = lr_pos if delta_stage2 >= 0 else lr_neg
+
+            # Action value updating
+            q_stage1_mf[a1] += lr1 * delta_stage1 + lr1 * lam * delta_stage2
+            q_stage2_mf[state_idx, a2] += lr2 * delta_stage2
+            
+        if a1 != -1:
+            last_action_1 = a1
+        if a2 != -1:
+            last_action_2 = a2
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
+
+### Model 3: Transition-Dependent Perseverance
+This model considers that a participant's tendency to repeat an action might be heavily influenced by whether the action resulted in a predictable (common) or unpredictable (rare) transition, altering their feeling of task control.
+
+```python
+def cognitive_model3(action_1, state, action_2, reward, model_parameters):
+    """
+    Model 3: Transition-Dependent Perseverance
+    Differentiates choice perseverance based on whether the previous trial's 
+    transition was common or rare, allowing for altered stickiness after unexpected transitions.
+    
+    Parameters:
+    learning_rate: [0,1] - learning rate for Q-values updates
+    beta1: [0,10] - inverse temperature for stage 1 choices
+    beta2: [0,10] - inverse temperature for stage 2 choices
+    w: [0,1] - mixing weight for model-based vs model-free control
+    lam: [0,1] - eligibility trace parameter
+    p_common: [-2,2] - perseverance bonus after a common transition
+    p_rare: [-2,2] - perseverance bonus after a rare transition
+    """
+    learning_rate, beta1, beta2, w, lam, p_common, p_rare = model_parameters
+    n_trials = len(action_1)
+  
+    transition_matrix = np.array([[0.7, 0.3], [0.3, 0.7]])
+    p_choice_1 = np.zeros(n_trials)
+    p_choice_2 = np.zeros(n_trials)
+    
+    q_stage1_mf = np.zeros(2)
+    q_stage2_mf = np.zeros((2, 2))
+
+    last_action_1 = -1
+    last_trans_type = -1 # 1 for common transition, 0 for rare transition
+
+    for trial in range(n_trials):
+        a1 = action_1[trial]
+        state_idx = state[trial]
+        a2 = action_2[trial]
+
+        # policy for the first choice
+        max_q_stage2 = np.max(q_stage2_mf, axis=1)
+        q_stage1_mb = transition_matrix @ max_q_stage2
+        q_stage1_net = w * q_stage1_mb + (1 - w) * q_stage1_mf
+        
+        pers = np.zeros(2)
+        if last_action_1 != -1 and last_trans_type != -1:
+            p = p_common if last_trans_type == 1 else p_rare
+            pers[last_action_1] = p
+            
+        exp_q1 = np.exp(beta1 * (q_stage1_net + pers))
+        probs_1 = exp_q1 / np.sum(exp_q1)
+        
+        if a1 != -1:
+            p_choice_1[trial] = probs_1[a1]
+        else:
+            p_choice_1[trial] = 1.0
+
+        # policy for the second choice
+        if state_idx != -1 and a2 != -1:
+            exp_q2 = np.exp(beta2 * q_stage2_mf[state_idx])
+            probs_2 = exp_q2 / np.sum(exp_q2)
+            p_choice_2[trial] = probs_2[a2]
+        else:
+            p_choice_2[trial] = 1.0
+  
+        if state_idx != -1 and a2 != -1 and a1 != -1:
+            delta_stage1 = q_stage2_mf[state_idx, a2] - q_stage1_mf[a1]
+            delta_stage2 = reward[trial] - q_stage2_mf[state_idx, a2]
+            
+            # Action value updating
+            q_stage1_mf[a1] += learning_rate * delta_stage1 + learning_rate * lam * delta_stage2
+            q_stage2_mf[state_idx, a2] += learning_rate * delta_stage2
+            
+        if a1 != -1 and state_idx != -1:
+            last_action_1 = a1
+            # Check if the transition was common
+            if (a1 == 0 and state_idx == 0) or (a1 == 1 and state_idx == 1):
+                last_trans_type = 1
+            else:
+                last_trans_type = 0
+
+    eps = 1e-10
+    log_loss = -(np.sum(np.log(p_choice_1 + eps)) + np.sum(np.log(p_choice_2 + eps)))
+    return log_loss
+```
